@@ -6,7 +6,7 @@ envelopes, optionally compare them with a contaminant population (SNIa populatio
 
 ## Pipeline at a glance
 
-1. get_opsim_baseline.py` exports Rubin OpSim visits and the dust metadata for
+1. `get_opsim_baseline.py` exports Rubin OpSim visits and the dust metadata for
    sampled fields. It also writes the`m5_depth_quantiles_by_band.csv` table once in the OpSim export directory.
 2. `generate_kne_lightcurves.py` generates KNe populations with FIESTA's
    `Bu2026_MLP` surrogate and records the absolute OpSim source in
