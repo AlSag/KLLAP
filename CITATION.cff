@@ -8,13 +8,13 @@ authors:
 version: 0.1.0
 date-released: 2026-09-30
 license: MIT
-repository-code: "https://github.com/REPLACE_WITH_OWNER/REPLACE_WITH_REPOSITORY"
+repository-code: "https://github.com/AlSag/KLLAP.git"
 preferred-citation:
   type: software
-  title: "KNe–LSST colour-envelope and Galactic-latitude analysis pipeline"
+  title: "KNe Lightcurve LSST Analysis Pipeline"
   authors:
-    - family-names: REPLACE_WITH_FAMILY_NAME
-      given-names: REPLACE_WITH_GIVEN_NAME
+    - family-names: Jacquesson
+      given-names: Alex
   year: 2026
 references:
   - type: article

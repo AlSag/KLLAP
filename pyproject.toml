@@ -9,7 +9,7 @@ description = "Kilonova colour-envelope and Galactic-latitude analysis for Rubin
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 license = "MIT"
-authors = [{name = "REPLACE_WITH_AUTHOR_NAME"}]
+authors = [{name = "Alex Jacquesson"}]
 dependencies = [
   "astropy==7.2.0",
   "fiestaEM==0.2.0",

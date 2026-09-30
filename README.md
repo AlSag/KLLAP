@@ -148,6 +148,4 @@ example `examples/generate_lightcurves.py`; the immutable upstream reference,
 license notice, and requested scientific citation are recorded in
 `THIRD_PARTY_NOTICES.md` and `CITATION.cff`.
 
-Before publishing, replace the author and repository placeholders in
-`CITATION.cff`, `pyproject.toml`, and `LICENSE`, then archive a release
-with a DOI if the analysis is intended to be cited.
+
