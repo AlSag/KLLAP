@@ -1,4 +1,4 @@
-# KNe–LSST analysis pipeline
+# KNe Lightcurve LSST Analysis Pipeline
 
 This repository contains the reproducible analysis path used to simulate
 kilonova (KNe) light curves in Rubin/LSST observing fields, construct colour
