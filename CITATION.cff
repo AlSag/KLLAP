@@ -1,0 +1,31 @@
+cff-version: 1.2.0
+message: "If you use this analysis pipeline, cite this repository and FIESTA."
+title: "KNe–LSST colour-envelope and Galactic-latitude analysis pipeline"
+type: software
+authors:
+  - family-names: REPLACE_WITH_FAMILY_NAME
+    given-names: REPLACE_WITH_GIVEN_NAME
+version: 0.1.0
+date-released: 2026-09-30
+license: MIT
+repository-code: "https://github.com/REPLACE_WITH_OWNER/REPLACE_WITH_REPOSITORY"
+preferred-citation:
+  type: software
+  title: "KNe–LSST colour-envelope and Galactic-latitude analysis pipeline"
+  authors:
+    - family-names: REPLACE_WITH_FAMILY_NAME
+      given-names: REPLACE_WITH_GIVEN_NAME
+  year: 2026
+references:
+  - type: article
+    title: "FIESTA: Fast inference of electromagnetic signals and transients with auto-differentiable surrogate models"
+    authors:
+      - family-names: Koehn
+        given-names: H.
+    journal: "Astronomy & Astrophysics"
+    volume: "704"
+    year: 2025
+    start: "A55"
+    identifiers:
+      - type: arxiv
+        value: "2507.13807"

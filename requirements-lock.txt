@@ -1,0 +1,13 @@
+astropy==7.2.0
+fiestaEM==0.2.0
+healpy==1.19.0
+jax==0.9.0.1
+jaxlib==0.9.0.1
+matplotlib==3.10.8
+numpy==2.3.5
+pandas==3.0.0
+pyarrow==23.0.1
+rubin-scheduler==3.22.0
+rubin-sim==2.6.1
+scipy==1.17.0
+sncosmo==2.12.1
