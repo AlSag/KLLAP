@@ -11,11 +11,13 @@ contexts, paired populations, MW extinction, storage, and analysis metadata.
   <https://github.com/nuclear-multimessenger-astronomy/fiestaEM/blob/7bec6b39392a47f6e937f8f7a237b8742bc334ae/examples/generate_lightcurves.py>
 - License: MIT
 - Installed analysis version: `fiestaEM 0.2.0`
-- Scientific reference requested by the project: Koehn et al. (2025),
-  *FIESTA: Fast inference of electromagnetic signals and transients with
-  auto-differentiable surrogate models*, Astronomy & Astrophysics 704, A55,
-  arXiv:2507.13807.
-
+- Scientific reference:
+  Koehn, H., Wouters, T., Pang, P. T. H., Bulla, M., Rose, H.,
+  Wichern, H., and Dietrich, T. (2025),
+  *Efficient Bayesian analysis of kilonovae and gamma ray burst
+  afterglows with FIESTA*, Astronomy & Astrophysics, 704, A55.
+  DOI: `10.1051/0004-6361/202556626`.
+  arXiv: `2507.13807`.
 This repository does not redistribute FIESTA model weights. FIESTA and its
 dependencies retain their own copyright and license terms.
 
