@@ -2,18 +2,12 @@
 
 This repository contains the reproducible analysis path used to simulate
 kilonova (KNe) light curves in Rubin/LSST observing fields, construct colour
-envelopes, optionally compare them with an external SN Ia population, and
-measure relative losses as a function of Galactic latitude.
-
-The repository intentionally contains only the current workflow. Historical
-prototypes, duplicated scripts, generated runs, OpSim exports, figures, and
-large scientific data files are not versioned.
+envelopes, optionally compare them with a contaminant population (SNIa population, SNII-P, GRB Afterglow, etc...).
 
 ## Pipeline at a glance
 
-1. `get_opsim_baseline.py` exports Rubin OpSim visits and the dust metadata for
-   sampled fields. It also writes the canonical
-   `m5_depth_quantiles_by_band.csv` table once in the OpSim export directory.
+1. get_opsim_baseline.py` exports Rubin OpSim visits and the dust metadata for
+   sampled fields. It also writes the`m5_depth_quantiles_by_band.csv` table once in the OpSim export directory.
 2. `generate_kne_lightcurves.py` generates KNe populations with FIESTA's
    `Bu2026_MLP` surrogate and records the absolute OpSim source in
    `run_info.txt`.
