@@ -343,6 +343,15 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--snia-time-reference",
+        choices=["peak", "first_observation"],
+        default="peak",
+        help=(
+            "SN Ia time origin: SALT2 t0 (peak) or the first available MJD "
+            "of each SN in either requested colour band."
+        ),
+    )
+    parser.add_argument(
         "--snia-position-seed",
         type=int,
         default=20260929,
@@ -509,6 +518,14 @@ def interactive(args: argparse.Namespace) -> argparse.Namespace:
                 ("mw_extincted", "Already present; subtract A for the corrected output"),
             ],
             args.snia_input_mw_mode,
+        )
+        args.snia_time_reference = prompt_choice(
+            "SN Ia time reference",
+            [
+                ("first_observation", "First available time of each SN Ia"),
+                ("peak", "SALT2 t0 (time of maximum light)"),
+            ],
+            args.snia_time_reference,
         )
         args.snia_position_seed = int(prompt_text(
             "SN Ia to KNe sky-position assignment seed",
@@ -940,14 +957,20 @@ def format_snia_axes(
     t_min: float,
     t_max: float,
     comparison: bool,
+    time_reference: str,
 ) -> None:
+    snia_reference = (
+        r"$t-t_{\rm first\ observation}$"
+        if time_reference == "first_observation"
+        else r"$t-t_{\rm max}$"
+    )
     if comparison:
         ax.set_xlabel(
-            r"phase [days] (KNe: $t-t_{\rm merger}$; "
-            r"SNe Ia: $t-t_{\rm max}$)"
+            r"phase [days] (KNe: $t-t_{\rm merger}$; SNe Ia: "
+            + snia_reference + ")"
         )
     else:
-        ax.set_xlabel(r"$t-t_{\rm max}$ [days]")
+        ax.set_xlabel(snia_reference + " [days]")
     ax.set_ylabel(f"{pair} [mag]")
     ax.set_xlim(t_min, t_max)
     ax.grid(alpha=0.18)
@@ -1023,16 +1046,27 @@ def interpolate_snia_band(
     band: str,
     centres: np.ndarray,
     magnitude_column: str,
+    time_reference: str,
 ) -> np.ndarray:
-    """Interpolate one SN Ia band in log10 positive phase without extrapolation."""
+    """Interpolate one SN Ia band without extrapolation.
+
+    Peak-relative phases retain the historical log10-time interpolation on
+    strictly positive phases. First-observation phases include t=0 and use
+    linear time, since log10(0) is undefined.
+    """
     subset = curve.loc[curve["band"] == band, ["t_days", magnitude_column]].copy()
     subset["t_days"] = pd.to_numeric(subset["t_days"], errors="coerce")
     subset[magnitude_column] = pd.to_numeric(
         subset[magnitude_column], errors="coerce"
     )
+    valid_time = (
+        subset["t_days"] >= 0
+        if time_reference == "first_observation"
+        else subset["t_days"] > 0
+    )
     subset = subset.loc[
         np.isfinite(subset["t_days"])
-        & (subset["t_days"] > 0)
+        & valid_time
         & np.isfinite(subset[magnitude_column])
     ]
     subset = (
@@ -1049,6 +1083,8 @@ def interpolate_snia_band(
     if len(times) == 1:
         supported &= np.isclose(centres, times[0], atol=1e-10)
         result[supported] = values[0]
+    elif time_reference == "first_observation":
+        result[supported] = np.interp(centres[supported], times, values)
     else:
         result[supported] = np.interp(
             np.log10(centres[supported]), np.log10(times), values
@@ -1100,9 +1136,10 @@ def prepare_snia_population(
         "t0", "ra", "dec",
     ):
         measurements[column] = pd.to_numeric(measurements[column], errors="coerce")
-    measurements = measurements.dropna(
-        subset=["sn_id", "mjd", "band", args.snia_magnitude_column, "t0"]
-    )
+    required_columns = ["sn_id", "mjd", "band", args.snia_magnitude_column]
+    if args.snia_time_reference == "peak":
+        required_columns.append("t0")
+    measurements = measurements.dropna(subset=required_columns)
     measurements["sn_id"] = measurements["sn_id"].astype(np.int64)
     sn_ids = sorted(measurements["sn_id"].unique().tolist())
     if args.snia_max_events > 0:
@@ -1121,7 +1158,16 @@ def prepare_snia_population(
     measurements = measurements.merge(
         mapping[mapping_columns], on="sn_id", how="left", validate="many_to_one"
     )
-    measurements["t_days"] = measurements["mjd"] - measurements["t0"]
+    if args.snia_time_reference == "first_observation":
+        measurements["snia_time_reference_mjd"] = measurements.groupby(
+            "sn_id"
+        )["mjd"].transform("min")
+    else:
+        measurements["snia_time_reference_mjd"] = measurements["t0"]
+    measurements["snia_time_reference"] = args.snia_time_reference
+    measurements["t_days"] = (
+        measurements["mjd"] - measurements["snia_time_reference_mjd"]
+    )
     measurements["event_id"] = measurements["sn_id"].map(
         lambda value: f"snia_{int(value):06d}"
     )
@@ -1149,6 +1195,7 @@ def prepare_snia_population(
     adapted_columns = [
         "event_id", "sn_id", "time_mjd", "t_days", "band", "mag",
         "mag_mw_corrected", "mag_mw_present", "magerr", "redshift", "t0",
+        "snia_time_reference", "snia_time_reference_mjd",
         "fieldRA", "fieldDec", "source_ra", "source_dec", "ebv_mw", "A_mw",
         "projected_kne_event_id", "photometric_system",
     ]
@@ -1177,10 +1224,12 @@ def prepare_snia_population(
     for event_id, curve in measurements.groupby("event_id", sort=False):
         index = event_position[event_id]
         corrected1 = interpolate_snia_band(
-            curve, band1, centres, "mag_mw_corrected"
+            curve, band1, centres, "mag_mw_corrected",
+            args.snia_time_reference,
         )
         corrected2 = interpolate_snia_band(
-            curve, band2, centres, "mag_mw_corrected"
+            curve, band2, centres, "mag_mw_corrected",
+            args.snia_time_reference,
         )
         corrected_colour = corrected1 - corrected2
         extinction1 = float(curve[f"A_lsst_{band1}_mw"].iloc[0])
@@ -1244,7 +1293,8 @@ def prepare_snia_population(
     object_metadata = (
         measurements.sort_values(["sn_id", "mjd"])
         .drop_duplicates("event_id")[[
-            "event_id", "sn_id", "redshift", "t0", "fieldRA", "fieldDec",
+            "event_id", "sn_id", "redshift", "t0", "snia_time_reference",
+            "snia_time_reference_mjd", "fieldRA", "fieldDec",
             "source_ra", "source_dec", "ebv_mw", "projected_kne_event_id",
         ]]
         .reset_index(drop=True)
@@ -1259,7 +1309,7 @@ def prepare_snia_population(
     print(
         f"SN Ia: {n_events:,} objects projected onto KNe sky positions; "
         f"magnitude={args.snia_magnitude_column}; input MW mode="
-        f"{args.snia_input_mw_mode}"
+        f"{args.snia_input_mw_mode}; time reference={args.snia_time_reference}"
     )
     return {
         "input_path": path,
@@ -1276,6 +1326,7 @@ def prepare_snia_population(
         "population_colors": population_colors,
         "mapping": mapping,
         "m5_thresholds": {band1: float(m5[band1]), band2: float(m5[band2])},
+        "time_reference": args.snia_time_reference,
     }
 
 
@@ -1288,6 +1339,7 @@ def build_population_envelope_tables(
     args: argparse.Namespace,
     rng: np.random.Generator,
     stage: str,
+    interpolation_method: str = "linear_in_log10_positive_phase",
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Build envelope rules and diagnostics for an already prepared matrix."""
     rules: list[dict[str, object]] = []
@@ -1343,7 +1395,7 @@ def build_population_envelope_tables(
                 "bootstrap_threshold_mag": args.bootstrap_threshold_mag,
                 "minimum_tail_events": args.minimum_tail_events,
                 "target_interpolation_time_days": centre,
-                "interpolation_method": "linear_in_log10_positive_phase",
+                "interpolation_method": interpolation_method,
             })
     rules_all = pd.DataFrame(rules)
     if rules_all.empty:
@@ -1575,10 +1627,14 @@ def save_snia_population_plots(
     colours: list[np.ndarray],
     rules_all: pd.DataFrame,
     rules_consecutive: pd.DataFrame,
+    time_reference: str,
 ) -> None:
     fig, ax = plt.subplots(figsize=(9.2, 5.7), constrained_layout=True)
     draw_population_style(ax, times, colours, "#d97706", 0.025, 0.20)
-    format_snia_axes(ax, pair, t_min, t_max, comparison=False)
+    format_snia_axes(
+        ax, pair, t_min, t_max, comparison=False,
+        time_reference=time_reference,
+    )
     limits = comparison_ylim(colours)
     if limits is not None:
         ax.set_ylim(*limits)
@@ -1598,7 +1654,10 @@ def save_snia_population_plots(
         fig, ax = plt.subplots(figsize=(9.2, 5.7), constrained_layout=True)
         draw_population_style(ax, times, colours, "#d97706", 0.025, 0.20)
         draw_comparison_envelope(ax, rules, "#d97706", "-", 0.20)
-        format_snia_axes(ax, pair, t_min, t_max, comparison=False)
+        format_snia_axes(
+            ax, pair, t_min, t_max, comparison=False,
+            time_reference=time_reference,
+        )
         limits = comparison_ylim(colours, rules)
         if limits is not None:
             ax.set_ylim(*limits)
@@ -1625,6 +1684,7 @@ def save_kne_snia_overlay_plots(
     snia_rules: pd.DataFrame,
     overlap: pd.DataFrame,
     envelope_name: str,
+    time_reference: str,
 ) -> None:
     for show_population, stem in (
         (False, "KNe_SNIa_envelopes"),
@@ -1645,7 +1705,10 @@ def save_kne_snia_overlay_plots(
                 [row.overlap_color_max] * 2,
                 color="#2ca02c", alpha=0.26,
             )
-        format_snia_axes(ax, pair, t_min, t_max, comparison=True)
+        format_snia_axes(
+            ax, pair, t_min, t_max, comparison=True,
+            time_reference=time_reference,
+        )
         limits = comparison_ylim(
             kne_colours if show_population else [],
             snia_colours if show_population else [],
@@ -1702,6 +1765,11 @@ def save_snia_comparison_outputs(
             args,
             np.random.default_rng(args.seed + 1000 * seed_offset),
             f"snia_{convention}",
+            (
+                "linear_in_time_since_first_observation"
+                if args.snia_time_reference == "first_observation"
+                else "linear_in_log10_positive_phase_since_salt2_t0"
+            ),
         )
     )
     rules_all.to_csv(output / "snia_color_rules_all_valid.csv", index=False)
@@ -1712,6 +1780,7 @@ def save_snia_comparison_outputs(
     save_snia_population_plots(
         output, pair, args.t_min, args.t_max,
         snia_times, snia_colours, rules_all, rules_consecutive,
+        args.snia_time_reference,
     )
 
     summaries = []
@@ -1729,6 +1798,7 @@ def save_snia_comparison_outputs(
             output, pair, args.t_min, args.t_max,
             kne_times, kne_colours, snia_times, snia_colours,
             kne_rules, snia_rules, overlap, envelope_name,
+            args.snia_time_reference,
         )
         summaries.append(summarize_overlap(overlap, convention, envelope_name))
     last_edge = (
@@ -3309,7 +3379,11 @@ def main(args: argparse.Namespace | None = None) -> Path:
             "photometric_system": "lsst" if snia_population else None,
             "magnitude_column": args.snia_magnitude_column,
             "input_mw_mode": args.snia_input_mw_mode,
-            "time_reference": "SALT2 t0 (time of maximum light)",
+            "time_reference": (
+                "first available MJD per SN Ia in either requested colour band"
+                if args.snia_time_reference == "first_observation"
+                else "SALT2 t0 (time of maximum light)"
+            ),
             "KNe_time_reference": "merger",
             "position_projection": (
                 "one deterministic KNe position per SN Ia; without replacement "
