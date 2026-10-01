@@ -146,12 +146,16 @@ Important conventions
   a reproducible individual-CSV sample without recomputing light curves.
 * OpSim field tables are cached with an LRU policy. Every event receives a copy,
   so caching cannot leak event-level mutations.
-* ``--filter-system lsst+ps1`` evaluates both passband sets in one surrogate
-  call for each physical event, so distance, ejecta parameters, inclination,
-  merger epoch and OpSim field are exactly paired between systems.
+* ``--filter-system lsst+ps1`` and ``--filter-system lsst+ztf`` evaluate both
+  passband sets in one surrogate call for each physical event, so distance,
+  ejecta parameters, inclination, merger epoch and OpSim field are exactly
+  paired between systems.
 * ``--filter-system ps1`` evaluates and saves only PS1 ``grizy`` synthetic
   light curves. Rubin OpSim supplies no PS1 visit depths, so PS1-only runs do
   not create LSST-like products and do not apply a Rubin ``m5`` cut.
+* ``--filter-system ztf`` evaluates and saves only ZTF ``gri`` synthetic
+  light curves. Empirical ZTF depth distributions are applied later by
+  ``build_color_envelopes.py`` rather than during generation.
 * Requested surrogate batches use FIESTA's public ``vpredict`` method and are
   accepted only after comparison with scalar reference predictions; otherwise
   the run falls back automatically without changing the requested population.
@@ -1200,9 +1204,22 @@ FILTER_SYSTEM_CONFIG = {
             "y": "ps1::y",
         },
     },
+    "ztf": {
+        "label": "ZTF gri",
+        "filters": ["ztfg", "ztfr", "ztfi"],
+        "by_band": {
+            "g": "ztfg",
+            "r": "ztfr",
+            "i": "ztfi",
+        },
+    },
     "lsst+ps1": {
         "label": "LSST ugrizy + Pan-STARRS1 grizy",
         "systems": ("lsst", "ps1"),
+    },
+    "lsst+ztf": {
+        "label": "LSST ugrizy + ZTF gri",
+        "systems": ("lsst", "ztf"),
     },
 }
 
@@ -1217,9 +1234,20 @@ PS1_DUST_R_X = {
     "y": 1.087,
 }
 
+# Broad-band R_x = A_x/E(B-V) coefficients adopted for ZTF.  As for every
+# broad-band coefficient, the exact value depends weakly on the assumed source
+# spectrum and extinction law.  The values used by a run are therefore written
+# explicitly to summary.csv and run_info.txt.
+ZTF_DUST_R_X = {
+    "g": 3.303,
+    "r": 2.285,
+    "i": 1.698,
+}
+
 DUST_R_X_BY_SYSTEM = {
     "lsst": DUST_R_X,
     "ps1": PS1_DUST_R_X,
+    "ztf": ZTF_DUST_R_X,
 }
 
 
@@ -1230,7 +1258,8 @@ def add_multisystem_extinction_summary(
 
     The OpSim field index supplies ``E(B-V)`` and legacy Rubin ``A_g_mw``-like
     columns.  Paired products additionally store ``A_lsst_g_mw`` and
-    ``A_ps1_g_mw`` in ``summary.csv``.  The long light-curve table therefore
+    ``A_ps1_g_mw`` or ``A_ztf_g_mw`` in ``summary.csv``. The long light-curve
+    table therefore
     needs only ``photometric_system``, ``band`` and the already extinguished
     magnitude; extinction metadata is not repeated at every epoch.
     """
@@ -1323,13 +1352,13 @@ def build_runtime_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--filter-system",
-        choices=["lsst", "ps1", "lsst+ps1"],
+        choices=["lsst", "ps1", "ztf", "lsst+ps1", "lsst+ztf"],
         default="lsst+ps1",
         help=(
-            "Generate Rubin/LSST only, PS1 synthetic light curves only, or "
-            "evaluate LSST and PS1 for the same physical event, distance, "
-            "merger epoch and OpSim field. PS1-only is incompatible with "
-            "LSST-like products and generator-level Rubin m5 cuts."
+            "Generate one survey system, or evaluate LSST together with PS1 "
+            "or ZTF for the same physical event, distance, merger epoch and "
+            "OpSim field. Standalone PS1/ZTF modes are synthetic-only; ZTF "
+            "depth cuts are applied later by build_color_envelopes.py."
         ),
     )
     parser.add_argument(
@@ -1583,8 +1612,8 @@ def configure_runtime() -> argparse.Namespace:
         args.model = prompt_choice(
             "Kilonova light-curve model",
             [
-                ("Bu2026_MLP", "FIESTA Bu2026_MLP (Rubin/LSST and PS1)"),
-                ("Bu2019_MLP", "FIESTA Bu2019_MLP (Rubin/LSST and PS1)"),
+                ("Bu2026_MLP", "FIESTA Bu2026_MLP (LSST, PS1 and ZTF)"),
+                ("Bu2019_MLP", "FIESTA Bu2019_MLP (LSST, PS1 and ZTF)"),
             ],
             args.model,
         )
@@ -1612,20 +1641,22 @@ def configure_runtime() -> argparse.Namespace:
             "Photometric filter system",
             [
                 ("lsst+ps1", "LSST ugrizy + PS1 grizy for the same events"),
+                ("lsst+ztf", "LSST ugrizy + ZTF gri for the same events"),
                 ("lsst", "LSST ugrizy only"),
                 ("ps1", "PS1 grizy only (synthetic products; no Rubin m5)"),
+                ("ztf", "ZTF gri only (synthetic products; ZTF depth applied later)"),
             ],
             args.filter_system,
         )
-        if args.filter_system == "ps1":
+        if args.filter_system in {"ps1", "ztf"}:
             # Rubin OpSim visits and m5 values cannot be applied to a PS1-only
             # model evaluation. We retain the OpSim sky position, merger MJD
             # and E(B-V) metadata, but save only synthetic PS1 products.
             args.output_mode = "synthetic-mjd"
             print(
-                "PS1-only mode: scientific product selection is fixed to "
-                "'Synthetic OpSim RA/Dec/MJD only'. Rubin LSST-like products "
-                "and Rubin m5 cuts require LSST model magnitudes."
+                f"{args.filter_system.upper()}-only mode: scientific product "
+                "selection is fixed to 'Synthetic OpSim RA/Dec/MJD only'. "
+                "Rubin LSST-like products require LSST model magnitudes."
             )
         else:
             args.output_mode = prompt_choice(
@@ -1661,11 +1692,11 @@ def configure_runtime() -> argparse.Namespace:
                     str(args.synthetic_cadence_days),
                 )
             )
-            if args.filter_system == "ps1":
+            if args.filter_system in {"ps1", "ztf"}:
                 args.synthetic_depth_cut = "none"
                 print(
-                    "Synthetic depth cut: none (PS1-only has no compatible "
-                    "Rubin/OpSim m5 threshold)."
+                    "Synthetic depth cut: none (survey depth is applied by "
+                    "build_color_envelopes.py, not during generation)."
                 )
             else:
                 args.synthetic_depth_cut = prompt_choice(
@@ -1908,12 +1939,11 @@ def configure_runtime() -> argparse.Namespace:
         raise FileNotFoundError(
             f"Intrinsic catalogue not found: {args.intrinsic_catalog}"
         )
-    if args.filter_system == "ps1" and args.output_mode != "synthetic-mjd":
+    if args.filter_system in {"ps1", "ztf"} and args.output_mode != "synthetic-mjd":
         raise ValueError(
-            "--filter-system ps1 supports only --output-mode synthetic-mjd. "
-            "LSST-like products require LSST model magnitudes; use "
-            "--filter-system lsst+ps1 to retain PS1 colours for the same "
-            "events while evaluating Rubin detectability."
+            f"--filter-system {args.filter_system} supports only --output-mode "
+            "synthetic-mjd. LSST-like products require LSST model magnitudes; "
+            "use a combined lsst+... system when Rubin products are needed."
         )
     if args.storage_format in {"parquet", "both"}:
         try:
@@ -1933,10 +1963,9 @@ def configure_runtime() -> argparse.Namespace:
         if args.filter_system != "lsst":
             raise ValueError(
                 "The generator-level m5 cut is LSST-only. For a paired "
-                "LSST+PS1 run select 'none'; build_color_envelopes.py "
-                "will apply Rubin m5 to the LSST selection while keeping the "
-                "matching PS1 colour from the same event. A PS1-only run has "
-                "no compatible Rubin m5 selection."
+                "LSST+PS1 or LSST+ZTF run select 'none'; "
+                "build_color_envelopes.py applies the appropriate survey "
+                "depth consistently after generation."
             )
         if args.output_mode == "lsstlike-detected":
             raise ValueError(
@@ -2853,6 +2882,9 @@ if SAVE_MW_EXTINCTED_SYNTHETIC_COLUMNS:
         "rubin_coefficients": DUST_R_X,
         "ps1_coefficients_schlafly_finkbeiner_2011": (
             PS1_DUST_R_X if "ps1" in FILTER_SYSTEMS else None
+        ),
+        "ztf_coefficients_rv3p1": (
+            ZTF_DUST_R_X if "ztf" in FILTER_SYSTEMS else None
         ),
         "summary_column_convention": "A_<system>_<band>_mw",
     }

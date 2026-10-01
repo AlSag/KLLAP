@@ -3,7 +3,7 @@
 
 The reader prefers sharded ``parquet/synthetic_part_*.parquet`` populations
 and falls back to legacy one-file-per-event CSV products. New paired shards
-may contain LSST and PS1 magnitudes for the same event IDs. The script never
+may contain LSST, PS1 and ZTF magnitudes for the same event IDs. The script never
 evaluates the surrogate, so both storage layouts preserve the generator's
 numerical and photometric selections exactly.
 
@@ -25,7 +25,12 @@ OpSim m5 is nevertheless evaluated on the corresponding saved LSST bands,
 because OpSim supplies Rubin rather than PS1 visit depths. Thus the code never
 compares a PS1 magnitude directly with an LSST m5 threshold.
 
-The script never reloads or evaluates Bu2026_MLP.  Consequently, the numerical
+For a ZTF envelope, colour values, MW coefficients and depth selection are all
+ZTF. The depth threshold is the requested p25/p50/p75 quantile of the empirical
+per-image limiting-magnitude KDE in each band. This controlled global-depth
+comparison does not simulate ZTF cadence, weather correlations or visit noise.
+
+The script never reloads or evaluates the selected FIESTA surrogate. Consequently, the numerical
 support cut chosen during generation is preserved exactly.  Saved synthetic
 ``mag`` values include MW extinction; intrinsic magnitudes are reconstructed
 with ``m_intrinsic = m_saved - R_band E(B-V)``.
@@ -59,7 +64,9 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
+import pickle
 import sys
 from pathlib import Path
 
@@ -104,7 +111,29 @@ PS1_MW_R = {
     "y": 1.087,
 }
 
-MW_R_BY_SYSTEM = {"lsst": RUBIN_MW_R, "ps1": PS1_MW_R}
+ZTF_MW_R = {
+    "g": 3.303,
+    "r": 2.285,
+    "i": 1.698,
+}
+
+MW_R_BY_SYSTEM = {
+    "lsst": RUBIN_MW_R,
+    "ps1": PS1_MW_R,
+    "ztf": ZTF_MW_R,
+}
+
+ZTF_DEPTH_FILENAMES = {
+    "g": ("lims_public_g.joblib", "lims_g.joblib"),
+    "r": ("lims_public_r.joblib", "lims_r.joblib"),
+    "i": ("lims_i.joblib", "lims_public_i.joblib"),
+}
+
+M5_SCENARIO_PERCENTILES = {
+    "worst_p25": 25.0,
+    "median_p50": 50.0,
+    "best_p75": 75.0,
+}
 
 LATITUDE_COLUMNS = (
     "galactic_b_deg",
@@ -180,12 +209,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--color-pair", default="g-r")
     parser.add_argument(
         "--photometric-system",
-        choices=["lsst", "ps1", "both"],
+        choices=["lsst", "ps1", "ztf", "both", "lsst+ztf"],
         default="both",
         help=(
-            "Envelope system. 'both' builds LSST and PS1 envelopes from the "
-            "same event IDs and writes direct comparison plots. Rubin m5 is "
-            "always applied to the corresponding LSST bands."
+            "Envelope system. 'both' preserves the historical LSST+PS1 mode; "
+            "'lsst+ztf' builds both envelopes from the same event IDs and "
+            "writes direct comparison plots. ZTF depth comes from the supplied "
+            "empirical lims distributions or a precomputed quantile table."
         ),
     )
     parser.add_argument("--t-min", type=float, default=0.4)
@@ -231,6 +261,35 @@ def build_parser() -> argparse.ArgumentParser:
         help="Maximum number of permanent exits displayed in each PNG table.",
     )
     parser.add_argument("--m5-quantile-table", type=Path)
+    parser.add_argument(
+        "--ztf-depth-dir",
+        type=Path,
+        help=(
+            "Directory containing trusted lims_public_g.joblib, "
+            "lims_public_r.joblib and lims_i.joblib ZTF depth KDEs. Joblib "
+            "files are pickle-based: never load files from an untrusted source."
+        ),
+    )
+    parser.add_argument(
+        "--ztf-depth-quantile-table",
+        type=Path,
+        help=(
+            "Optional CSV with columns band, scenario, m5. When supplied it "
+            "is used instead of loading the ZTF joblib files."
+        ),
+    )
+    parser.add_argument(
+        "--ztf-depth-samples",
+        type=int,
+        default=200000,
+        help="Monte-Carlo draws per ZTF-band KDE used to estimate p25/p50/p75.",
+    )
+    parser.add_argument(
+        "--ztf-depth-seed",
+        type=int,
+        default=20261001,
+        help="Random seed used only for ZTF depth-distribution sampling.",
+    )
     parser.add_argument(
         "--threshold-scope",
         choices=["common_global", "latitude_conditioned"],
@@ -316,6 +375,24 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--at2017gfo-bestfit-file",
+        type=Path,
+        help=(
+            "Optional FIESTA bestfit_params.pkl containing light_curves/times "
+            "and per-filter model magnitudes. Its model colour is overlaid "
+            "without photometric-error pass/fail classification."
+        ),
+    )
+    parser.add_argument(
+        "--at2017gfo-bestfit-photometry-mode",
+        choices=["dereddened", "mw_extincted"],
+        default="dereddened",
+        help=(
+            "Whether the model magnitudes saved in --at2017gfo-bestfit-file "
+            "have already been corrected for Milky-Way extinction."
+        ),
+    )
+    parser.add_argument(
         "--snia-parquet",
         type=Path,
         help=(
@@ -383,8 +460,10 @@ def interactive(args: argparse.Namespace) -> argparse.Namespace:
         "Photometric system for the colour envelope",
         [
             ("both", "LSST and PS1 from the same synthetic events"),
+            ("lsst+ztf", "LSST and ZTF from the same synthetic events"),
             ("lsst", "LSST only"),
             ("ps1", "PS1 colour with Rubin/LSST m5 selection"),
+            ("ztf", "ZTF colour with an empirical ZTF depth selection"),
         ],
         args.photometric_system,
     )
@@ -435,14 +514,21 @@ def interactive(args: argparse.Namespace) -> argparse.Namespace:
         [(key, label) for key, label in M5_SCENARIOS.items()],
         args.m5_scenario,
     )
-    args.threshold_scope = prompt_choice(
-        "m5 latitude scope",
-        [
-            ("common_global", "Same all-sky thresholds for controlled comparisons"),
-            ("latitude_conditioned", "Thresholds measured at |b| >= 20 deg"),
-        ],
-        args.threshold_scope,
-    )
+    if args.photometric_system != "ztf":
+        args.threshold_scope = prompt_choice(
+            "m5 latitude scope",
+            [
+                ("common_global", "Same all-sky thresholds for controlled comparisons"),
+                ("latitude_conditioned", "Thresholds measured at |b| >= 20 deg"),
+            ],
+            args.threshold_scope,
+        )
+    if args.photometric_system in {"ztf", "lsst+ztf"}:
+        if args.ztf_depth_quantile_table is None:
+            args.ztf_depth_dir = Path(prompt_text(
+                "Directory containing the ZTF lims joblib files",
+                str(args.ztf_depth_dir or "ztf_depth_distributions"),
+            ))
     at2017gfo_comparison = prompt_choice(
         "AT2017gfo comparison",
         [
@@ -485,8 +571,26 @@ def interactive(args: argparse.Namespace) -> argparse.Namespace:
             ],
             args.at2017gfo_photometry_mode,
         )
+        bestfit_path = prompt_text(
+            "AT2017gfo best-fit pickle (empty = do not overlay)",
+            (
+                str(args.at2017gfo_bestfit_file)
+                if args.at2017gfo_bestfit_file is not None else ""
+            ),
+        ).strip()
+        args.at2017gfo_bestfit_file = Path(bestfit_path) if bestfit_path else None
+        if args.at2017gfo_bestfit_file is not None:
+            args.at2017gfo_bestfit_photometry_mode = prompt_choice(
+                "Foreground MW extinction in the AT2017gfo best-fit magnitudes",
+                [
+                    ("dereddened", "Absent/already corrected"),
+                    ("mw_extincted", "Already present"),
+                ],
+                args.at2017gfo_bestfit_photometry_mode,
+            )
     else:
         args.at2017gfo_file = None
+        args.at2017gfo_bestfit_file = None
 
     snia_comparison = prompt_choice(
         "SN Ia population comparison",
@@ -647,7 +751,7 @@ class SyntheticPopulationSource:
             elif any(system != "lsst" for system in photometric_systems):
                 raise ValueError(
                     f"{path} has no photometric_system column. It is a legacy "
-                    "LSST-only shard and cannot build a PS1 envelope."
+                    "LSST-only shard and cannot build the requested non-LSST envelope."
                 )
             shard = pd.read_parquet(
                 path,
@@ -697,6 +801,136 @@ def load_m5(
     return lookup
 
 
+def file_sha256(path: Path) -> str:
+    """Return a streaming SHA-256 digest for one input file."""
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def find_ztf_depth_file(directory: Path, band: str) -> Path:
+    """Resolve the NMMA ZTF depth-KDE filename for one band."""
+    for filename in ZTF_DEPTH_FILENAMES[band]:
+        candidate = directory / filename
+        if candidate.is_file():
+            return candidate
+    expected = ", ".join(ZTF_DEPTH_FILENAMES[band])
+    raise FileNotFoundError(
+        f"Missing ZTF {band}-band depth distribution below {directory}. "
+        f"Expected one of: {expected}"
+    )
+
+
+def load_trusted_ztf_kde(path: Path):
+    """Load one trusted historical sklearn KDE used by the NMMA ZTF simulator.
+
+    The distributed objects were serialized with an older scikit-learn. The
+    compatibility aliases below preserve their public ``sample`` behaviour
+    with recent releases. Joblib uses pickle internally, so only files from a
+    trusted source must be supplied.
+    """
+    try:
+        import joblib
+        import sklearn.metrics._dist_metrics as distance_metrics
+    except ImportError as exc:
+        raise ImportError(
+            "Reading ZTF lims joblib files requires joblib and scikit-learn."
+        ) from exc
+
+    if (
+        not hasattr(distance_metrics, "EuclideanDistance")
+        and hasattr(distance_metrics, "EuclideanDistance64")
+    ):
+        distance_metrics.EuclideanDistance = distance_metrics.EuclideanDistance64
+    kde = joblib.load(path)
+    if not hasattr(kde, "sample"):
+        raise TypeError(f"{path} does not contain a sampleable depth KDE")
+    if not hasattr(kde, "bandwidth_") and hasattr(kde, "bandwidth"):
+        kde.bandwidth_ = kde.bandwidth
+    return kde
+
+
+def load_ztf_depth_thresholds(
+    directory: Path | None,
+    quantile_table: Path | None,
+    scenario: str,
+    bands: tuple[str, str],
+    n_samples: int,
+    seed: int,
+) -> tuple[dict[str, float], pd.DataFrame]:
+    """Return deterministic ZTF p25/p50/p75 limiting-magnitude thresholds."""
+    if any(band not in ZTF_DEPTH_FILENAMES for band in bands):
+        raise ValueError("ZTF envelopes support only g, r and i bands")
+
+    if quantile_table is not None:
+        source = quantile_table.expanduser().resolve()
+        table = pd.read_csv(source)
+        required = {"band", "scenario", "m5"}
+        if not required.issubset(table.columns):
+            raise ValueError(
+                f"{source} is missing {sorted(required - set(table.columns))}"
+            )
+        use = table.loc[
+            table["band"].astype(str).str.lower().isin(bands)
+            & (table["scenario"].astype(str) == scenario)
+        ].copy()
+        lookup = {
+            str(row.band).lower(): float(row.m5)
+            for row in use.itertuples()
+        }
+        missing = set(bands) - set(lookup)
+        if missing:
+            raise ValueError(
+                f"Missing {scenario} ZTF thresholds for {sorted(missing)} in {source}"
+            )
+        use["source_file"] = str(source)
+        use["source_sha256"] = file_sha256(source)
+        use["sampling_seed"] = np.nan
+        use["sampling_draws"] = np.nan
+        return lookup, use
+
+    if directory is None:
+        raise ValueError(
+            "ZTF depth selection requires --ztf-depth-dir or "
+            "--ztf-depth-quantile-table"
+        )
+    if n_samples < 1000:
+        raise ValueError("--ztf-depth-samples must be at least 1000")
+    directory = directory.expanduser().resolve()
+    rows: list[dict[str, object]] = []
+    lookup: dict[str, float] = {}
+    for band_index, band in enumerate(dict.fromkeys(bands)):
+        path = find_ztf_depth_file(directory, band)
+        kde = load_trusted_ztf_kde(path)
+        band_seed = int(seed + 1009 * (band_index + 1))
+        draws = np.asarray(
+            kde.sample(n_samples=int(n_samples), random_state=band_seed),
+            dtype=float,
+        ).reshape(-1)
+        draws = draws[np.isfinite(draws)]
+        if draws.size < 1000:
+            raise ValueError(f"Too few finite ZTF depth draws from {path}")
+        quantiles = {
+            key: float(np.percentile(draws, percentile))
+            for key, percentile in M5_SCENARIO_PERCENTILES.items()
+        }
+        lookup[band] = quantiles[scenario]
+        for scenario_name, value in quantiles.items():
+            rows.append({
+                "band": band,
+                "scenario": scenario_name,
+                "percentile": M5_SCENARIO_PERCENTILES[scenario_name],
+                "m5": value,
+                "source_file": str(path),
+                "source_sha256": file_sha256(path),
+                "sampling_seed": band_seed,
+                "sampling_draws": int(draws.size),
+            })
+    return lookup, pd.DataFrame(rows)
+
+
 def event_extinction_mag(
     metadata_row: pd.Series,
     photometric_system: str,
@@ -724,12 +958,16 @@ def prepare_metadata(
     summary = load_summary(args.run_dir)
     if summary.empty:
         raise FileNotFoundError(f"Missing usable {run_root(args.run_dir) / 'summary.csv'}")
-    physical_columns = (
-        "log10_mej_dyn", "v_ej_dyn", "Ye_dyn", "log10_mej_wind",
-        "v_ej_wind", "Ye_wind", "inclination_EM",
+    # Columns common to Bu2026_MLP and Bu2019_MLP. The latter has ``phi`` but
+    # no v_ej/Ye parameters, so model-specific physical columns must remain
+    # optional for envelope construction.
+    required_columns = (
+        "ebv_mw", "log10_mej_dyn", "log10_mej_wind", "inclination_EM",
         "luminosity_distance", "redshift",
     )
-    required_columns = ("ebv_mw",) + physical_columns
+    optional_physical_columns = (
+        "v_ej_dyn", "Ye_dyn", "v_ej_wind", "Ye_wind", "phi",
+    )
     missing = [c for c in required_columns if c not in summary]
     if missing:
         raise ValueError(f"summary.csv is missing {missing}")
@@ -793,7 +1031,9 @@ def prepare_metadata(
             f"{population_latitude_label(args)}."
         )
 
-    for column in required_columns:
+    for column in (*required_columns, *optional_physical_columns):
+        if column not in metadata:
+            metadata[column] = np.nan
         metadata[column] = pd.to_numeric(metadata[column], errors="coerce")
     metadata = metadata.dropna(subset=list(required_columns))
     metadata["event_id"] = metadata["event_id"].map(canonical_event_id)
@@ -1926,6 +2166,116 @@ def load_at2017gfo_colour_points(
     return pd.DataFrame(matched).sort_values("phase_days").reset_index(drop=True)
 
 
+def _reconstruct_jax_array_as_numpy(
+    reconstruct: object,
+    reconstruct_args: tuple[object, ...],
+    state: object,
+    metadata: object,
+) -> np.ndarray:
+    """Reconstruct a pickled JAX array as NumPy without importing JAX."""
+    del metadata
+    array = reconstruct(*reconstruct_args)  # type: ignore[operator]
+    array.__setstate__(state)
+    return np.asarray(array)
+
+
+class _RestrictedBestFitUnpickler(pickle.Unpickler):
+    """Unpickle only the NumPy/JAX array primitives used by FIESTA outputs."""
+
+    def find_class(self, module: str, name: str) -> object:
+        numpy_core = getattr(np, "_core", None)
+        if numpy_core is None:  # NumPy 1.x compatibility.
+            numpy_core = np.core
+        numpy_multiarray = numpy_core.multiarray
+        allowed = {
+            ("numpy.core.multiarray", "_reconstruct"): numpy_multiarray._reconstruct,
+            ("numpy._core.multiarray", "_reconstruct"): numpy_multiarray._reconstruct,
+            ("numpy.core.multiarray", "scalar"): numpy_multiarray.scalar,
+            ("numpy._core.multiarray", "scalar"): numpy_multiarray.scalar,
+            ("numpy", "ndarray"): np.ndarray,
+            ("numpy", "dtype"): np.dtype,
+            ("jax._src.array", "_reconstruct_array"): (
+                _reconstruct_jax_array_as_numpy
+            ),
+        }
+        try:
+            return allowed[(module, name)]
+        except KeyError as exc:
+            raise pickle.UnpicklingError(
+                f"Unsupported global in AT2017gfo best-fit pickle: {module}.{name}"
+            ) from exc
+
+
+def load_at2017gfo_bestfit_colour_curve(
+    path: Path,
+    band1: str,
+    band2: str,
+) -> tuple[pd.DataFrame, dict[str, float]]:
+    """Read a FIESTA best-fit pickle and return its saved model colour curve.
+
+    Only the already evaluated ``light_curves`` arrays are used. The model is
+    not reloaded, and the parameter dictionary is retained solely as metadata.
+    """
+    path = path.expanduser().resolve()
+    if not path.exists():
+        raise FileNotFoundError(path)
+    with path.open("rb") as stream:
+        payload = _RestrictedBestFitUnpickler(stream).load()
+    if not isinstance(payload, dict) or not isinstance(
+        payload.get("light_curves"), dict
+    ):
+        raise ValueError(
+            "AT2017gfo best-fit pickle must contain a light_curves dictionary"
+        )
+    light_curves = payload["light_curves"]
+
+    def find_filter(filter_band: str) -> tuple[str, np.ndarray]:
+        lowercase_keys = {str(key).strip().lower(): key for key in light_curves}
+        for alias in AT2017GFO_FILTER_ALIASES[filter_band]:
+            original_key = lowercase_keys.get(alias.lower())
+            if original_key is not None:
+                return str(original_key), np.asarray(
+                    light_curves[original_key], dtype=float
+                ).reshape(-1)
+        raise ValueError(
+            f"AT2017gfo best-fit pickle has no model light curve for "
+            f"{filter_band!r}; tried {AT2017GFO_FILTER_ALIASES[filter_band]}"
+        )
+
+    if "times" not in light_curves:
+        raise ValueError("AT2017gfo best-fit pickle has no light_curves['times']")
+    times = np.asarray(light_curves["times"], dtype=float).reshape(-1)
+    source_filter1, magnitude1 = find_filter(band1)
+    source_filter2, magnitude2 = find_filter(band2)
+    if not (len(times) == len(magnitude1) == len(magnitude2)):
+        raise ValueError(
+            "AT2017gfo best-fit times and requested-band arrays have "
+            "different lengths"
+        )
+    finite = (
+        np.isfinite(times) & np.isfinite(magnitude1) & np.isfinite(magnitude2)
+    )
+    curve = pd.DataFrame({
+        "phase_days": times[finite],
+        "band1": band1,
+        "band2": band2,
+        "source_filter_band1": source_filter1,
+        "source_filter_band2": source_filter2,
+        "magnitude_band1": magnitude1[finite],
+        "magnitude_band2": magnitude2[finite],
+        "color_input": magnitude1[finite] - magnitude2[finite],
+        "source_file": str(path),
+    }).sort_values("phase_days").reset_index(drop=True)
+    parameters: dict[str, float] = {}
+    raw_parameters = payload.get("bestfit_params", {})
+    if isinstance(raw_parameters, dict):
+        for key, value in raw_parameters.items():
+            array = np.asarray(value)
+            if array.size == 1 and np.issubdtype(array.dtype, np.number):
+                parameters[str(key)] = float(array.reshape(-1)[0])
+    return curve, parameters
+
+
 def at2017gfo_stage_colours(
     points: pd.DataFrame,
     stage: str,
@@ -2047,6 +2397,7 @@ def evaluate_at2017gfo_points(
 def save_at2017gfo_overlay(
     results: pd.DataFrame,
     rules: pd.DataFrame,
+    bestfit_curve: pd.DataFrame | None,
     path: Path,
     pair: str,
     t_min: float,
@@ -2092,12 +2443,26 @@ def save_at2017gfo_overlay(
                 color=color, ecolor=color, elinewidth=0.8, capsize=2,
                 linestyle="none", label=label, zorder=zorder,
             )
+    finite_bestfit = pd.DataFrame()
+    if bestfit_curve is not None and not bestfit_curve.empty:
+        finite_bestfit = bestfit_curve.loc[
+            np.isfinite(pd.to_numeric(bestfit_curve["phase_days"], errors="coerce"))
+            & np.isfinite(pd.to_numeric(bestfit_curve["color"], errors="coerce"))
+        ].sort_values("phase_days")
+        if not finite_bestfit.empty:
+            ax.plot(
+                finite_bestfit["phase_days"], finite_bestfit["color"],
+                color="#cc33aa", lw=2.2, alpha=0.95,
+                label="AT2017gfo best-fit model", zorder=5,
+            )
     format_axes(ax, pair, t_min, t_max)
     arrays = []
     if not rules.empty:
         arrays.append(rules[["color_min", "color_max"]].to_numpy(float).ravel())
     if not finite.empty:
         arrays.append(finite["color"].to_numpy(float))
+    if not finite_bestfit.empty:
+        arrays.append(finite_bestfit["color"].to_numpy(float))
     if arrays:
         values = np.concatenate(arrays)
         values = values[np.isfinite(values)]
@@ -2159,6 +2524,7 @@ def save_at2017gfo_outputs(
     stage_dir: Path,
     points: pd.DataFrame,
     rules: pd.DataFrame,
+    bestfit_curve: pd.DataFrame | None,
     envelope_name: str,
     pair: str,
     t_min: float,
@@ -2176,7 +2542,8 @@ def save_at2017gfo_outputs(
     ].copy()
     failed.to_csv(stage_dir / f"{prefix}_failed_points.csv", index=False)
     save_at2017gfo_overlay(
-        results, rules, stage_dir / f"{prefix}_with_envelope.png",
+        results, rules, bestfit_curve,
+        stage_dir / f"{prefix}_with_envelope.png",
         pair, t_min, t_max,
     )
     save_at2017gfo_failed_table(
@@ -2210,7 +2577,7 @@ PERMANENT_EXIT_COLUMNS = [
     "N_final_consecutive_outside_bins", "exit_direction",
     "maximum_excursion_beyond_envelope_mag", "right_censored",
     "M_ej_dyn_Msun", "v_ej_dyn_c", "Ye_dyn", "M_ej_wind_Msun",
-    "v_ej_wind_c", "Ye_wind", "inclination_deg",
+    "v_ej_wind_c", "Ye_wind", "phi_deg", "inclination_deg",
     "luminosity_distance_Mpc", "redshift",
 ]
 
@@ -2306,11 +2673,12 @@ def identify_permanent_exits(
             "maximum_excursion_beyond_envelope_mag": float(np.max(excursion)),
             "right_censored": bool(rule_bins[last_position] < final_rule_bin),
             "M_ej_dyn_Msun": 10.0 ** float(metadata_row["log10_mej_dyn"]),
-            "v_ej_dyn_c": float(metadata_row["v_ej_dyn"]),
-            "Ye_dyn": float(metadata_row["Ye_dyn"]),
+            "v_ej_dyn_c": float(metadata_row.get("v_ej_dyn", np.nan)),
+            "Ye_dyn": float(metadata_row.get("Ye_dyn", np.nan)),
             "M_ej_wind_Msun": 10.0 ** float(metadata_row["log10_mej_wind"]),
-            "v_ej_wind_c": float(metadata_row["v_ej_wind"]),
-            "Ye_wind": float(metadata_row["Ye_wind"]),
+            "v_ej_wind_c": float(metadata_row.get("v_ej_wind", np.nan)),
+            "Ye_wind": float(metadata_row.get("Ye_wind", np.nan)),
+            "phi_deg": float(metadata_row.get("phi", np.nan)),
             "inclination_deg": float(np.degrees(metadata_row["inclination_EM"])),
             "luminosity_distance_Mpc": float(metadata_row["luminosity_distance"]),
             "redshift": float(metadata_row["redshift"]),
@@ -2337,20 +2705,39 @@ def save_permanent_exit_table_png(
     event_colors: dict[str, str] | None = None,
 ) -> None:
     """Save a compact, presentation-ready physical-parameter table."""
-    display_columns = [
-        "event_id", "last_outside_time_days", "exit_direction",
-        "M_ej_dyn_Msun", "v_ej_dyn_c", "Ye_dyn", "M_ej_wind_Msun",
-        "v_ej_wind_c", "Ye_wind", "inclination_deg",
-        "luminosity_distance_Mpc",
-    ]
-    labels = [
-        "event", "last out [d]", "side",
-        r"Mdyn [$M_\odot$]", "vdyn/c", "Ye dyn", r"Mwind [$M_\odot$]",
-        "vwind/c", "Ye wind", "incl. [deg]", "DL [Mpc]",
-    ]
     shown = exits.head(maximum_rows).copy()
+    base_columns = [
+        "event_id", "last_outside_time_days", "exit_direction",
+        "M_ej_dyn_Msun", "M_ej_wind_Msun",
+    ]
+    optional_columns = [
+        column for column in (
+            "v_ej_dyn_c", "Ye_dyn", "v_ej_wind_c", "Ye_wind", "phi_deg"
+        )
+        if column in shown
+        and pd.to_numeric(shown[column], errors="coerce").notna().any()
+    ]
+    display_columns = base_columns + optional_columns + [
+        "inclination_deg", "luminosity_distance_Mpc"
+    ]
+    label_by_column = {
+        "event_id": "event",
+        "last_outside_time_days": "last out [d]",
+        "exit_direction": "side",
+        "M_ej_dyn_Msun": r"Mdyn [$M_\odot$]",
+        "v_ej_dyn_c": "vdyn/c",
+        "Ye_dyn": "Ye dyn",
+        "M_ej_wind_Msun": r"Mwind [$M_\odot$]",
+        "v_ej_wind_c": "vwind/c",
+        "Ye_wind": "Ye wind",
+        "phi_deg": "phi [deg]",
+        "inclination_deg": "incl. [deg]",
+        "luminosity_distance_Mpc": "DL [Mpc]",
+    }
+    labels = [label_by_column[column] for column in display_columns]
     figure_height = max(1.8, 0.38 * (len(shown) + 2))
-    fig, ax = plt.subplots(figsize=(18.0, figure_height), constrained_layout=True)
+    figure_width = max(11.0, 1.55 * len(display_columns))
+    fig, ax = plt.subplots(figsize=(figure_width, figure_height), constrained_layout=True)
     ax.axis("off")
     if shown.empty:
         ax.text(0.5, 0.5, "No permanent exits", ha="center", va="center", fontsize=13)
@@ -2367,6 +2754,7 @@ def save_permanent_exit_table_png(
             "M_ej_wind_Msun": shown["M_ej_wind_Msun"].map(lambda x: f"{x:.3e}"),
             "v_ej_wind_c": shown["v_ej_wind_c"].map(lambda x: f"{x:.3f}"),
             "Ye_wind": shown["Ye_wind"].map(lambda x: f"{x:.3f}"),
+            "phi_deg": shown["phi_deg"].map(lambda x: f"{x:.1f}"),
             "inclination_deg": shown["inclination_deg"].map(lambda x: f"{x:.1f}"),
             "luminosity_distance_Mpc": shown["luminosity_distance_Mpc"].map(
                 lambda x: f"{x:.1f}"
@@ -2526,16 +2914,17 @@ def save_dual_system_comparison_plots(
     t_min: float,
     t_max: float,
     at2017gfo_enabled: bool,
+    systems: tuple[str, str] = ("lsst", "ps1"),
 ) -> None:
-    """Overlay paired LSST and PS1 envelopes built from identical events.
+    """Overlay two survey envelopes built from identical physical events.
 
-    AT2017gfo measurements are PS1 photometry. They are plotted once as PS1
-    observations; the LSST envelope is a useful filter-system comparison, not
-    a claim that AT2017gfo was observed through Rubin bandpasses.
+    AT2017gfo measurements are plotted only for the historical LSST/PS1
+    comparison. They are PS1 photometry and must not be relabelled as ZTF.
     """
     system_style = {
         "lsst": ("#2f5f98", "Rubin/LSST envelope"),
         "ps1": ("#cc6677", "Pan-STARRS1 envelope"),
+        "ztf": ("#dd8d29", "ZTF envelope"),
     }
     for stage in STAGES:
         stage_name = stage_output_name(stage, scenario)
@@ -2544,7 +2933,7 @@ def save_dual_system_comparison_plots(
             ("consecutive", "dynamic_color_cut_rules.csv"),
         ):
             rules_by_system: dict[str, pd.DataFrame] = {}
-            for system in ("lsst", "ps1"):
+            for system in systems:
                 path = output / system / stage_name / rules_filename
                 if path.exists():
                     rules_by_system[system] = pd.read_csv(path)
@@ -2569,7 +2958,7 @@ def save_dual_system_comparison_plots(
                     ax.plot(x, [row.color_max] * 2, color=color, lw=0.9)
                     ax.plot(
                         x, [row.color_median] * 2, color=color, lw=1.35,
-                        linestyle="-" if system == "lsst" else "--",
+                        linestyle="-" if system == systems[0] else "--",
                     )
                 if not rules.empty:
                     color_arrays.append(
@@ -2577,12 +2966,12 @@ def save_dual_system_comparison_plots(
                     )
                 handles.append(Line2D(
                     [0], [0], color=color, lw=1.8,
-                    linestyle="-" if system == "lsst" else "--",
+                    linestyle="-" if system == systems[0] else "--",
                     label=label,
                 ))
 
             at_points = pd.DataFrame()
-            if at2017gfo_enabled:
+            if at2017gfo_enabled and "ps1" in systems:
                 candidate = (
                     output / "ps1" / stage_name
                     / f"AT2017gfo_{envelope_name}_color_points.csv"
@@ -2615,9 +3004,10 @@ def save_dual_system_comparison_plots(
                     padding = max(0.1, 0.06 * max(high - low, 0.1))
                     ax.set_ylim(low - padding, high + padding)
             ax.legend(handles=handles, frameon=False, fontsize=8)
+            comparison_prefix = "_".join(system.upper() for system in systems)
             fig.savefig(
                 output
-                / f"LSST_PS1_{stage}_{envelope_name}_comparison.png",
+                / f"{comparison_prefix}_{stage}_{envelope_name}_comparison.png",
                 dpi=220,
                 bbox_inches="tight",
             )
@@ -2625,12 +3015,12 @@ def save_dual_system_comparison_plots(
 
 
 def main(args: argparse.Namespace | None = None) -> Path:
-    """Build one system, or dispatch an identical LSST+PS1 analysis.
+    """Build one system, or dispatch a paired two-system analysis.
 
     The dual-system branch deliberately reuses the same event split, random
     seed, temporal grid and physical population.  Only the photometric
-    throughput used for the colour changes.  Rubin OpSim m5 remains the
-    selection depth in both branches because OpSim does not provide PS1 m5.
+    throughput used for the colour changes. PS1 uses Rubin detectability by
+    construction; ZTF uses its own empirical limiting-magnitude distribution.
     """
     if args is None:
         args = build_parser().parse_args()
@@ -2648,6 +3038,10 @@ def main(args: argparse.Namespace | None = None) -> Path:
             "PS1 has no u band. Choose an overlap colour such as g-r, r-i, "
             "i-z or z-y, or run --photometric-system lsst."
         )
+    if args.photometric_system in {"ztf", "lsst+ztf"} and any(
+        band not in ZTF_MW_R for band in pieces
+    ):
+        raise ValueError("ZTF supports only g, r and i. Choose g-r, g-i or r-i.")
 
     if args.bin_width <= 0 or args.t_max <= args.t_min:
         raise ValueError("Require bin-width > 0 and t-max > t-min")
@@ -2663,12 +3057,17 @@ def main(args: argparse.Namespace | None = None) -> Path:
         raise ValueError("at2017gfo-ebv must be non-negative")
     if args.at2017gfo_error_sigma <= 0:
         raise ValueError("at2017gfo-error-sigma must be strictly positive")
+    if args.at2017gfo_file is not None and args.photometric_system == "ztf":
+        raise ValueError(
+            "AT2017gfo input points are PS1 photometry, not ZTF. Build the "
+            "AT2017gfo overlay with --photometric-system ps1 (or both)."
+        )
     if args.snia_max_events < 0:
         raise ValueError("snia-max-events must be non-negative")
-    if args.snia_parquet is not None and args.photometric_system == "ps1":
+    if args.snia_parquet is not None and args.photometric_system in {"ps1", "ztf"}:
         raise ValueError(
             "The supplied SN Ia mock contains Rubin/LSST ugrizy photometry, "
-            "not PS1 photometry. Use --photometric-system lsst or both."
+            f"not {args.photometric_system.upper()} photometry. Use an LSST mode."
         )
     if not 0.0 <= args.latitude_threshold_deg <= 90.0:
         raise ValueError("latitude-threshold-deg must lie in [0, 90]")
@@ -2677,24 +3076,35 @@ def main(args: argparse.Namespace | None = None) -> Path:
         raise ValueError("(t-max - t-min) must be an integer multiple of bin-width")
     centres = 0.5 * (edges[:-1] + edges[1:])
 
-    if args.photometric_system == "both":
+    if args.photometric_system in {"both", "lsst+ztf"}:
+        systems = (
+            ("lsst", "ps1")
+            if args.photometric_system == "both"
+            else ("lsst", "ztf")
+        )
+        comparison_slug = "_".join(systems)
+        comparison_label = "+".join(system.upper() for system in systems)
         output = args.output_dir.expanduser().resolve() if args.output_dir else (
             run_root(args.run_dir)
             / "analysis"
             / (
                 f"four_stage_{band1}_{band2}_envelopes_"
-                f"{args.m5_scenario}_lsst_ps1_{population_latitude_tag(args)}"
+                f"{args.m5_scenario}_{comparison_slug}_{population_latitude_tag(args)}"
             )
         )
         output.mkdir(parents=True, exist_ok=True)
-        for system in ("lsst", "ps1"):
+        for system in systems:
             child_args = copy.deepcopy(args)
             child_args.photometric_system = system
             child_args.output_dir = output / system
             child_args.interactive = False
-            if system == "ps1":
+            if system != "lsst":
                 # The supplied SN Ia population is Rubin/LSST only.
                 child_args.snia_parquet = None
+            if args.photometric_system == "lsst+ztf":
+                # AT2017gfo measurements and best fit are PS1, not ZTF.
+                child_args.at2017gfo_file = None
+                child_args.at2017gfo_bestfit_file = None
             main(child_args)
         save_dual_system_comparison_plots(
             output,
@@ -2702,17 +3112,22 @@ def main(args: argparse.Namespace | None = None) -> Path:
             args.m5_scenario,
             args.t_min,
             args.t_max,
-            args.at2017gfo_file is not None,
+            args.at2017gfo_file is not None and "ps1" in systems,
+            systems=systems,
         )
-        (output / "LSST_PS1_comparison_configuration.json").write_text(
+        configuration_name = "_".join(system.upper() for system in systems)
+        (output / f"{configuration_name}_comparison_configuration.json").write_text(
             json.dumps(
                 {
                     "color_pair": pair,
-                    "systems": ["lsst", "ps1"],
+                    "systems": list(systems),
                     "same_injected_events": True,
                     "same_event_split_and_random_seed": True,
                     "same_OpSim_field_per_event": True,
-                    "m5_selection_system": "lsst",
+                    "depth_selection_system_by_envelope": {
+                        "lsst": "lsst",
+                        systems[1]: "lsst" if systems[1] == "ps1" else "ztf",
+                    },
                     "m5_scenario": args.m5_scenario,
                     "population_latitude_selection": (
                         population_latitude_label(args)
@@ -2722,21 +3137,24 @@ def main(args: argparse.Namespace | None = None) -> Path:
                         if args.population_latitude_selection != "all"
                         else None
                     ),
-                    "AT2017gfo_photometric_system": "ps1",
+                    "AT2017gfo_photometric_system": (
+                        "ps1" if "ps1" in systems and args.at2017gfo_file is not None
+                        else None
+                    ),
                     "SN_Ia_comparison_system": (
                         "lsst" if args.snia_parquet is not None else None
                     ),
                     "interpretation": (
-                        "The PS1 envelope uses PS1 synthetic colours. Its "
-                        "availability after the depth cut is evaluated with "
-                        "the corresponding Rubin LSST bands and OpSim m5."
+                        "PS1 uses the corresponding Rubin LSST bands for the "
+                        "OpSim depth selection. ZTF uses its own empirical "
+                        "per-band limiting-magnitude distribution."
                     ),
                 },
                 indent=2,
             )
             + "\n"
         )
-        print("Combined LSST+PS1 output:", output)
+        print(f"Combined {comparison_label} output:", output)
         return output
 
     synthetic_source = SyntheticPopulationSource(args.run_dir)
@@ -2797,11 +3215,6 @@ def main(args: argparse.Namespace | None = None) -> Path:
     split_map = split.set_index("event_id")["split"].to_dict()
     train = np.array([split_map[eid] == "train" for eid in event_ids], dtype=bool)
 
-    m5_table = discover_m5_table(args.run_dir, args.m5_quantile_table)
-    m5 = load_m5(
-        m5_table, args.threshold_scope, args.m5_scenario, (band1, band2)
-    )
-
     output = args.output_dir.expanduser().resolve() if args.output_dir else (
         run_root(args.run_dir)
         / "analysis"
@@ -2812,8 +3225,37 @@ def main(args: argparse.Namespace | None = None) -> Path:
         )
     )
     output.mkdir(parents=True, exist_ok=True)
+
+    ztf_depth_table = pd.DataFrame()
+    if args.photometric_system == "ztf":
+        m5, ztf_depth_table = load_ztf_depth_thresholds(
+            directory=args.ztf_depth_dir,
+            quantile_table=args.ztf_depth_quantile_table,
+            scenario=args.m5_scenario,
+            bands=(band1, band2),
+            n_samples=args.ztf_depth_samples,
+            seed=args.ztf_depth_seed,
+        )
+        ztf_depth_table.to_csv(output / "ztf_depth_quantiles_used.csv", index=False)
+        m5_table = (
+            args.ztf_depth_quantile_table.expanduser().resolve()
+            if args.ztf_depth_quantile_table is not None
+            else output / "ztf_depth_quantiles_used.csv"
+        )
+        print(
+            "ZTF empirical depth thresholds: "
+            + ", ".join(f"{band}={value:.4f}" for band, value in m5.items())
+        )
+    else:
+        m5_table = discover_m5_table(args.run_dir, args.m5_quantile_table)
+        m5 = load_m5(
+            m5_table, args.threshold_scope, args.m5_scenario, (band1, band2)
+        )
+
     split.to_csv(output / "event_split.csv", index=False)
     at2017gfo_input = None
+    at2017gfo_bestfit_input = None
+    at2017gfo_bestfit_parameters: dict[str, float] = {}
     if args.at2017gfo_file is not None:
         at2017gfo_input = load_at2017gfo_colour_points(
             args.at2017gfo_file,
@@ -2829,6 +3271,20 @@ def main(args: argparse.Namespace | None = None) -> Path:
             f"AT2017gfo: {len(at2017gfo_input)} unique {pair} pairs within "
             f"{args.at2017gfo_match_window_days:g} days"
         )
+        if args.at2017gfo_bestfit_file is not None:
+            (
+                at2017gfo_bestfit_input,
+                at2017gfo_bestfit_parameters,
+            ) = load_at2017gfo_bestfit_colour_curve(
+                args.at2017gfo_bestfit_file, band1, band2
+            )
+            at2017gfo_bestfit_input.to_csv(
+                output / "AT2017gfo_bestfit_input_color_curve.csv", index=False
+            )
+            print(
+                f"AT2017gfo best-fit: {len(at2017gfo_bestfit_input)} finite "
+                f"saved model {pair} points"
+            )
     selection_rows = []
     for rank, event_index in enumerate(maximum_plot_indices, start=1):
         row = {
@@ -2849,9 +3305,8 @@ def main(args: argparse.Namespace | None = None) -> Path:
     ext1 = np.full_like(int1, np.nan)
     ext2 = np.full_like(int1, np.nan)
     # The colour system and the survey selection system are deliberately
-    # separate.  For a PS1 colour, OpSim detectability is still evaluated in
-    # the corresponding Rubin bands; applying Rubin m5 directly to a PS1
-    # magnitude would silently mix two different passbands.
+    # separate only for PS1. ZTF and LSST are selected with their own depths;
+    # PS1 detectability is evaluated in corresponding saved Rubin bands.
     selection_int1 = np.full_like(int1, np.nan)
     selection_int2 = np.full_like(int1, np.nan)
     selection_ext1 = np.full_like(int1, np.nan)
@@ -2871,11 +3326,12 @@ def main(args: argparse.Namespace | None = None) -> Path:
     processed_events = 0
     processed_event_ids: set[str] = set()
     progress_interval = max(500, n_events // 20)
-    requested_systems = (
-        ("lsst",)
-        if args.photometric_system == "lsst"
-        else ("lsst", "ps1")
+    selection_system = (
+        "lsst" if args.photometric_system == "ps1" else args.photometric_system
     )
+    requested_systems = tuple(dict.fromkeys(
+        (args.photometric_system, selection_system)
+    ))
     for event_id, lightcurve in synthetic_source.iter_events(
         event_ids, (band1, band2), requested_systems
     ):
@@ -2915,12 +3371,12 @@ def main(args: argparse.Namespace | None = None) -> Path:
             lightcurve["photometric_system"] == args.photometric_system
         ].copy()
         selection_curve = lightcurve.loc[
-            lightcurve["photometric_system"] == "lsst"
+            lightcurve["photometric_system"] == selection_system
         ].copy()
         mw1 = event_extinction_mag(row, args.photometric_system, band1)
         mw2 = event_extinction_mag(row, args.photometric_system, band2)
-        selection_mw1 = event_extinction_mag(row, "lsst", band1)
-        selection_mw2 = event_extinction_mag(row, "lsst", band2)
+        selection_mw1 = event_extinction_mag(row, selection_system, band1)
+        selection_mw2 = event_extinction_mag(row, selection_system, band2)
 
         # Saved magnitudes already include MW extinction. Interpolation is
         # restricted to the saved support of each band, so it cannot recreate
@@ -3196,6 +3652,20 @@ def main(args: argparse.Namespace | None = None) -> Path:
                 args.at2017gfo_photometry_mode,
                 args.photometric_system,
             )
+            at2017gfo_bestfit_stage = None
+            if at2017gfo_bestfit_input is not None:
+                at2017gfo_bestfit_stage = at2017gfo_stage_colours(
+                    at2017gfo_bestfit_input,
+                    stage,
+                    band1,
+                    band2,
+                    args.at2017gfo_ebv,
+                    args.at2017gfo_bestfit_photometry_mode,
+                    args.photometric_system,
+                )
+                at2017gfo_bestfit_stage.to_csv(
+                    stage_dir / "AT2017gfo_bestfit_color_curve.csv", index=False
+                )
             for envelope_name, envelope_rules in (
                 ("all_valid", rules_all),
                 ("consecutive", rules_consecutive),
@@ -3204,6 +3674,7 @@ def main(args: argparse.Namespace | None = None) -> Path:
                     stage_dir,
                     at2017gfo_stage,
                     envelope_rules,
+                    at2017gfo_bestfit_stage,
                     envelope_name,
                     pair,
                     args.t_min,
@@ -3288,11 +3759,15 @@ def main(args: argparse.Namespace | None = None) -> Path:
         "raw_model_predictions_recomputed": False,
         "synthetic_input_source": synthetic_source.kind,
         "photometric_system": args.photometric_system,
-        "m5_selection_system": "lsst",
+        "m5_selection_system": selection_system,
         "m5_selection_note": (
-            "Rubin OpSim m5 is applied to the corresponding saved LSST "
-            "magnitudes. For a PS1 envelope, it is not applied directly to "
-            "the PS1 magnitude."
+            "ZTF empirical depth is applied directly to saved ZTF magnitudes."
+            if args.photometric_system == "ztf"
+            else (
+                "Rubin OpSim m5 is applied to the corresponding saved LSST "
+                "magnitudes. For a PS1 envelope, it is not applied directly "
+                "to the PS1 magnitude."
+            )
         ),
         "numerical_support": "inherited exactly from generate_kne_lightcurves.py",
         "color_pair": pair,
@@ -3318,9 +3793,33 @@ def main(args: argparse.Namespace | None = None) -> Path:
             "m5_with_mw": f"m5_with_mw_{args.m5_scenario}",
         },
         "m5_quantile_table": str(m5_table),
-        "m5_threshold_scope": args.threshold_scope,
+        "m5_threshold_scope": (
+            None if args.photometric_system == "ztf" else args.threshold_scope
+        ),
         "m5_scenario": args.m5_scenario,
         "m5_by_band": m5,
+        "ztf_depth_sampling": (
+            {
+                "depth_directory": (
+                    str(args.ztf_depth_dir.expanduser().resolve())
+                    if args.ztf_depth_dir is not None else None
+                ),
+                "input_quantile_table": (
+                    str(args.ztf_depth_quantile_table.expanduser().resolve())
+                    if args.ztf_depth_quantile_table is not None else None
+                ),
+                "recorded_quantile_table": str(
+                    output / "ztf_depth_quantiles_used.csv"
+                ),
+                "draws_per_band": args.ztf_depth_samples,
+                "seed": args.ztf_depth_seed,
+                "interpretation": (
+                    "one global limiting-magnitude quantile per band; this is "
+                    "not a realization of ZTF cadence or per-visit noise"
+                ),
+            }
+            if args.photometric_system == "ztf" else None
+        ),
         "tail_percentile_grid": sorted(set(tails)),
         "median_is_stored_and_plotted": True,
         "population_plot_is_binned": False,
@@ -3452,6 +3951,19 @@ def main(args: argparse.Namespace | None = None) -> Path:
             "merger_mjd": args.at2017gfo_merger_mjd,
             "maximum_pair_separation_days": args.at2017gfo_match_window_days,
             "input_photometry_mode": args.at2017gfo_photometry_mode,
+            "bestfit_file": (
+                str(args.at2017gfo_bestfit_file.expanduser().resolve())
+                if args.at2017gfo_bestfit_file is not None else None
+            ),
+            "bestfit_input_photometry_mode": (
+                args.at2017gfo_bestfit_photometry_mode
+                if args.at2017gfo_bestfit_file is not None else None
+            ),
+            "bestfit_curve_source": (
+                "saved light_curves arrays; model not re-evaluated"
+                if args.at2017gfo_bestfit_file is not None else None
+            ),
+            "bestfit_parameters": at2017gfo_bestfit_parameters,
             "ebv_mw": args.at2017gfo_ebv,
             "photometric_error_compatibility_sigma": args.at2017gfo_error_sigma,
             "filter_mapping": {

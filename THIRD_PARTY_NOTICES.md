@@ -36,3 +36,28 @@ the downloaded model revision and checksums alongside production runs.
 The workflow uses `rubin_sim` and `rubin_scheduler` for Rubin/LSST survey and
 photometric calculations. Those packages and OpSim databases are not
 redistributed by this repository and remain subject to their upstream terms.
+
+## NMMA ZTF depth distributions
+
+The optional ZTF depth selection reads the external files
+`lims_public_g.joblib`, `lims_public_r.joblib`, and `lims_i.joblib`
+distributed with the Nuclear Multi-Messenger Astronomy (NMMA) project.
+
+These files contain empirical ZTF limiting-magnitude distributions and are
+used as external runtime inputs.
+
+- Project: `nuclear-multimessenger-astronomy/nmma`
+- Upstream repository:
+  <https://github.com/nuclear-multimessenger-astronomy/nmma>
+- Upstream package license: GPL-3.0-only
+- Files used:
+  `nmma/em/data/lims_public_g.joblib`,
+  `nmma/em/data/lims_public_r.joblib`,
+  and `nmma/em/data/lims_i.joblib`
+
+The files are not redistributed by this repository. Users must provide their
+own trusted copies at runtime. Their paths and SHA-256 checksums are recorded
+in the generated analysis metadata.
+
+Because joblib is pickle-based, files from untrusted sources must not be
+loaded.

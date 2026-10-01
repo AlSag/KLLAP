@@ -65,6 +65,25 @@ integrate it through its existing LSST and PS1 filter definitions, including
 paired `lsst+ps1` runs. Its training bounds are read from the released model
 metadata and reproduced in the generator.
 
+### ZTF limiting-magnitude distributions
+
+The optional ZTF analysis uses the limiting-magnitude KDEs distributed with
+NMMA. They are not included in this repository.
+
+Place trusted copies in:
+
+    ztf_depth_distributions/
+    ├── lims_public_g.joblib
+    ├── lims_public_r.joblib
+    └── lims_i.joblib
+
+To inspect these distributions:
+
+    python tools/plot_ztf_depth_distributions.py
+
+The script writes a three-panel distribution plot and a CSV table containing
+the p25, p50, and p75 limiting magnitudes.
+
 ## End-to-end use
 
 ### 1. Export OpSim fields

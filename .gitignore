@@ -26,3 +26,5 @@ ssh_key*
 id_rsa*
 id_ed25519*
 *.pem
+*.joblib
+ztf_depth_distributions/
