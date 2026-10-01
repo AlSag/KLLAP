@@ -1,9 +1,10 @@
-"""Generate synthetic and Rubin/LSST-like kilonova light curves.
+"""Generate synthetic Rubin/LSST-like or PS1 kilonova light curves.
 
-The script uses the FIESTA ``Bu2026_MLP`` surrogate of POSSIS to generate a
-population of multi-band kilonova light curves.  Every mode uses an exported
-Rubin OpSim sky context; LSST-like modes additionally apply the OpSim cadence
-and the Rubin photometric-noise model.
+The default model is the FIESTA ``Bu2026_MLP`` surrogate of POSSIS. The
+alternative ``Bu2019_MLP`` is also a FIESTA spectral-flux surrogate and can be
+integrated through the requested Rubin/LSST and PS1 passbands. Every mode uses
+an exported Rubin OpSim sky context; LSST-like modes additionally apply the
+OpSim cadence and Rubin photometric-noise model.
 
 Quick start
 -----------
@@ -22,7 +23,7 @@ for the interactive terminal menu, or for example::
         --seed 12345
 
 The runtime environment must provide NumPy, pandas, Matplotlib, JAX, Astropy,
-``rubin_sim``, and FIESTA with access to the ``Bu2026_MLP`` model. Every mode
+``rubin_sim``, and FIESTA with access to the selected surrogate. Every mode
 requires an OpSim export directory produced by ``get_opsim_baseline.py``. Run
 ``python generate_kne_lightcurves.py --help``
 for every non-interactive option.
@@ -63,7 +64,7 @@ Per-event workflow
    rows of a named FIESTA posterior.
 2. Draw an isotropic viewing angle and either a fixed distance or a distance
    that is uniform in comoving volume under the Astropy Planck18 cosmology.
-3. Evaluate ``Bu2026_MLP`` on its native observer-frame time grid.
+3. Evaluate the selected FIESTA surrogate on its native observer-frame grid.
 4. When an OpSim context is required, draw one exported source position and a
    merger time ``t0`` within that field's survey interval.
 5. For LSST-like products, interpolate the dense model to post-merger visit
@@ -186,8 +187,20 @@ import secrets
 # --- FIESTA ---
 
 from fiesta.inference.prior import Uniform
-from fiesta.inference.prior_dict import ConstrainedPrior
-from fiesta.inference.lightcurve_model import BullaFlux
+try:
+    # fiestaEM <= 0.2.x
+    from fiesta.inference.prior_dict import ConstrainedPrior
+except ImportError:
+    # fiestaEM >= 0.3.0
+    from fiesta.inference.prior import ConstrainedPrior
+try:
+    # fiestaEM <= 0.2.x
+    from fiesta.inference.lightcurve_model import BullaFlux
+    FIESTA_SURROGATE_API = "legacy BullaFlux"
+except ImportError:
+    # fiestaEM >= 0.3.0
+    from fiesta.models import FluxSurrogate as BullaFlux
+    FIESTA_SURROGATE_API = "FluxSurrogate"
 
 # --- COSMOLOGY FOR DISTANCE SAMPLING ---
 # Used only to draw events uniformly in comoving volume.
@@ -377,7 +390,7 @@ def plot_synthetic_only(times, mag_dict, filters, filter_colors, mag_lim, outfil
     y_all = np.concatenate(finite_chunks)
     ybright = np.nanmin(y_all)
     ax.set_ylim(mag_lim + 0.2, ybright - 0.3)
-
+        
     ax.legend(loc="upper left", bbox_to_anchor=(1.02, 1.0),
               frameon=True, framealpha=0.95, title="Filters (synthetic)")
 
@@ -803,7 +816,7 @@ def apply_lsst_realism_to_fiesta(
     mag_truth_cap=None,
     rng=None,
 ):
-
+    
     """Project a dense FIESTA light curve through an OpSim visit sequence.
 
     Parameters
@@ -843,7 +856,7 @@ def apply_lsst_realism_to_fiesta(
     SNR and magnitude uncertainty.  Noise is drawn in relative flux units, so
     no absolute flux zero point is required; it cancels in flux/SNR ratios.
     """
-
+    
     if rng is None:
         rng = np.random.default_rng()
 
@@ -860,7 +873,7 @@ def apply_lsst_realism_to_fiesta(
     # Time since trigger (days). Keep only post-trigger visits.
     v["t_days"] = v["observationStartMJD"] - t0_mjd
     v = v[v["t_days"] >= 0].reset_index(drop=True)
-
+    
     v["fiesta_filter"] = v["band"].map(BAND_TO_FIESTA)
 
     mag_true = np.full(len(v), np.nan, dtype=float)
@@ -871,7 +884,7 @@ def apply_lsst_realism_to_fiesta(
         if f is None or f not in mag_model_dict:
             continue
         mask = (v["band"].values == b)
-
+        
         # Interpolate the dense synthetic lightcurve to the irregular OpSim visit times.
         # This converts the model grid (times_model) into per-visit truth magnitudes mag_true(t_days).
         mag_true[mask] = interpolate_magnitude_log_time(
@@ -879,8 +892,8 @@ def apply_lsst_realism_to_fiesta(
             mag_model_dict[f],
             v.loc[mask, "t_days"].to_numpy()
         )
-
-
+        
+        
     if mag_truth_cap is not None:
         mag_true[mag_true > float(mag_truth_cap)] = np.nan
 
@@ -917,16 +930,16 @@ def apply_lsst_realism_to_fiesta(
         for k in idx:
             mi = float(v.at[k, "mag_true"])
             m5i = float(v.at[k, "m5"])
-
+        
             snr_k, _ = calc_snr_m5(mi, bp, m5i, pp)
             merr_k, _ = calc_mag_error_m5(mi, bp, m5i, pp)
-
+        
             snr_exp[k] = snr_k
             mag_err[k] = merr_k
 
     v["snr_exp"] = snr_exp
     v["mag_err"] = mag_err
-
+    
     # Convert mag -> relative flux, add Gaussian noise in flux space, then apply a detection threshold.
     # If detected: report mag_obs with mag_err; otherwise report an upper limit mag_ulim = m5.
     ok = np.isfinite(v["mag_true"].values) & np.isfinite(v["snr_exp"].values) & (v["snr_exp"].values > 0)
@@ -1161,7 +1174,7 @@ def sample_inclination_for_event(rng: np.random.Generator) -> float:
 
 # --- PHOTOMETRIC FILTER SYSTEMS ---
 
-# Exact filter identifiers expected by the Bu2026 FIESTA surrogate.
+# Exact FIESTA filter identifiers used by both spectral-flux surrogates.
 # The selected system is chosen in the terminal menu below.
 FILTER_SYSTEM_CONFIG = {
     "lsst": {
@@ -1283,6 +1296,24 @@ def build_runtime_parser() -> argparse.ArgumentParser:
         "--run-name",
         default="broad_run",
         help="Readable label used in the output-directory name",
+    )
+    parser.add_argument(
+        "--model",
+        choices=["Bu2026_MLP", "Bu2019_MLP"],
+        default="Bu2026_MLP",
+        help=(
+            "FIESTA kilonova spectral-flux surrogate. Bu2019_MLP requires "
+            "fiestaEM >= 0.3.0 for automatic Hugging Face download."
+        ),
+    )
+    parser.add_argument(
+        "--fiesta-surrogate-dir",
+        type=Path,
+        help=(
+            "Optional directory containing <model>.pkl and "
+            "<model>_metadata.pkl. When omitted, FIESTA uses its built-in "
+            "directory or downloads the selected surrogate."
+        ),
     )
     parser.add_argument(
         "--runs-root",
@@ -1436,7 +1467,7 @@ def build_runtime_parser() -> argparse.ArgumentParser:
         type=int,
         default=64,
         help=(
-            "Requested Bu2026 prediction batch size. The first batch is "
+            "Requested FIESTA prediction batch size. The first batch is "
             "checked against scalar predictions; unsupported or inconsistent "
             "batch APIs fall back automatically to scalar evaluation"
         ),
@@ -1549,6 +1580,22 @@ def configure_runtime() -> argparse.Namespace:
     interactive = bool(args.interactive or len(sys.argv) == 1)
     if interactive:
         args.run_name = prompt_text("Readable run name", args.run_name)
+        args.model = prompt_choice(
+            "Kilonova light-curve model",
+            [
+                ("Bu2026_MLP", "FIESTA Bu2026_MLP (Rubin/LSST and PS1)"),
+                ("Bu2019_MLP", "FIESTA Bu2019_MLP (Rubin/LSST and PS1)"),
+            ],
+            args.model,
+        )
+        if args.model == "Bu2019_MLP":
+            surrogate_path = prompt_text(
+                "Local FIESTA surrogate directory (empty = automatic download)",
+                str(args.fiesta_surrogate_dir or ""),
+            ).strip()
+            args.fiesta_surrogate_dir = (
+                Path(surrogate_path) if surrogate_path else None
+            )
         args.parameter_source = prompt_choice(
             "Physical-parameter population",
             [("broad", "Broad uniform parameter ranges"), ("posterior", "FIESTA posterior (.npz or AT2017gfo.tar)")],
@@ -1702,18 +1749,19 @@ def configure_runtime() -> argparse.Namespace:
             args.fixed_distance_mpc = float(
                 prompt_text("Fixed luminosity distance [Mpc]", str(args.fixed_distance_mpc))
             )
-        args.numerical_floor_absolute_mag = float(
-            prompt_text(
-                "Bu2026 numerical floor in absolute magnitude",
-                str(args.numerical_floor_absolute_mag),
+        if args.model == "Bu2026_MLP":
+            args.numerical_floor_absolute_mag = float(
+                prompt_text(
+                    "Bu2026 numerical floor in absolute magnitude",
+                    str(args.numerical_floor_absolute_mag),
+                )
             )
-        )
-        args.numerical_floor_margin_mag = float(
-            prompt_text(
-                "Safety margin before numerical floor [mag]",
-                str(args.numerical_floor_margin_mag),
+            args.numerical_floor_margin_mag = float(
+                prompt_text(
+                    "Safety margin before numerical floor [mag]",
+                    str(args.numerical_floor_margin_mag),
+                )
             )
-        )
         args.opsim_dir = Path(prompt_text("OpSim export directory", str(args.opsim_dir)))
         args.galactic_latitude_mode = prompt_choice(
             "OpSim-field Galactic-latitude selection",
@@ -1807,6 +1855,12 @@ def configure_runtime() -> argparse.Namespace:
             )
     if args.n_samples <= 0:
         raise ValueError("--n-samples must be positive")
+    if args.model == "Bu2019_MLP" and args.parameter_source != "broad":
+        raise ValueError(
+            "Bu2019_MLP currently supports --parameter-source broad only. "
+            "A Bu2026/AT2017gfo posterior does not share the Bu2019_MLP "
+            "parameterization."
+        )
     if args.seed is not None and args.seed < 0:
         raise ValueError("--seed must be non-negative")
     if args.sky_seed is not None and args.sky_seed < 0:
@@ -1901,6 +1955,7 @@ def configure_runtime() -> argparse.Namespace:
 
 RUNTIME = configure_runtime()
 
+MODEL_NAME = RUNTIME.model
 FILTER_SYSTEM = RUNTIME.filter_system
 FILTER_SYSTEMS = (
     list(FILTER_SYSTEM_CONFIG[FILTER_SYSTEM].get("systems", (FILTER_SYSTEM,)))
@@ -2066,6 +2121,7 @@ NUMERICAL_FLOOR_MARGIN_MAG = float(RUNTIME.numerical_floor_margin_mag)
 NUMERICAL_SUPPORT_ABSOLUTE_MAG = (
     NUMERICAL_FLOOR_ABSOLUTE_MAG - NUMERICAL_FLOOR_MARGIN_MAG
 )
+APPLY_NUMERICAL_SUPPORT_CUT = MODEL_NAME == "Bu2026_MLP"
 
 
 def distance_modulus_mpc(luminosity_distance_mpc):
@@ -2242,22 +2298,46 @@ FIX_PARAM = None  # For example, "inclination_EM".
 FIX_VALUE = None  # Required when FIX_PARAM is not None.
 
 
-# Instantiate the selected FIESTA surrogate once and reuse it for every event.
-model = BullaFlux(name="Bu2026_MLP", filters=FILTERS)
-print(f"Using model: {model.name}")
+# Instantiate the selected FIESTA flux surrogate once and reuse it.
+surrogate_directory = (
+    str(RUNTIME.fiesta_surrogate_dir.expanduser().resolve())
+    if RUNTIME.fiesta_surrogate_dir is not None else None
+)
+model = BullaFlux(
+    name=MODEL_NAME,
+    filters=FILTERS,
+    directory=surrogate_directory,
+)
+MODEL_BACKEND = f"FIESTA ({FIESTA_SURROGATE_API})"
+print(f"Using model: {model.name} ({MODEL_BACKEND})")
 
 
 # Broad intrinsic population.  Distance, redshift, and inclination are sampled
 # separately so their distributions can be controlled explicitly.
-KN_prior = [
-    # inclination_EM is sampled separately below so it can be uniform in cos(i).
-    Uniform(xmin=-3.0, xmax=-1.3, naming=["log10_mej_dyn"]),
-    Uniform(xmin=0.12, xmax=0.28, naming=["v_ej_dyn"]),
-    Uniform(xmin=0.15, xmax=0.35, naming=["Ye_dyn"]),
-    Uniform(xmin=-2.0, xmax=-0.9, naming=["log10_mej_wind"]),
-    Uniform(xmin=0.05, xmax=0.15, naming=["v_ej_wind"]),
-    Uniform(xmin=0.2, xmax=0.4, naming=["Ye_wind"]),
-]
+if MODEL_NAME == "Bu2026_MLP":
+    KN_prior = [
+        # inclination_EM is sampled separately so it is uniform in cos(i).
+        Uniform(xmin=-3.0, xmax=-1.3, naming=["log10_mej_dyn"]),
+        Uniform(xmin=0.12, xmax=0.28, naming=["v_ej_dyn"]),
+        Uniform(xmin=0.15, xmax=0.35, naming=["Ye_dyn"]),
+        Uniform(xmin=-2.0, xmax=-0.9, naming=["log10_mej_wind"]),
+        Uniform(xmin=0.05, xmax=0.15, naming=["v_ej_wind"]),
+        Uniform(xmin=0.2, xmax=0.4, naming=["Ye_wind"]),
+    ]
+else:
+    # Exact training bounds recorded in Bu2019_MLP_metadata.pkl. Inclination
+    # is still drawn separately and isotropically in cos(i).
+    KN_prior = [
+        Uniform(
+            xmin=-3.0, xmax=-1.6989700043360187,
+            naming=["log10_mej_dyn"],
+        ),
+        Uniform(
+            xmin=-2.0, xmax=-0.8860566476931632,
+            naming=["log10_mej_wind"],
+        ),
+        Uniform(xmin=0.0, xmax=90.0, naming=["phi"]),
+    ]
 prior = ConstrainedPrior(KN_prior)
 
 
@@ -2382,13 +2462,15 @@ if VARY_ONE_PARAM:
         raise ValueError("VARY_MODE must be 'uniform' or 'linspace'")
 
 
+MODEL_INTRINSIC_PARAMETER_COLUMNS = {
+    "Bu2026_MLP": [
+        "log10_mej_dyn", "v_ej_dyn", "Ye_dyn", "log10_mej_wind",
+        "v_ej_wind", "Ye_wind",
+    ],
+    "Bu2019_MLP": ["log10_mej_dyn", "log10_mej_wind", "phi"],
+}
 INTRINSIC_PARAMETER_COLUMNS = [
-    "log10_mej_dyn",
-    "v_ej_dyn",
-    "Ye_dyn",
-    "log10_mej_wind",
-    "v_ej_wind",
-    "Ye_wind",
+    *MODEL_INTRINSIC_PARAMETER_COLUMNS[MODEL_NAME],
     "inclination_EM",
     "redshift",
     "luminosity_distance",
@@ -2453,6 +2535,7 @@ def create_intrinsic_catalog(path):
         row = {
             "event_id": f"{event_index:06d}",
             "event_index": int(event_index),
+            "model": MODEL_NAME,
             "intrinsic_seed": int(seed),
             "parameter_source": PARAMETER_SOURCE,
             "posterior_inclination": (
@@ -2495,6 +2578,24 @@ def load_intrinsic_catalog(path):
         raise ValueError(
             f"Intrinsic catalogue contains {len(catalogue):,} events but "
             f"--n-samples={N_SAMPLES:,}. Use the catalogue size exactly."
+        )
+    if "model" in catalogue:
+        catalogue_models = set(catalogue["model"].astype(str))
+        if catalogue_models != {MODEL_NAME}:
+            raise ValueError(
+                f"Catalogue model={sorted(catalogue_models)} does not match "
+                f"the selected model {MODEL_NAME!r}. Intrinsic catalogues "
+                "cannot be reused across different light-curve models."
+            )
+    elif MODEL_NAME != "Bu2026_MLP":
+        raise ValueError(
+            "This legacy intrinsic catalogue has no model column and can only "
+            "be interpreted as Bu2026_MLP, not Bu2019_MLP."
+        )
+    else:
+        print(
+            "Warning: legacy intrinsic catalogue has no model column; "
+            "interpreting it as Bu2026_MLP."
         )
     expected_indices = np.arange(N_SAMPLES, dtype=int)
     event_indices = pd.to_numeric(
@@ -2610,6 +2711,7 @@ if SAVE_PNG or SAVE_PNG_LSSTLIKE or SAVE_PNG_SYNTHETIC_ONLY:
 timestamp = datetime.now().isoformat(timespec="seconds")
 
 population_info = {
+    "light_curve_model": MODEL_NAME,
     "parameter_source": PARAMETER_SOURCE,
     "posterior_file": POSTERIOR_FILE if PARAMETER_SOURCE == "posterior" else None,
     "posterior_inclination": (
@@ -2673,11 +2775,22 @@ output_info = {
     "synthetic_depth_comparison_column": (
         "mag" if SYNTHETIC_DEPTH_CUT == "m5-median" else None
     ),
-    "bu2026_numerical_floor_absolute_mag": NUMERICAL_FLOOR_ABSOLUTE_MAG,
-    "numerical_floor_safety_margin_mag": NUMERICAL_FLOOR_MARGIN_MAG,
-    "faintest_supported_absolute_mag": NUMERICAL_SUPPORT_ABSOLUTE_MAG,
-    "apparent_cut_formula": "M_floor - margin + 5*log10(D_L/Mpc) + 25",
-    "numerical_floor_cut_applied_before_mw_and_m5": True,
+    "bu2026_numerical_floor_absolute_mag": (
+        NUMERICAL_FLOOR_ABSOLUTE_MAG if APPLY_NUMERICAL_SUPPORT_CUT else None
+    ),
+    "numerical_floor_safety_margin_mag": (
+        NUMERICAL_FLOOR_MARGIN_MAG if APPLY_NUMERICAL_SUPPORT_CUT else None
+    ),
+    "faintest_supported_absolute_mag": (
+        NUMERICAL_SUPPORT_ABSOLUTE_MAG if APPLY_NUMERICAL_SUPPORT_CUT else None
+    ),
+    "apparent_cut_formula": (
+        "M_floor - margin + 5*log10(D_L/Mpc) + 25"
+        if APPLY_NUMERICAL_SUPPORT_CUT else None
+    ),
+    "numerical_floor_cut_applied_before_mw_and_m5": (
+        APPLY_NUMERICAL_SUPPORT_CUT
+    ),
     "plot_mode": RUNTIME.plot_mode,
     "max_plot_events_per_product": MAX_PLOT_EVENTS,
     "minimum_detections": (
@@ -2698,6 +2811,9 @@ run_info_sections = {
     },
     "model": {
         "surrogate": model.name,
+        "backend": MODEL_BACKEND,
+        "fiesta_surrogate_api": FIESTA_SURROGATE_API,
+        "explicit_surrogate_directory": surrogate_directory,
         "filter_system": FILTER_SYSTEM,
         "photometric_systems_saved": FILTER_SYSTEMS,
         "filters": FILTERS,
@@ -2953,9 +3069,8 @@ class ValidatedSurrogatePredictor:
     Important
     ---------
     A dictionary containing arrays must be passed to ``surrogate.vpredict``.
-    Passing it to scalar ``surrogate.predict`` makes the seven-dimensional
-    physical input collide with the batch dimension (the former implementation
-    produced errors such as ``(1, 448)`` versus ``(7,)``).  ``vpredict`` applies
+    Passing it to scalar ``surrogate.predict`` makes the physical-parameter
+    axis collide with the batch dimension. ``vpredict`` applies
     the *same* scalar ``predict`` function through ``jax.vmap``; it changes only
     how independent events are evaluated, not the surrogate or its physics.
     """
@@ -3091,6 +3206,8 @@ def build_event_summary(
         "lsstlike_data_end_time_since_merger_days": lsstlike_window_end_days,
         "detection_evaluated": bool(detection_evaluated),
         "output_mode": OUTPUT_MODE,
+        "model": MODEL_NAME,
+        "model_backend": MODEL_BACKEND,
         "synthetic_csv_saved": bool(synthetic_csv_saved),
         "lsstlike_csv_saved": bool(lsstlike_csv_saved),
         "synthetic_parquet_saved": bool(synthetic_parquet_saved),
@@ -3108,12 +3225,14 @@ def build_event_summary(
             if PARAMETER_SOURCE == "posterior" and POSTERIOR_INCLINATION == "posterior"
             else INCLINATION_SAMPLING
         ),
-        "log10_mej_dyn": float(params["log10_mej_dyn"]),
-        "v_ej_dyn": float(params["v_ej_dyn"]),
-        "Ye_dyn": float(params["Ye_dyn"]),
-        "log10_mej_wind": float(params["log10_mej_wind"]),
-        "v_ej_wind": float(params["v_ej_wind"]),
-        "Ye_wind": float(params["Ye_wind"]),
+        "log10_mej_dyn": float(params.get("log10_mej_dyn", np.nan)),
+        "v_ej_dyn": float(params.get("v_ej_dyn", np.nan)),
+        "Ye_dyn": float(params.get("Ye_dyn", np.nan)),
+        "log10_mej_wind": float(params.get("log10_mej_wind", np.nan)),
+        "v_ej_wind": float(params.get("v_ej_wind", np.nan)),
+        "Ye_wind": float(params.get("Ye_wind", np.nan)),
+        "phi_deg": float(params.get("phi", np.nan)),
+        "KNtheta_deg": float(np.degrees(params["inclination_EM"])),
         "ebv_mw": float(event_mw_extinction.get("ebv_mw", np.nan)),
         "fieldRA": float(event_mw_extinction.get("fieldRA", np.nan)),
         "fieldDec": float(event_mw_extinction.get("fieldDec", np.nan)),
@@ -3157,11 +3276,18 @@ for event_context, prediction in iter_event_predictions():
     rng_i = event_context["rng"]
     times, raw_mag = prediction
     d_l = float(params["luminosity_distance"])
-    event_numerical_support_cut_mag = numerical_support_cut_apparent_mag(d_l)
-    mag = mask_bands_after_numerical_floor(
-        raw_mag,
-        apparent_cut_mag=event_numerical_support_cut_mag,
-    )
+    if APPLY_NUMERICAL_SUPPORT_CUT:
+        event_numerical_support_cut_mag = numerical_support_cut_apparent_mag(d_l)
+        mag = mask_bands_after_numerical_floor(
+            raw_mag,
+            apparent_cut_mag=event_numerical_support_cut_mag,
+        )
+    else:
+        event_numerical_support_cut_mag = np.inf
+        mag = {
+            filter_name: np.asarray(values, dtype=float)
+            for filter_name, values in raw_mag.items()
+        }
 
     # Per-event output/context defaults. In modes without LSST realism,
     # detection fields remain unavailable (NaN), not false detections.
@@ -3283,7 +3409,7 @@ for event_context, prediction in iter_event_predictions():
             days_after_last_detection=LSSTLIKE_DAYS_AFTER_LAST_DETECTION,
         )
         obs = add_lsstlike_candidate_ids(obs, event_index=i)
-
+        
         det_mask = obs["detected"].to_numpy(bool)
         nondet_mask = ~det_mask
         n_det = int(det_mask.sum())
@@ -3309,10 +3435,10 @@ for event_context, prediction in iter_event_predictions():
             obs.to_csv(outdir / f"lightcurve_LSSTlike_{i:04d}.csv", index=False)
         if SAVE_PARQUET and save_lsstlike_csv:
             LSSTLIKE_PARQUET_WRITER.add(i, obs)
-
+        
         t_first = float(obs.loc[det_mask, "t_days"].min()) if det_any else np.nan
         t_last  = float(obs.loc[det_mask, "t_days"].max()) if det_any else np.nan
-
+        
         summaries.append(
             build_event_summary(
                 event_index=i,
@@ -3334,7 +3460,7 @@ for event_context, prediction in iter_event_predictions():
                 numerical_support_cut_mag=event_numerical_support_cut_mag,
             )
         )
-
+        
         if SAVE_PNG and save_lsstlike_csv:
             plot_synthetic_and_lsstlike(
                 times=times,
@@ -3346,7 +3472,7 @@ for event_context, prediction in iter_event_predictions():
                 outfile=pngdir / f"lightcurve_overlay_{i:04d}.png"
             )
 
-
+        
         if (
             SAVE_PNG_LSSTLIKE
             and save_lsstlike_csv
@@ -3458,7 +3584,7 @@ for event_context, prediction in iter_event_predictions():
             objectid=objectid,
             m5_medians=SYNTHETIC_M5_MEDIANS,
         )
-
+    
     if (
         SAVE_PNG_SYNTHETIC_ONLY
         and save_synthetic_csv
@@ -3470,7 +3596,7 @@ for event_context, prediction in iter_event_predictions():
             outfile=pngdir / f"lightcurve_synthetic_{i:04d}.png",
             event_index=i,
         )
-        if plot_written:
+        if plot_written and APPLY_NUMERICAL_SUPPORT_CUT:
             plot_numerical_floor_diagnostic(
                 times=times,
                 raw_magnitudes_by_filter=raw_mag,
