@@ -30,7 +30,7 @@ ZTF. The depth threshold is the requested p25/p50/p75 quantile of the empirical
 per-image limiting-magnitude KDE in each band. This controlled global-depth
 comparison does not simulate ZTF cadence, weather correlations or visit noise.
 
-The script never reloads or evaluates the selected FIESTA surrogate. Consequently, the numerical
+The script never reloads or evaluates Bu2026_MLP.  Consequently, the numerical
 support cut chosen during generation is preserved exactly.  Saved synthetic
 ``mag`` values include MW extinction; intrinsic magnitudes are reconstructed
 with ``m_intrinsic = m_saved - R_band E(B-V)``.
@@ -66,7 +66,6 @@ import argparse
 import copy
 import hashlib
 import json
-import pickle
 import sys
 from pathlib import Path
 
@@ -214,8 +213,8 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Envelope system. 'both' preserves the historical LSST+PS1 mode; "
             "'lsst+ztf' builds both envelopes from the same event IDs and "
-            "writes direct comparison plots. ZTF depth comes from the supplied "
-            "empirical lims distributions or a precomputed quantile table."
+            "writes direct comparison plots. ZTF depth can be entered directly, "
+            "read from a quantile table, or loaded from legacy KDE files."
         ),
     )
     parser.add_argument("--t-min", type=float, default=0.4)
@@ -261,6 +260,31 @@ def build_parser() -> argparse.ArgumentParser:
         help="Maximum number of permanent exits displayed in each PNG table.",
     )
     parser.add_argument("--m5-quantile-table", type=Path)
+    parser.add_argument(
+        "--ztf-depth-source",
+        choices=["manual", "table", "joblib"],
+        help=(
+            "Source of the ZTF limiting magnitudes. 'manual' uses --ztf-m5-g/r/i; "
+            "'table' reads --ztf-depth-quantile-table; 'joblib' keeps the legacy "
+            "NMMA KDE input. If omitted in non-interactive mode, the source is "
+            "inferred from the supplied arguments."
+        ),
+    )
+    parser.add_argument(
+        "--ztf-m5-g",
+        type=float,
+        help="User-supplied fixed ZTF g-band 5-sigma limiting magnitude (AB mag).",
+    )
+    parser.add_argument(
+        "--ztf-m5-r",
+        type=float,
+        help="User-supplied fixed ZTF r-band 5-sigma limiting magnitude (AB mag).",
+    )
+    parser.add_argument(
+        "--ztf-m5-i",
+        type=float,
+        help="User-supplied fixed ZTF i-band 5-sigma limiting magnitude (AB mag).",
+    )
     parser.add_argument(
         "--ztf-depth-dir",
         type=Path,
@@ -375,24 +399,6 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--at2017gfo-bestfit-file",
-        type=Path,
-        help=(
-            "Optional FIESTA bestfit_params.pkl containing light_curves/times "
-            "and per-filter model magnitudes. Its model colour is overlaid "
-            "without photometric-error pass/fail classification."
-        ),
-    )
-    parser.add_argument(
-        "--at2017gfo-bestfit-photometry-mode",
-        choices=["dereddened", "mw_extincted"],
-        default="dereddened",
-        help=(
-            "Whether the model magnitudes saved in --at2017gfo-bestfit-file "
-            "have already been corrected for Milky-Way extinction."
-        ),
-    )
-    parser.add_argument(
         "--snia-parquet",
         type=Path,
         help=(
@@ -463,7 +469,7 @@ def interactive(args: argparse.Namespace) -> argparse.Namespace:
             ("lsst+ztf", "LSST and ZTF from the same synthetic events"),
             ("lsst", "LSST only"),
             ("ps1", "PS1 colour with Rubin/LSST m5 selection"),
-            ("ztf", "ZTF colour with an empirical ZTF depth selection"),
+            ("ztf", "ZTF colour with a supplied ZTF depth selection"),
         ],
         args.photometric_system,
     )
@@ -509,11 +515,75 @@ def interactive(args: argparse.Namespace) -> argparse.Namespace:
         "Maximum permanent exits in each PNG table",
         str(args.max_outlier_table_events),
     ))
-    args.m5_scenario = prompt_choice(
-        "m5 threshold used for the depth cut",
-        [(key, label) for key, label in M5_SCENARIOS.items()],
-        args.m5_scenario,
-    )
+    if args.photometric_system in {"ztf", "lsst+ztf"}:
+        inferred_source = args.ztf_depth_source
+        if inferred_source is None:
+            if any(
+                value is not None
+                for value in (args.ztf_m5_g, args.ztf_m5_r, args.ztf_m5_i)
+            ):
+                inferred_source = "manual"
+            elif args.ztf_depth_quantile_table is not None:
+                inferred_source = "table"
+            elif args.ztf_depth_dir is not None:
+                inferred_source = "joblib"
+            else:
+                inferred_source = "manual"
+        args.ztf_depth_source = prompt_choice(
+            "ZTF limiting-depth input",
+            [
+                ("manual", "Enter fixed 5-sigma limiting magnitudes"),
+                ("table", "Read p25/p50/p75 values from a CSV table"),
+                ("joblib", "Read the legacy NMMA joblib KDE files"),
+            ],
+            inferred_source,
+        )
+        requested_ztf_bands = tuple(
+            dict.fromkeys(
+                piece.strip().lower()
+                for piece in args.color_pair.split("-")
+                if piece.strip()
+            )
+        )
+        if args.ztf_depth_source == "manual":
+            for band in requested_ztf_bands:
+                if band not in ZTF_DEPTH_FILENAMES:
+                    continue
+                attribute = f"ztf_m5_{band}"
+                current = getattr(args, attribute)
+                default = "" if current is None else str(current)
+                value = prompt_text(
+                    f"Fixed ZTF {band}-band 5-sigma limiting magnitude [AB mag]",
+                    default,
+                )
+                if not value.strip():
+                    raise ValueError(f"A fixed ZTF {band}-band depth is required")
+                setattr(args, attribute, float(value))
+        elif args.ztf_depth_source == "table":
+            args.ztf_depth_quantile_table = Path(prompt_text(
+                "ZTF depth-quantile CSV table",
+                str(args.ztf_depth_quantile_table or "ztf_depth_quantiles.csv"),
+            ))
+        else:
+            args.ztf_depth_dir = Path(prompt_text(
+                "Directory containing the three ZTF lims joblib files",
+                str(args.ztf_depth_dir or "ztf_depth_distributions"),
+            ))
+
+    if not (
+        args.photometric_system == "ztf"
+        and args.ztf_depth_source == "manual"
+    ):
+        args.m5_scenario = prompt_choice(
+            "m5 threshold used for the depth cut",
+            [(key, label) for key, label in M5_SCENARIOS.items()],
+            args.m5_scenario,
+        )
+    else:
+        print(
+            "ZTF manual-depth mode: the entered fixed limits are used directly; "
+            "p25/p50/p75 is not applied."
+        )
     if args.photometric_system != "ztf":
         args.threshold_scope = prompt_choice(
             "m5 latitude scope",
@@ -523,12 +593,6 @@ def interactive(args: argparse.Namespace) -> argparse.Namespace:
             ],
             args.threshold_scope,
         )
-    if args.photometric_system in {"ztf", "lsst+ztf"}:
-        if args.ztf_depth_quantile_table is None:
-            args.ztf_depth_dir = Path(prompt_text(
-                "Directory containing the ZTF lims joblib files",
-                str(args.ztf_depth_dir or "ztf_depth_distributions"),
-            ))
     at2017gfo_comparison = prompt_choice(
         "AT2017gfo comparison",
         [
@@ -571,26 +635,8 @@ def interactive(args: argparse.Namespace) -> argparse.Namespace:
             ],
             args.at2017gfo_photometry_mode,
         )
-        bestfit_path = prompt_text(
-            "AT2017gfo best-fit pickle (empty = do not overlay)",
-            (
-                str(args.at2017gfo_bestfit_file)
-                if args.at2017gfo_bestfit_file is not None else ""
-            ),
-        ).strip()
-        args.at2017gfo_bestfit_file = Path(bestfit_path) if bestfit_path else None
-        if args.at2017gfo_bestfit_file is not None:
-            args.at2017gfo_bestfit_photometry_mode = prompt_choice(
-                "Foreground MW extinction in the AT2017gfo best-fit magnitudes",
-                [
-                    ("dereddened", "Absent/already corrected"),
-                    ("mw_extincted", "Already present"),
-                ],
-                args.at2017gfo_bestfit_photometry_mode,
-            )
     else:
         args.at2017gfo_file = None
-        args.at2017gfo_bestfit_file = None
 
     snia_comparison = prompt_choice(
         "SN Ia population comparison",
@@ -826,10 +872,10 @@ def find_ztf_depth_file(directory: Path, band: str) -> Path:
 def load_trusted_ztf_kde(path: Path):
     """Load one trusted historical sklearn KDE used by the NMMA ZTF simulator.
 
-    The distributed objects were serialized with an older scikit-learn. The
-    compatibility aliases below preserve their public ``sample`` behaviour
-    with recent releases. Joblib uses pickle internally, so only files from a
-    trusted source must be supplied.
+    The distributed objects were serialized with an older scikit-learn.  The
+    two compatibility aliases below preserve their public ``sample`` behaviour
+    with recent scikit-learn releases.  Joblib uses pickle internally, hence
+    the caller must only provide files obtained from a trusted source.
     """
     try:
         import joblib
@@ -859,12 +905,65 @@ def load_ztf_depth_thresholds(
     bands: tuple[str, str],
     n_samples: int,
     seed: int,
+    depth_source: str | None = None,
+    manual_thresholds: dict[str, float | None] | None = None,
 ) -> tuple[dict[str, float], pd.DataFrame]:
-    """Return deterministic ZTF p25/p50/p75 limiting-magnitude thresholds."""
+    """Return fixed ZTF limiting-magnitude thresholds and their provenance.
+
+    Direct user values take no percentile interpretation.  A quantile table
+    supplies an already calibrated p25/p50/p75 scenario.  Loading historical
+    joblib KDEs remains available as an explicit legacy compatibility mode.
+    """
     if any(band not in ZTF_DEPTH_FILENAMES for band in bands):
         raise ValueError("ZTF envelopes support only g, r and i bands")
 
-    if quantile_table is not None:
+    manual_thresholds = manual_thresholds or {}
+    if depth_source is None:
+        if any(value is not None for value in manual_thresholds.values()):
+            depth_source = "manual"
+        elif quantile_table is not None:
+            depth_source = "table"
+        elif directory is not None:
+            depth_source = "joblib"
+        else:
+            raise ValueError(
+                "ZTF depth selection requires fixed --ztf-m5-* values, "
+                "--ztf-depth-quantile-table, or the legacy --ztf-depth-dir"
+            )
+
+    if depth_source == "manual":
+        lookup: dict[str, float] = {}
+        rows: list[dict[str, object]] = []
+        for band in dict.fromkeys(bands):
+            value = manual_thresholds.get(band)
+            if value is None or not np.isfinite(value):
+                raise ValueError(
+                    f"Manual ZTF depth mode requires --ztf-m5-{band}"
+                )
+            value = float(value)
+            if not 0.0 < value < 40.0:
+                raise ValueError(
+                    f"Invalid fixed ZTF {band}-band limiting magnitude: {value}"
+                )
+            lookup[band] = value
+            rows.append({
+                "band": band,
+                "scenario": "manual_fixed",
+                "percentile": np.nan,
+                "m5": value,
+                "source_kind": "user_supplied_fixed_depth",
+                "source_file": np.nan,
+                "source_sha256": np.nan,
+                "sampling_seed": np.nan,
+                "sampling_draws": np.nan,
+            })
+        return lookup, pd.DataFrame(rows)
+
+    if depth_source == "table":
+        if quantile_table is None:
+            raise ValueError(
+                "ZTF table mode requires --ztf-depth-quantile-table"
+            )
         source = quantile_table.expanduser().resolve()
         table = pd.read_csv(source)
         required = {"band", "scenario", "m5"}
@@ -887,18 +986,21 @@ def load_ztf_depth_thresholds(
             )
         use["source_file"] = str(source)
         use["source_sha256"] = file_sha256(source)
+        use["source_kind"] = "user_supplied_quantile_table"
         use["sampling_seed"] = np.nan
         use["sampling_draws"] = np.nan
         return lookup, use
 
+    if depth_source != "joblib":
+        raise ValueError(f"Unsupported ZTF depth source: {depth_source}")
     if directory is None:
         raise ValueError(
-            "ZTF depth selection requires --ztf-depth-dir or "
-            "--ztf-depth-quantile-table"
+            "Legacy ZTF joblib mode requires --ztf-depth-dir"
         )
     if n_samples < 1000:
         raise ValueError("--ztf-depth-samples must be at least 1000")
     directory = directory.expanduser().resolve()
+    percentile = M5_SCENARIO_PERCENTILES[scenario]
     rows: list[dict[str, object]] = []
     lookup: dict[str, float] = {}
     for band_index, band in enumerate(dict.fromkeys(bands)):
@@ -913,8 +1015,8 @@ def load_ztf_depth_thresholds(
         if draws.size < 1000:
             raise ValueError(f"Too few finite ZTF depth draws from {path}")
         quantiles = {
-            key: float(np.percentile(draws, percentile))
-            for key, percentile in M5_SCENARIO_PERCENTILES.items()
+            key: float(np.percentile(draws, percentile_value))
+            for key, percentile_value in M5_SCENARIO_PERCENTILES.items()
         }
         lookup[band] = quantiles[scenario]
         for scenario_name, value in quantiles.items():
@@ -923,6 +1025,7 @@ def load_ztf_depth_thresholds(
                 "scenario": scenario_name,
                 "percentile": M5_SCENARIO_PERCENTILES[scenario_name],
                 "m5": value,
+                "source_kind": "legacy_nmma_joblib_kde",
                 "source_file": str(path),
                 "source_sha256": file_sha256(path),
                 "sampling_seed": band_seed,
@@ -958,16 +1061,12 @@ def prepare_metadata(
     summary = load_summary(args.run_dir)
     if summary.empty:
         raise FileNotFoundError(f"Missing usable {run_root(args.run_dir) / 'summary.csv'}")
-    # Columns common to Bu2026_MLP and Bu2019_MLP. The latter has ``phi`` but
-    # no v_ej/Ye parameters, so model-specific physical columns must remain
-    # optional for envelope construction.
-    required_columns = (
-        "ebv_mw", "log10_mej_dyn", "log10_mej_wind", "inclination_EM",
+    physical_columns = (
+        "log10_mej_dyn", "v_ej_dyn", "Ye_dyn", "log10_mej_wind",
+        "v_ej_wind", "Ye_wind", "inclination_EM",
         "luminosity_distance", "redshift",
     )
-    optional_physical_columns = (
-        "v_ej_dyn", "Ye_dyn", "v_ej_wind", "Ye_wind", "phi",
-    )
+    required_columns = ("ebv_mw",) + physical_columns
     missing = [c for c in required_columns if c not in summary]
     if missing:
         raise ValueError(f"summary.csv is missing {missing}")
@@ -1031,9 +1130,7 @@ def prepare_metadata(
             f"{population_latitude_label(args)}."
         )
 
-    for column in (*required_columns, *optional_physical_columns):
-        if column not in metadata:
-            metadata[column] = np.nan
+    for column in required_columns:
         metadata[column] = pd.to_numeric(metadata[column], errors="coerce")
     metadata = metadata.dropna(subset=list(required_columns))
     metadata["event_id"] = metadata["event_id"].map(canonical_event_id)
@@ -2166,116 +2263,6 @@ def load_at2017gfo_colour_points(
     return pd.DataFrame(matched).sort_values("phase_days").reset_index(drop=True)
 
 
-def _reconstruct_jax_array_as_numpy(
-    reconstruct: object,
-    reconstruct_args: tuple[object, ...],
-    state: object,
-    metadata: object,
-) -> np.ndarray:
-    """Reconstruct a pickled JAX array as NumPy without importing JAX."""
-    del metadata
-    array = reconstruct(*reconstruct_args)  # type: ignore[operator]
-    array.__setstate__(state)
-    return np.asarray(array)
-
-
-class _RestrictedBestFitUnpickler(pickle.Unpickler):
-    """Unpickle only the NumPy/JAX array primitives used by FIESTA outputs."""
-
-    def find_class(self, module: str, name: str) -> object:
-        numpy_core = getattr(np, "_core", None)
-        if numpy_core is None:  # NumPy 1.x compatibility.
-            numpy_core = np.core
-        numpy_multiarray = numpy_core.multiarray
-        allowed = {
-            ("numpy.core.multiarray", "_reconstruct"): numpy_multiarray._reconstruct,
-            ("numpy._core.multiarray", "_reconstruct"): numpy_multiarray._reconstruct,
-            ("numpy.core.multiarray", "scalar"): numpy_multiarray.scalar,
-            ("numpy._core.multiarray", "scalar"): numpy_multiarray.scalar,
-            ("numpy", "ndarray"): np.ndarray,
-            ("numpy", "dtype"): np.dtype,
-            ("jax._src.array", "_reconstruct_array"): (
-                _reconstruct_jax_array_as_numpy
-            ),
-        }
-        try:
-            return allowed[(module, name)]
-        except KeyError as exc:
-            raise pickle.UnpicklingError(
-                f"Unsupported global in AT2017gfo best-fit pickle: {module}.{name}"
-            ) from exc
-
-
-def load_at2017gfo_bestfit_colour_curve(
-    path: Path,
-    band1: str,
-    band2: str,
-) -> tuple[pd.DataFrame, dict[str, float]]:
-    """Read a FIESTA best-fit pickle and return its saved model colour curve.
-
-    Only the already evaluated ``light_curves`` arrays are used. The model is
-    not reloaded, and the parameter dictionary is retained solely as metadata.
-    """
-    path = path.expanduser().resolve()
-    if not path.exists():
-        raise FileNotFoundError(path)
-    with path.open("rb") as stream:
-        payload = _RestrictedBestFitUnpickler(stream).load()
-    if not isinstance(payload, dict) or not isinstance(
-        payload.get("light_curves"), dict
-    ):
-        raise ValueError(
-            "AT2017gfo best-fit pickle must contain a light_curves dictionary"
-        )
-    light_curves = payload["light_curves"]
-
-    def find_filter(filter_band: str) -> tuple[str, np.ndarray]:
-        lowercase_keys = {str(key).strip().lower(): key for key in light_curves}
-        for alias in AT2017GFO_FILTER_ALIASES[filter_band]:
-            original_key = lowercase_keys.get(alias.lower())
-            if original_key is not None:
-                return str(original_key), np.asarray(
-                    light_curves[original_key], dtype=float
-                ).reshape(-1)
-        raise ValueError(
-            f"AT2017gfo best-fit pickle has no model light curve for "
-            f"{filter_band!r}; tried {AT2017GFO_FILTER_ALIASES[filter_band]}"
-        )
-
-    if "times" not in light_curves:
-        raise ValueError("AT2017gfo best-fit pickle has no light_curves['times']")
-    times = np.asarray(light_curves["times"], dtype=float).reshape(-1)
-    source_filter1, magnitude1 = find_filter(band1)
-    source_filter2, magnitude2 = find_filter(band2)
-    if not (len(times) == len(magnitude1) == len(magnitude2)):
-        raise ValueError(
-            "AT2017gfo best-fit times and requested-band arrays have "
-            "different lengths"
-        )
-    finite = (
-        np.isfinite(times) & np.isfinite(magnitude1) & np.isfinite(magnitude2)
-    )
-    curve = pd.DataFrame({
-        "phase_days": times[finite],
-        "band1": band1,
-        "band2": band2,
-        "source_filter_band1": source_filter1,
-        "source_filter_band2": source_filter2,
-        "magnitude_band1": magnitude1[finite],
-        "magnitude_band2": magnitude2[finite],
-        "color_input": magnitude1[finite] - magnitude2[finite],
-        "source_file": str(path),
-    }).sort_values("phase_days").reset_index(drop=True)
-    parameters: dict[str, float] = {}
-    raw_parameters = payload.get("bestfit_params", {})
-    if isinstance(raw_parameters, dict):
-        for key, value in raw_parameters.items():
-            array = np.asarray(value)
-            if array.size == 1 and np.issubdtype(array.dtype, np.number):
-                parameters[str(key)] = float(array.reshape(-1)[0])
-    return curve, parameters
-
-
 def at2017gfo_stage_colours(
     points: pd.DataFrame,
     stage: str,
@@ -2397,7 +2384,6 @@ def evaluate_at2017gfo_points(
 def save_at2017gfo_overlay(
     results: pd.DataFrame,
     rules: pd.DataFrame,
-    bestfit_curve: pd.DataFrame | None,
     path: Path,
     pair: str,
     t_min: float,
@@ -2443,26 +2429,12 @@ def save_at2017gfo_overlay(
                 color=color, ecolor=color, elinewidth=0.8, capsize=2,
                 linestyle="none", label=label, zorder=zorder,
             )
-    finite_bestfit = pd.DataFrame()
-    if bestfit_curve is not None and not bestfit_curve.empty:
-        finite_bestfit = bestfit_curve.loc[
-            np.isfinite(pd.to_numeric(bestfit_curve["phase_days"], errors="coerce"))
-            & np.isfinite(pd.to_numeric(bestfit_curve["color"], errors="coerce"))
-        ].sort_values("phase_days")
-        if not finite_bestfit.empty:
-            ax.plot(
-                finite_bestfit["phase_days"], finite_bestfit["color"],
-                color="#cc33aa", lw=2.2, alpha=0.95,
-                label="AT2017gfo best-fit model", zorder=5,
-            )
     format_axes(ax, pair, t_min, t_max)
     arrays = []
     if not rules.empty:
         arrays.append(rules[["color_min", "color_max"]].to_numpy(float).ravel())
     if not finite.empty:
         arrays.append(finite["color"].to_numpy(float))
-    if not finite_bestfit.empty:
-        arrays.append(finite_bestfit["color"].to_numpy(float))
     if arrays:
         values = np.concatenate(arrays)
         values = values[np.isfinite(values)]
@@ -2524,7 +2496,6 @@ def save_at2017gfo_outputs(
     stage_dir: Path,
     points: pd.DataFrame,
     rules: pd.DataFrame,
-    bestfit_curve: pd.DataFrame | None,
     envelope_name: str,
     pair: str,
     t_min: float,
@@ -2542,8 +2513,7 @@ def save_at2017gfo_outputs(
     ].copy()
     failed.to_csv(stage_dir / f"{prefix}_failed_points.csv", index=False)
     save_at2017gfo_overlay(
-        results, rules, bestfit_curve,
-        stage_dir / f"{prefix}_with_envelope.png",
+        results, rules, stage_dir / f"{prefix}_with_envelope.png",
         pair, t_min, t_max,
     )
     save_at2017gfo_failed_table(
@@ -2577,7 +2547,7 @@ PERMANENT_EXIT_COLUMNS = [
     "N_final_consecutive_outside_bins", "exit_direction",
     "maximum_excursion_beyond_envelope_mag", "right_censored",
     "M_ej_dyn_Msun", "v_ej_dyn_c", "Ye_dyn", "M_ej_wind_Msun",
-    "v_ej_wind_c", "Ye_wind", "phi_deg", "inclination_deg",
+    "v_ej_wind_c", "Ye_wind", "inclination_deg",
     "luminosity_distance_Mpc", "redshift",
 ]
 
@@ -2673,12 +2643,11 @@ def identify_permanent_exits(
             "maximum_excursion_beyond_envelope_mag": float(np.max(excursion)),
             "right_censored": bool(rule_bins[last_position] < final_rule_bin),
             "M_ej_dyn_Msun": 10.0 ** float(metadata_row["log10_mej_dyn"]),
-            "v_ej_dyn_c": float(metadata_row.get("v_ej_dyn", np.nan)),
-            "Ye_dyn": float(metadata_row.get("Ye_dyn", np.nan)),
+            "v_ej_dyn_c": float(metadata_row["v_ej_dyn"]),
+            "Ye_dyn": float(metadata_row["Ye_dyn"]),
             "M_ej_wind_Msun": 10.0 ** float(metadata_row["log10_mej_wind"]),
-            "v_ej_wind_c": float(metadata_row.get("v_ej_wind", np.nan)),
-            "Ye_wind": float(metadata_row.get("Ye_wind", np.nan)),
-            "phi_deg": float(metadata_row.get("phi", np.nan)),
+            "v_ej_wind_c": float(metadata_row["v_ej_wind"]),
+            "Ye_wind": float(metadata_row["Ye_wind"]),
             "inclination_deg": float(np.degrees(metadata_row["inclination_EM"])),
             "luminosity_distance_Mpc": float(metadata_row["luminosity_distance"]),
             "redshift": float(metadata_row["redshift"]),
@@ -2705,39 +2674,20 @@ def save_permanent_exit_table_png(
     event_colors: dict[str, str] | None = None,
 ) -> None:
     """Save a compact, presentation-ready physical-parameter table."""
-    shown = exits.head(maximum_rows).copy()
-    base_columns = [
+    display_columns = [
         "event_id", "last_outside_time_days", "exit_direction",
-        "M_ej_dyn_Msun", "M_ej_wind_Msun",
+        "M_ej_dyn_Msun", "v_ej_dyn_c", "Ye_dyn", "M_ej_wind_Msun",
+        "v_ej_wind_c", "Ye_wind", "inclination_deg",
+        "luminosity_distance_Mpc",
     ]
-    optional_columns = [
-        column for column in (
-            "v_ej_dyn_c", "Ye_dyn", "v_ej_wind_c", "Ye_wind", "phi_deg"
-        )
-        if column in shown
-        and pd.to_numeric(shown[column], errors="coerce").notna().any()
+    labels = [
+        "event", "last out [d]", "side",
+        r"Mdyn [$M_\odot$]", "vdyn/c", "Ye dyn", r"Mwind [$M_\odot$]",
+        "vwind/c", "Ye wind", "incl. [deg]", "DL [Mpc]",
     ]
-    display_columns = base_columns + optional_columns + [
-        "inclination_deg", "luminosity_distance_Mpc"
-    ]
-    label_by_column = {
-        "event_id": "event",
-        "last_outside_time_days": "last out [d]",
-        "exit_direction": "side",
-        "M_ej_dyn_Msun": r"Mdyn [$M_\odot$]",
-        "v_ej_dyn_c": "vdyn/c",
-        "Ye_dyn": "Ye dyn",
-        "M_ej_wind_Msun": r"Mwind [$M_\odot$]",
-        "v_ej_wind_c": "vwind/c",
-        "Ye_wind": "Ye wind",
-        "phi_deg": "phi [deg]",
-        "inclination_deg": "incl. [deg]",
-        "luminosity_distance_Mpc": "DL [Mpc]",
-    }
-    labels = [label_by_column[column] for column in display_columns]
+    shown = exits.head(maximum_rows).copy()
     figure_height = max(1.8, 0.38 * (len(shown) + 2))
-    figure_width = max(11.0, 1.55 * len(display_columns))
-    fig, ax = plt.subplots(figsize=(figure_width, figure_height), constrained_layout=True)
+    fig, ax = plt.subplots(figsize=(18.0, figure_height), constrained_layout=True)
     ax.axis("off")
     if shown.empty:
         ax.text(0.5, 0.5, "No permanent exits", ha="center", va="center", fontsize=13)
@@ -2754,7 +2704,6 @@ def save_permanent_exit_table_png(
             "M_ej_wind_Msun": shown["M_ej_wind_Msun"].map(lambda x: f"{x:.3e}"),
             "v_ej_wind_c": shown["v_ej_wind_c"].map(lambda x: f"{x:.3f}"),
             "Ye_wind": shown["Ye_wind"].map(lambda x: f"{x:.3f}"),
-            "phi_deg": shown["phi_deg"].map(lambda x: f"{x:.1f}"),
             "inclination_deg": shown["inclination_deg"].map(lambda x: f"{x:.1f}"),
             "luminosity_distance_Mpc": shown["luminosity_distance_Mpc"].map(
                 lambda x: f"{x:.1f}"
@@ -3041,7 +2990,9 @@ def main(args: argparse.Namespace | None = None) -> Path:
     if args.photometric_system in {"ztf", "lsst+ztf"} and any(
         band not in ZTF_MW_R for band in pieces
     ):
-        raise ValueError("ZTF supports only g, r and i. Choose g-r, g-i or r-i.")
+        raise ValueError(
+            "ZTF supports only g, r and i. Choose g-r, g-i or r-i."
+        )
 
     if args.bin_width <= 0 or args.t_max <= args.t_min:
         raise ValueError("Require bin-width > 0 and t-max > t-min")
@@ -3102,9 +3053,8 @@ def main(args: argparse.Namespace | None = None) -> Path:
                 # The supplied SN Ia population is Rubin/LSST only.
                 child_args.snia_parquet = None
             if args.photometric_system == "lsst+ztf":
-                # AT2017gfo measurements and best fit are PS1, not ZTF.
+                # AT2017gfo points in this pipeline are PS1 photometry, not ZTF.
                 child_args.at2017gfo_file = None
-                child_args.at2017gfo_bestfit_file = None
             main(child_args)
         save_dual_system_comparison_plots(
             output,
@@ -3115,8 +3065,7 @@ def main(args: argparse.Namespace | None = None) -> Path:
             args.at2017gfo_file is not None and "ps1" in systems,
             systems=systems,
         )
-        configuration_name = "_".join(system.upper() for system in systems)
-        (output / f"{configuration_name}_comparison_configuration.json").write_text(
+        (output / f"{comparison_label.replace('+', '_')}_comparison_configuration.json").write_text(
             json.dumps(
                 {
                     "color_pair": pair,
@@ -3146,8 +3095,8 @@ def main(args: argparse.Namespace | None = None) -> Path:
                     ),
                     "interpretation": (
                         "PS1 uses the corresponding Rubin LSST bands for the "
-                        "OpSim depth selection. ZTF uses its own empirical "
-                        "per-band limiting-magnitude distribution."
+                        "OpSim depth selection. ZTF uses its own supplied "
+                        "per-band limiting-magnitude thresholds."
                     ),
                 },
                 indent=2,
@@ -3228,6 +3177,11 @@ def main(args: argparse.Namespace | None = None) -> Path:
 
     ztf_depth_table = pd.DataFrame()
     if args.photometric_system == "ztf":
+        manual_ztf_depths = {
+            "g": args.ztf_m5_g,
+            "r": args.ztf_m5_r,
+            "i": args.ztf_m5_i,
+        }
         m5, ztf_depth_table = load_ztf_depth_thresholds(
             directory=args.ztf_depth_dir,
             quantile_table=args.ztf_depth_quantile_table,
@@ -3235,15 +3189,19 @@ def main(args: argparse.Namespace | None = None) -> Path:
             bands=(band1, band2),
             n_samples=args.ztf_depth_samples,
             seed=args.ztf_depth_seed,
+            depth_source=args.ztf_depth_source,
+            manual_thresholds=manual_ztf_depths,
         )
-        ztf_depth_table.to_csv(output / "ztf_depth_quantiles_used.csv", index=False)
+        recorded_ztf_depth_table = output / "ztf_depth_thresholds_used.csv"
+        ztf_depth_table.to_csv(recorded_ztf_depth_table, index=False)
         m5_table = (
             args.ztf_depth_quantile_table.expanduser().resolve()
             if args.ztf_depth_quantile_table is not None
-            else output / "ztf_depth_quantiles_used.csv"
+            and (args.ztf_depth_source in {None, "table"})
+            else recorded_ztf_depth_table
         )
         print(
-            "ZTF empirical depth thresholds: "
+            "ZTF depth thresholds: "
             + ", ".join(f"{band}={value:.4f}" for band, value in m5.items())
         )
     else:
@@ -3254,8 +3212,6 @@ def main(args: argparse.Namespace | None = None) -> Path:
 
     split.to_csv(output / "event_split.csv", index=False)
     at2017gfo_input = None
-    at2017gfo_bestfit_input = None
-    at2017gfo_bestfit_parameters: dict[str, float] = {}
     if args.at2017gfo_file is not None:
         at2017gfo_input = load_at2017gfo_colour_points(
             args.at2017gfo_file,
@@ -3271,20 +3227,6 @@ def main(args: argparse.Namespace | None = None) -> Path:
             f"AT2017gfo: {len(at2017gfo_input)} unique {pair} pairs within "
             f"{args.at2017gfo_match_window_days:g} days"
         )
-        if args.at2017gfo_bestfit_file is not None:
-            (
-                at2017gfo_bestfit_input,
-                at2017gfo_bestfit_parameters,
-            ) = load_at2017gfo_bestfit_colour_curve(
-                args.at2017gfo_bestfit_file, band1, band2
-            )
-            at2017gfo_bestfit_input.to_csv(
-                output / "AT2017gfo_bestfit_input_color_curve.csv", index=False
-            )
-            print(
-                f"AT2017gfo best-fit: {len(at2017gfo_bestfit_input)} finite "
-                f"saved model {pair} points"
-            )
     selection_rows = []
     for rank, event_index in enumerate(maximum_plot_indices, start=1):
         row = {
@@ -3652,20 +3594,6 @@ def main(args: argparse.Namespace | None = None) -> Path:
                 args.at2017gfo_photometry_mode,
                 args.photometric_system,
             )
-            at2017gfo_bestfit_stage = None
-            if at2017gfo_bestfit_input is not None:
-                at2017gfo_bestfit_stage = at2017gfo_stage_colours(
-                    at2017gfo_bestfit_input,
-                    stage,
-                    band1,
-                    band2,
-                    args.at2017gfo_ebv,
-                    args.at2017gfo_bestfit_photometry_mode,
-                    args.photometric_system,
-                )
-                at2017gfo_bestfit_stage.to_csv(
-                    stage_dir / "AT2017gfo_bestfit_color_curve.csv", index=False
-                )
             for envelope_name, envelope_rules in (
                 ("all_valid", rules_all),
                 ("consecutive", rules_consecutive),
@@ -3674,7 +3602,6 @@ def main(args: argparse.Namespace | None = None) -> Path:
                     stage_dir,
                     at2017gfo_stage,
                     envelope_rules,
-                    at2017gfo_bestfit_stage,
                     envelope_name,
                     pair,
                     args.t_min,
@@ -3798,8 +3725,30 @@ def main(args: argparse.Namespace | None = None) -> Path:
         ),
         "m5_scenario": args.m5_scenario,
         "m5_by_band": m5,
-        "ztf_depth_sampling": (
+        "ztf_depth_selection": (
             {
+                "source_mode": (
+                    args.ztf_depth_source
+                    or (
+                        "manual"
+                        if any(
+                            value is not None
+                            for value in (
+                                args.ztf_m5_g,
+                                args.ztf_m5_r,
+                                args.ztf_m5_i,
+                            )
+                        )
+                        else "table"
+                        if args.ztf_depth_quantile_table is not None
+                        else "joblib"
+                    )
+                ),
+                "manual_fixed_m5": {
+                    "g": args.ztf_m5_g,
+                    "r": args.ztf_m5_r,
+                    "i": args.ztf_m5_i,
+                },
                 "depth_directory": (
                     str(args.ztf_depth_dir.expanduser().resolve())
                     if args.ztf_depth_dir is not None else None
@@ -3808,14 +3757,14 @@ def main(args: argparse.Namespace | None = None) -> Path:
                     str(args.ztf_depth_quantile_table.expanduser().resolve())
                     if args.ztf_depth_quantile_table is not None else None
                 ),
-                "recorded_quantile_table": str(
-                    output / "ztf_depth_quantiles_used.csv"
+                "recorded_threshold_table": str(
+                    output / "ztf_depth_thresholds_used.csv"
                 ),
                 "draws_per_band": args.ztf_depth_samples,
                 "seed": args.ztf_depth_seed,
                 "interpretation": (
-                    "one global limiting-magnitude quantile per band; this is "
-                    "not a realization of ZTF cadence or per-visit noise"
+                    "one global limiting magnitude per band; this is not a "
+                    "realization of ZTF cadence or per-visit noise"
                 ),
             }
             if args.photometric_system == "ztf" else None
@@ -3951,19 +3900,6 @@ def main(args: argparse.Namespace | None = None) -> Path:
             "merger_mjd": args.at2017gfo_merger_mjd,
             "maximum_pair_separation_days": args.at2017gfo_match_window_days,
             "input_photometry_mode": args.at2017gfo_photometry_mode,
-            "bestfit_file": (
-                str(args.at2017gfo_bestfit_file.expanduser().resolve())
-                if args.at2017gfo_bestfit_file is not None else None
-            ),
-            "bestfit_input_photometry_mode": (
-                args.at2017gfo_bestfit_photometry_mode
-                if args.at2017gfo_bestfit_file is not None else None
-            ),
-            "bestfit_curve_source": (
-                "saved light_curves arrays; model not re-evaluated"
-                if args.at2017gfo_bestfit_file is not None else None
-            ),
-            "bestfit_parameters": at2017gfo_bestfit_parameters,
             "ebv_mw": args.at2017gfo_ebv,
             "photometric_error_compatibility_sigma": args.at2017gfo_error_sigma,
             "filter_mapping": {

@@ -10,9 +10,10 @@ measure relative losses as a function of Galactic latitude.
 1. `get_opsim_baseline.py` exports Rubin OpSim visits and the dust metadata for
    sampled fields. It also writes the canonical
    `m5_depth_quantiles_by_band.csv` table once in the OpSim export directory.
-2. `generate_kne_lightcurves.py` generates KNe populations with FIESTA's
-   `Bu2026_MLP` or `Bu2019_MLP` spectral-flux surrogate and records the
-   absolute OpSim and model sources in `run_info.txt`.
+2. `generate_kne_lightcurves.py` generates KNe populations with FIESTA and
+   records the selected surrogate, passbands, and absolute OpSim source in
+   `run_info.txt`. Paired LSST+PS1 and LSST+ZTF products share the same event
+   parameters and sky positions.
 3. `build_color_envelopes.py` constructs the four KNe colour-envelope stages
    and can optionally project an SN Ia sample onto KNe sight lines.
 4. `run_latitude_experiment.py` generates paired populations in disjoint
@@ -49,40 +50,11 @@ the FIESTA installation before a production run; if they were installed
 manually in the original environment, reproduce that installation separately
 and record its source and checksum.
 
-`Bu2019_MLP` was added to the FIESTA Hugging Face surrogate collection after
-the locked `fiestaEM 0.2.0` environment was created. For automatic download,
-use `fiestaEM >= 0.3.0`, preferably in a cloned environment:
-
-```bash
-conda create --name fiesta_bu2019 --clone kne_lsst_analysis
-conda activate fiesta_bu2019
-python -m pip install --upgrade "fiestaEM>=0.3.0"
-```
-
-Unlike NMMA's filter-by-filter Bu2019lm SVD implementation, the FIESTA
-`Bu2019_MLP` surrogate predicts spectral flux. The generator can therefore
-integrate it through its existing LSST and PS1 filter definitions, including
-paired `lsst+ps1` runs. Its training bounds are read from the released model
-metadata and reproduced in the generator.
-
-### ZTF limiting-magnitude distributions
-
-The optional ZTF analysis uses the limiting-magnitude KDEs distributed with
-NMMA. They are not included in this repository.
-
-Place trusted copies in:
-
-    ztf_depth_distributions/
-    ├── lims_public_g.joblib
-    ├── lims_public_r.joblib
-    └── lims_i.joblib
-
-To inspect these distributions:
-
-    python tools/plot_ztf_depth_distributions.py
-
-The script writes a three-panel distribution plot and a CSV table containing
-the p25, p50, and p75 limiting magnitudes.
+For `Bu2019_MLP`, use the environment in which you installed FIESTA 0.3 and
+downloaded that surrogate, for example `conda activate fiesta_bu2019`. The
+environment is needed only while generating light curves. Once the Parquet or
+CSV products exist, `build_color_envelopes.py` does not reload FIESTA and can
+run in the normal analysis environment.
 
 ## End-to-end use
 
@@ -120,18 +92,6 @@ For large populations, prefer sharded Parquet storage. The script records
 physical, distance, sky, extinction, seed, and storage choices in the run.
 See `python generate_kne_lightcurves.py --help` for non-interactive options.
 
-Example Bu2019_MLP run:
-
-```bash
-python generate_kne_lightcurves.py \
-  --model Bu2019_MLP \
-  --filter-system lsst+ps1 \
-  --output-mode synthetic-mjd \
-  --parameter-source broad \
-  --storage-format parquet \
-  --n-samples 100
-```
-
 ### 3. Build colour envelopes
 
 ```bash
@@ -150,6 +110,86 @@ For each colour, the builder separates four stages:
 The m5 table is discovered from the OpSim path stored in the run's
 `run_info.txt`. `--m5-quantile-table` remains available as an explicit
 override.
+
+#### Paired LSST--ZTF envelopes
+
+Generate both filter systems in the same run so that the physical population,
+distance, merger epoch, OpSim sight line, and event IDs are paired:
+
+```bash
+python generate_kne_lightcurves.py \
+  --filter-system lsst+ztf \
+  --output-mode synthetic-mjd \
+  --synthetic-depth-cut none \
+  --storage-format parquet
+```
+
+The recommended mode is to provide explicit, documented 5-sigma limiting
+magnitudes. For example, for a `g-r` comparison:
+
+```bash
+python build_color_envelopes.py \
+  --run-dir runs/YOUR_LSST_ZTF_RUN \
+  --photometric-system lsst+ztf \
+  --color-pair g-r \
+  --ztf-depth-source manual \
+  --ztf-m5-g 20.8 \
+  --ztf-m5-r 20.6 \
+  --m5-scenario median_p50 \
+  --t-min 0.4 --t-max 16.0 --bin-width 0.4
+```
+
+In combined mode, `--m5-scenario` selects the Rubin/LSST depth scenario; the
+ZTF values supplied with `--ztf-m5-*` are used directly. Only the bands in the
+requested colour are required. A calibrated CSV with columns `band`,
+`scenario`, and `m5` can instead be supplied with:
+
+```bash
+--ztf-depth-source table \
+--ztf-depth-quantile-table ztf_depth_quantiles.csv
+```
+
+The exact thresholds and their provenance are recorded in
+`ztf/ztf_depth_thresholds_used.csv`.
+
+For backward compatibility only, the builder can still read the historical
+NMMA joblib distributions from a local, unversioned directory:
+
+```text
+ztf_depth_distributions/
+├── lims_public_g.joblib
+├── lims_public_r.joblib
+└── lims_i.joblib
+```
+
+Build the paired `g-r` envelopes with:
+
+```bash
+python build_color_envelopes.py \
+  --run-dir runs/YOUR_LSST_ZTF_RUN \
+  --photometric-system lsst+ztf \
+  --color-pair g-r \
+  --ztf-depth-source joblib \
+  --ztf-depth-dir ztf_depth_distributions \
+  --m5-scenario median_p50 \
+  --t-min 0.4 --t-max 16.0 --bin-width 0.4
+```
+
+The legacy `lims` files contain smooth empirical distributions of the ZTF 5-sigma
+limiting magnitude for individual images. A larger limiting magnitude means a
+deeper exposure. The builder draws reproducibly from each distribution and
+uses its p25, p50, or p75 as the global band threshold. It writes the exact
+values, source checksums, seed, and number of draws to the recorded threshold
+table.
+
+This is a controlled depth comparison, not a full ZTF survey simulation: it
+does not reproduce visit cadence, weather correlations, or per-visit noise.
+The root output directory contains direct LSST--ZTF overlays for all four
+stages, named `LSST_ZTF_*_comparison.png`.
+
+The joblib format is pickle-based and can execute code while loading. Only use
+files from a trusted source. The files are external inputs and are deliberately
+not committed to this repository; see `THIRD_PARTY_NOTICES.md`.
 
 An SN Ia Parquet input is optional. When provided, its events can be assigned
 deterministically to KNe sight lines so that the foreground extinction and m5

@@ -8,6 +8,38 @@ from build_color_envelopes import load_ztf_depth_thresholds
 
 
 class ZTFDepthPipelineTest(unittest.TestCase):
+    def test_manual_fixed_depths(self):
+        thresholds, provenance = load_ztf_depth_thresholds(
+            directory=None,
+            quantile_table=None,
+            scenario="median_p50",
+            bands=("g", "r"),
+            n_samples=2000,
+            seed=123,
+            depth_source="manual",
+            manual_thresholds={"g": 20.8, "r": 20.6, "i": 20.3},
+        )
+
+        self.assertEqual(thresholds, {"g": 20.8, "r": 20.6})
+        self.assertEqual(set(provenance["scenario"]), {"manual_fixed"})
+        self.assertEqual(
+            set(provenance["source_kind"]),
+            {"user_supplied_fixed_depth"},
+        )
+
+    def test_manual_depth_requires_each_colour_band(self):
+        with self.assertRaisesRegex(ValueError, "--ztf-m5-r"):
+            load_ztf_depth_thresholds(
+                directory=None,
+                quantile_table=None,
+                scenario="median_p50",
+                bands=("g", "r"),
+                n_samples=2000,
+                seed=123,
+                depth_source="manual",
+                manual_thresholds={"g": 20.8},
+            )
+
     def test_precomputed_quantile_table(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "ztf_depth_quantiles.csv"
