@@ -5,6 +5,10 @@ kilonova (KNe) light curves in Rubin/LSST observing fields, construct colour
 envelopes, optionally compare them with an external SN Ia population, and
 measure relative losses as a function of Galactic latitude.
 
+The repository intentionally contains only the current workflow. Historical
+prototypes, duplicated scripts, generated runs, OpSim exports, figures, and
+large scientific data files are not versioned.
+
 ## Pipeline at a glance
 
 1. `get_opsim_baseline.py` exports Rubin OpSim visits and the dust metadata for
@@ -196,7 +200,35 @@ deterministically to KNe sight lines so that the foreground extinction and m5
 selection are compared on the same sky distribution. The expected input
 schema and scientific limitations are documented in `docs/snia_input.md`.
 
-### 4. Run the Galactic-latitude experiment
+### 4. Measure convergence with KNe population size
+
+Use one parent run containing at least the largest population to be tested:
+
+```bash
+python analyze_envelope_population_convergence.py
+```
+
+The script constructs nested random subsets for every requested population
+size and repeats the experiment with independent subsampling seeds. It plots
+the last initial-consecutive valid envelope-bin edge against the number of
+injected KNe, with the 16--84% subsampling interval. The optional exponential
+curve is a visual saturation guide only.
+
+The reported threshold is the first tested size for which both the median and
+the requested fraction of repetitions lie within the time tolerance of the
+largest-size reference, provided that every larger tested size also passes.
+By default the tolerance is zero: the final temporal bin must be identical,
+as in a comparison of 10.2 d with 10.2 d. A one-bin-width tolerance can be
+chosen as a relaxed sensitivity test. The CSV outputs retain the individual
+repetitions, the selected percentile at the last valid bin, and the effective
+number of events in that bin.
+
+The parent run must be large enough: a grid ending at one million events
+requires a parent population of at least one million saved events. Do not
+interpret the threshold as asymptotic if the curve is still increasing at the
+largest tested size.
+
+### 5. Run the Galactic-latitude experiment
 
 ```bash
 python run_latitude_experiment.py

@@ -230,6 +230,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=12345)
     parser.add_argument("--max-events", type=int, default=0)
     parser.add_argument(
+        "--event-subsample-seed",
+        type=int,
+        help=(
+            "When --max-events is positive, randomly select that many events "
+            "without replacement. Reusing one seed with increasing sample "
+            "sizes produces nested subsets. If omitted, preserve the legacy "
+            "first-event-ID selection."
+        ),
+    )
+    parser.add_argument(
         "--colored-plot-sizes",
         default="10,100",
         help="Nested random KNe sample sizes used for coloured trajectory plots.",
@@ -1054,6 +1064,31 @@ def event_extinction_mag(
     return float(MW_R_BY_SYSTEM[photometric_system][band] * ebv)
 
 
+def select_metadata_subset(
+    metadata: pd.DataFrame,
+    maximum_events: int,
+    subsample_seed: int | None,
+) -> pd.DataFrame:
+    """Select a reproducible event subset, optionally nested across sample sizes.
+
+    With one fixed ``subsample_seed``, each requested size is a prefix of the
+    same random permutation.  Consequently, the N=1,000 sample is contained in
+    the N=10,000 sample.  A missing seed preserves the historical first-event
+    selection used by ``--max-events``.
+    """
+    if maximum_events <= 0 or maximum_events >= len(metadata):
+        return metadata.copy().reset_index(drop=True)
+    maximum = min(int(maximum_events), len(metadata))
+    if subsample_seed is None:
+        return metadata.iloc[:maximum].copy().reset_index(drop=True)
+    subset_rng = np.random.default_rng(subsample_seed)
+    selected = subset_rng.permutation(len(metadata))[:maximum]
+    subset = metadata.iloc[selected].copy()
+    return subset.sort_values(
+        "event_id", key=lambda s: pd.to_numeric(s, errors="coerce")
+    ).reset_index(drop=True)
+
+
 def prepare_metadata(
     args: argparse.Namespace,
     available_event_ids: set[str],
@@ -1143,8 +1178,11 @@ def prepare_metadata(
     metadata = metadata.sort_values(
         "event_id", key=lambda s: pd.to_numeric(s, errors="coerce")
     ).reset_index(drop=True)
-    if args.max_events > 0:
-        metadata = metadata.iloc[:args.max_events].copy()
+    metadata = select_metadata_subset(
+        metadata,
+        args.max_events,
+        args.event_subsample_seed,
+    )
     if metadata.empty:
         raise ValueError(
             "No events satisfying the requested Galactic-latitude selection "
@@ -3818,6 +3856,8 @@ def main(args: argparse.Namespace | None = None) -> Path:
         "validation_fraction": args.validation_fraction,
         "split_seed": args.seed,
         "n_input_events": n_events,
+        "maximum_events_requested": args.max_events,
+        "event_subsample_seed": args.event_subsample_seed,
         "SN_Ia": {
             "enabled": bool(snia_population),
             "input_file": (
