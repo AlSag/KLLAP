@@ -28,3 +28,7 @@ id_ed25519*
 *.pem
 *.joblib
 ztf_depth_distributions/
+# Local analysis runs
+/AT2017gfo/
+/LSST_*Mpc_seed_*/
+/PS1_*Mpc_seed_*/
