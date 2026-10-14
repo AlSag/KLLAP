@@ -1,34 +1,81 @@
-# Publishing on GitHub
+# Publishing updates on GitHub
 
-Perform these steps only after resolving the placeholders listed in
-`REPOSITORY_AUDIT.md`.
+The repository already has an `origin/main`; do not re-run `git init` or replace
+the remote. Work on a review branch so the scientific update can be inspected
+before merging.
+
+## Prepare the branch
 
 ```bash
-git init
-git branch -M main
-git add .
+git switch -c repository-update-2026-10
 git status --short
-git diff --cached --check
-git commit -m "Initial public KNe-LSST analysis pipeline"
 ```
 
-Create an empty repository on GitHub, then use either an SSH or HTTPS remote:
+Copy the reviewed update files into the repository, then remove or leave
+unstaged local products that are intentionally ignored.
+
+## Validate before staging
 
 ```bash
-git remote add origin git@github.com:OWNER/REPOSITORY.git
-git push -u origin main
+python -m compileall -q .
+python -m unittest discover -s tests -v
+python - <<'PY'
+from pathlib import Path
+import yaml
+yaml.safe_load(Path('CITATION.cff').read_text())
+print('CITATION.cff: valid YAML')
+PY
 ```
 
-Do not place a private key in this directory. SSH private keys belong in the
-user's SSH configuration outside the repository, with restrictive filesystem
-permissions and an SSH agent. Before the first push, inspect the complete
-staged file list and run a secret scanner if one is available.
+Inspect the exact change set:
 
-Recommended repository settings:
+```bash
+git status --short
+git diff --check
+git diff --stat
+git diff -- README.md CITATION.cff THIRD_PARTY_NOTICES.md AI_USAGE.md
+```
 
-- enable branch protection for `main`;
-- require pull-request review and passing tests;
-- enable GitHub secret scanning and dependency alerts;
-- create a tagged release for every scientific result set;
-- archive large inputs/outputs separately and publish checksums or DOI-backed
-  data records rather than committing them to Git.
+Check that no generated run, model weight, database, archive, secret, or local
+absolute path is staged:
+
+```bash
+git add --dry-run .
+git grep -nE '/home/|BEGIN (RSA|OPENSSH|EC) PRIVATE KEY|ssh_key' -- . ':!docs/publishing.md'
+```
+
+## Commit in reviewable units
+
+A clear history would use two commits:
+
+```bash
+git add README.md CITATION.cff LICENSE THIRD_PARTY_NOTICES.md AI_USAGE.md \
+  REPOSITORY_AUDIT.md docs .gitignore .github tests/test_repository_metadata.py
+git commit -m "Document current KNe analysis workflow and provenance"
+
+git add \
+  generate_kne_lightcurves.py build_color_envelopes.py kne_model_backends.py \
+  analyze_envelope_population_convergence_fast.py \
+  envelope_colour_convergence.py envelope_multiquantile_convergence.py \
+  replot_envelope_population_convergence.py plot_kne_colour_parameter_space.py \
+  plot_kne_low_high_plateau.py tests
+git commit -m "Add multiquantile convergence and parameter-space analyses"
+```
+
+Adjust the second list after inspecting `git status`; never use it as a reason
+to stage generated products.
+
+## Push and review
+
+```bash
+git push -u origin repository-update-2026-10
+```
+
+Open a pull request into `main`, confirm the CI result, review the rendered
+README and citation metadata, and merge only after the scientific diff has been
+checked. Create the `v0.2.0` tag only if that release number and date are
+confirmed.
+
+Keep private keys outside the repository and use an SSH agent or Git credential
+manager. Large reproducibility products belong in an external data archive,
+with checksums and an immutable citation in the repository.

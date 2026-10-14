@@ -19,8 +19,10 @@ analysis/
 *.sqlite3
 *.db
 *.png
+*.bak
 
 paired_intrinsic_population*.csv
+paired_intrinsic_convergence_*.csv
 AT2017gfo*.dat
 ssh_key*
 id_rsa*
@@ -32,3 +34,10 @@ ztf_depth_distributions/
 /AT2017gfo/
 /LSST_*Mpc_seed_*/
 /PS1_*Mpc_seed_*/
+
+# Local repository-audit snapshots
+/repository_git_status.txt
+/repository_git_log.txt
+/repository_github_files.txt
+/repository_changes_from_github.txt
+/repository_changes_summary.txt

@@ -1,37 +1,58 @@
 cff-version: 1.2.0
-message: "If you use this analysis pipeline, cite this repository and FIESTA."
-title: "KNe–LSST colour-envelope and Galactic-latitude analysis pipeline"
+message: >-
+  If you use this pipeline, cite this software and the scientific software and
+  models listed in THIRD_PARTY_NOTICES.md.
+title: KNe–LSST colour-envelope and Galactic-latitude analysis pipeline
 type: software
 authors:
-  - family-names: REPLACE_WITH_FAMILY_NAME
-    given-names: REPLACE_WITH_GIVEN_NAME
-version: 0.1.0
-date-released: 2026-09-30
+  - family-names: Jacquesson
+    given-names: Alex
+version: 0.2.0
+date-released: 2026-10-14
 license: MIT
-repository-code: "https://github.com/AlSag/KLLAP.git"
+repository-code: https://github.com/AlSag/KLLAP
+keywords:
+  - kilonova
+  - Rubin Observatory
+  - LSST
+  - time-domain astronomy
+  - colour evolution
+  - population simulation
 preferred-citation:
   type: software
-  title: "KNe Lightcurve LSST Analysis Pipeline"
+  title: KNe–LSST colour-envelope and Galactic-latitude analysis pipeline
   authors:
     - family-names: Jacquesson
       given-names: Alex
   year: 2026
+  version: 0.2.0
+  repository-code: https://github.com/AlSag/KLLAP
 references:
   - type: article
-    title: "FIESTA: Fast inference of electromagnetic signals and transients with auto-differentiable surrogate models"
+    title: >-
+      Efficient Bayesian analysis of kilonovae and gamma ray burst afterglows
+      with fiesta
     authors:
       - family-names: Koehn
-        given-names: H.
-    journal: "Astronomy & Astrophysics"
-    volume: "704"
+        given-names: Hauke
+      - family-names: Wouters
+        given-names: Thibeau
+      - family-names: Pang
+        given-names: Peter T. H.
+      - family-names: Bulla
+        given-names: Mattia
+      - family-names: Rose
+        given-names: Henrik
+      - family-names: Wichern
+        given-names: Hannah
+      - family-names: Dietrich
+        given-names: Tim
+    journal: Astronomy & Astrophysics
+    volume: '704'
     year: 2025
-    start: "A55"
+    start: A55
+    doi: 10.1051/0004-6361/202556626
     identifiers:
-      - type: arxiv
-        value: "2507.13807"
-
-Pang et al. (2023),
-An updated nuclear-physics and multi-messenger astrophysics framework
-for binary neutron star mergers,
-Nature Communications, 14, 8352.
-DOI: 10.1038/s41467-023-43932-6
+      - type: url
+        value: https://arxiv.org/abs/2507.13807
+        description: arXiv:2507.13807
