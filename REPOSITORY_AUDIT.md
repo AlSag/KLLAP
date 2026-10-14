@@ -1,36 +1,100 @@
-# Repository triage record
+# Repository audit — 2026-10-14
 
-## Retained as the public workflow
+## Baseline
+
+- Git branch in the supplied snapshot: `main` at `f893c2e`.
+- Files modified relative to `origin/main`: `generate_kne_lightcurves.py`,
+  `build_color_envelopes.py`, and `THIRD_PARTY_NOTICES.md`.
+- Several new analysis scripts, documentation files, and tests were untracked.
+- Default tests before the audit: 68 passed, 2 optional tests skipped.
+- `CITATION.cff` was invalid YAML because a prose citation had been appended
+  outside the CFF structure.
+
+## Public workflow to retain
+
+### Generation
 
 - `get_opsim_baseline.py`
-- `generate_kne_lightcurves.py` (the latitude-bin-capable superset)
+- `generate_kne_lightcurves.py`
+- `kne_model_backends.py`
 - `kne_pipeline_common.py`
+
+### Colour and convergence analysis
+
+- `build_color_envelopes.py`
 - `dynamic_color_cut_common.py`
-- `build_color_envelopes.py` (renamed because it now contains four stages)
+- `analyze_envelope_population_convergence_fast.py`
+- `envelope_colour_convergence.py`
+- `envelope_multiquantile_convergence.py`
+- `replot_envelope_population_convergence.py`
+- `plot_kne_colour_parameter_space.py`
+
+`analyze_envelope_population_convergence.py` remains required because the fast
+entry point imports shared parsing, aggregation, and plotting functions from
+it. It should later become a compatibility wrapper after those functions are
+moved into a neutral module.
+
+### Latitude and reach analysis
+
+- `run_latitude_experiment.py`
 - `analyze_kne_latitude_losses.py`
 - `compare_kne_latitude_bins.py`
-- `run_latitude_experiment.py`
-- `tools/inspect_snia_luminosity_distance.py`
+- `plot_kne_low_high_plateau.py`
+- `estimate_kne_lsst_distance_reach.py`
+
+### Utilities
+
 - `tools/extract_parquet_event.py`
+- `tools/inspect_snia_luminosity_distance.py`
+- `tools/plot_ztf_depth_distributions.py`
 
-## Superseded or omitted
+## Files not to commit
 
-The cumulative low/high latitude scripts, older three-stage envelope builders,
-older generator copies, standalone m5 scripts, one-off plotting scripts,
-diagnostics, hard-coded AT2017gfo overlays, and exploratory convergence scripts
-were not placed in the public core. They should remain in a separate archive
-until the published results no longer depend on them.
+- `analyze_envelope_population_convergence_fast.py.bak`;
+- `paired_intrinsic_convergence_*.csv`;
+- `repository_git_*.txt` and `repository_changes_*.txt`;
+- `LSST_*_seed_*/`, `PS1_*_seed_*/`, and other generated runs;
+- figures, Parquet shards, OpSim databases, posterior archives, model weights,
+  and external data.
 
-The former standalone `compute_m5_depth_quantiles.py` is functionally absorbed
-by `kne_pipeline_common.py` and called automatically by
-`get_opsim_baseline.py`. This avoids maintaining incompatible m5 schemas and
-removes the need to copy a threshold table into every run.
+These are now covered explicitly by `.gitignore`. They have not been treated
+as source files in the update package.
 
-## Items requiring human confirmation before publication
+## Documentation and metadata changes
 
-- replace the placeholder GitHub URL in `CITATION.cff`;
-- confirm the author name and chosen MIT license;
-- document the exact source/checksum of the local `Bu2026_MLP` model assets;
-- decide whether any archived diagnostics underlie a figure in a thesis or
-  paper and must therefore be restored under a `studies/` directory;
-- confirm the provenance and redistribution terms of external SN Ia data.
+- rewrote `README.md` around the current public workflow;
+- corrected `CITATION.cff` and identified Alex Jacquesson as the software
+  author;
+- replaced the MIT licence placeholder;
+- expanded third-party provenance and model/data distinctions;
+- added `AI_USAGE.md` with the requested Yes/No declaration;
+- added `docs/code_map.md` and a GitHub pre-push checklist;
+- added a minimal continuous-integration workflow and repository-metadata test.
+
+## Refactoring decision
+
+The two largest scripts are genuinely difficult to maintain:
+
+- `build_color_envelopes.py`: about 4,200 lines, including a `main()` of about
+  1,000 lines;
+- `generate_kne_lightcurves.py`: about 3,800 lines, including a configuration
+  function of about 400 lines and substantial import-time execution.
+
+They should be split, but not in the same commit that publishes many new
+scientific analyses. The safe order is:
+
+1. publish the current tested workflow and metadata cleanup;
+2. add deterministic golden-output fixtures for a small population;
+3. separate configuration/orchestration from numerical functions;
+4. compare outputs, run time, and memory before and after each extraction.
+
+This avoids a large, hard-to-review commit in which scientific changes and
+architectural changes are mixed.
+
+## Items still requiring author confirmation
+
+- exact immutable origin and checksums of the production `Bu2026_MLP` assets;
+- whether version `0.2.0` is the desired release tag;
+- whether any generated result table should be published separately with a DOI;
+- whether external SN Ia data used in a paper can be redistributed or should
+  remain a cited runtime input.

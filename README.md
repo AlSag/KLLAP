@@ -1,36 +1,54 @@
 # KNe–LSST analysis pipeline
 
-This repository contains the reproducible analysis path used to simulate
-kilonova (KNe) light curves in Rubin/LSST observing fields, construct colour
-envelopes, optionally compare them with an external SN Ia population, and
-measure relative losses as a function of Galactic latitude.
+This repository simulates kilonova (KNe) populations, projects them through
+Rubin/LSST observing conditions, constructs time-dependent colour envelopes,
+and studies their statistical convergence and astrophysical selection effects.
+The current workflow also supports paired LSST–PS1 or LSST–ZTF products,
+Galactic-latitude studies, parameter-space projections, and semi-analytical
+Metzger light-curve backends exposed by FIESTA.
 
-The repository intentionally contains only the current workflow. Historical
-prototypes, duplicated scripts, generated runs, OpSim exports, figures, and
-large scientific data files are not versioned.
+The repository contains source code, tests, and documentation. Generated runs,
+OpSim exports, figures, large tables, model weights, and external data products
+are intentionally excluded from version control.
 
-## Pipeline at a glance
+## Scientific scope
 
-1. `get_opsim_baseline.py` exports Rubin OpSim visits and the dust metadata for
-   sampled fields. It also writes the canonical
-   `m5_depth_quantiles_by_band.csv` table once in the OpSim export directory.
-2. `generate_kne_lightcurves.py` generates KNe populations with FIESTA and
-   records the selected surrogate, passbands, and absolute OpSim source in
-   `run_info.txt`. Paired LSST+PS1 and LSST+ZTF products share the same event
-   parameters and sky positions.
-3. `build_color_envelopes.py` constructs the four KNe colour-envelope stages
-   and can optionally project an SN Ia sample onto KNe sight lines.
-4. `run_latitude_experiment.py` generates paired populations in disjoint
-   Galactic-latitude bins, runs `analyze_kne_latitude_losses.py`, and calls
-   `compare_kne_latitude_bins.py` for the final relative-loss plot and table.
+The pipeline is designed to answer questions such as:
 
-Shared code lives in `kne_pipeline_common.py` and
-`dynamic_color_cut_common.py`. Small inspection utilities live in `tools/`.
+- how many simulated KNe are needed for stable colour-percentile envelopes;
+- how Rubin depth and Milky Way extinction change the available population;
+- which physical parameters are represented by colour-selected KNe;
+- how colour availability and losses vary with Galactic latitude;
+- over which luminosity-distance range two-band colours remain measurable.
+
+Unless explicitly stated otherwise, the depth analyses use global band
+thresholds derived from an OpSim sample. They do not reproduce the full Rubin
+cadence, image-by-image noise, alert production, or broker selection function.
+
+## Workflow at a glance
+
+| Stage | Main entry point | Purpose |
+|---|---|---|
+| OpSim preparation | `get_opsim_baseline.py` | Sample survey fields, visits, dust, and m5 distributions |
+| Population generation | `generate_kne_lightcurves.py` | Generate physical populations and synthetic/LSST-like light curves |
+| Colour envelopes | `build_color_envelopes.py` | Build percentile envelopes for four MW/m5 stages |
+| Population convergence | `analyze_envelope_population_convergence_fast.py` | Measure percentile-value and temporal-extent convergence |
+| Convergence replot | `replot_envelope_population_convergence.py` | Rebuild figures and tables without rerunning bootstraps |
+| Parameter space | `plot_kne_colour_parameter_space.py` | Project colour-selected KNe into 1D/2D physical-parameter spaces |
+| Latitude experiment | `run_latitude_experiment.py` | Generate paired latitude-bin populations and run the comparison |
+| Latitude analysis | `analyze_kne_latitude_losses.py` | Measure losses within one population |
+| Latitude comparison | `compare_kne_latitude_bins.py` | Compare paired bins and estimate a plateau |
+| Distance reach | `estimate_kne_lsst_distance_reach.py` | Estimate two-band colour availability versus distance |
+
+`kne_pipeline_common.py`, `dynamic_color_cut_common.py`, and
+`kne_model_backends.py` contain shared implementation. Small inspection tools
+live in `tools/`. A more detailed ownership map is available in
+[`docs/code_map.md`](docs/code_map.md).
 
 ## Installation
 
-The reference environment used Python 3.12.12 and FIESTA 0.2.0. For the most
-faithful reconstruction:
+The recorded reference environment uses Python 3.12.12, FIESTA 0.2.0,
+`rubin_sim` 2.6.1, and `rubin_scheduler` 3.22.0:
 
 ```bash
 conda env create -f environment.yml
@@ -38,7 +56,7 @@ conda activate kne_lsst_analysis
 python -m unittest discover -s tests -v
 ```
 
-The shorter pip route is:
+A shorter pip installation is also available:
 
 ```bash
 python -m venv .venv
@@ -48,29 +66,20 @@ python -m pip install -r requirements-lock.txt
 python -m unittest discover -s tests -v
 ```
 
-The FIESTA installation must expose the `Bu2026_MLP` model used by the
-generator. Model assets are not committed here. Verify their availability in
-the FIESTA installation before a production run; if they were installed
-manually in the original environment, reproduce that installation separately
-and record its source and checksum.
+FIESTA surrogate weights are not stored in this repository. Record the model
+source, immutable revision, and checksums for every production analysis. The
+semi-analytical Metzger backends require the FIESTA implementation described in
+[`docs/metzger_generation.md`](docs/metzger_generation.md).
 
-For `Bu2019_MLP`, use the environment in which you installed FIESTA 0.3 and
-downloaded that surrogate, for example `conda activate fiesta_bu2019`. The
-environment is needed only while generating light curves. Once the Parquet or
-CSV products exist, `build_color_envelopes.py` does not reload FIESTA and can
-run in the normal analysis environment.
+## 1. Prepare the OpSim sample
 
-## End-to-end use
-
-### 1. Export OpSim fields
-
-Interactive:
+Interactive use:
 
 ```bash
 python get_opsim_baseline.py
 ```
 
-Non-interactive example:
+Example non-interactive run:
 
 ```bash
 python get_opsim_baseline.py \
@@ -82,180 +91,186 @@ python get_opsim_baseline.py \
   --outdir opsim_exports_all_survey
 ```
 
-The same directory then contains visit tables, `opsim_fields_index.csv`, dust
-metadata, and `m5_depth_quantiles_by_band.csv`. The m5 table is a property of
-the OpSim sample and does not need to be copied into every KNe run.
+The output contains sampled positions, visit tables, dust information, and the
+canonical `m5_depth_quantiles_by_band.csv` table. m5 statistics are properties
+of the OpSim sample and are not recomputed by the light-curve generator.
 
-### 2. Generate a KNe population
+## 2. Generate a KNe population
 
 ```bash
 python generate_kne_lightcurves.py
 ```
 
-For large populations, prefer sharded Parquet storage. The script records
-physical, distance, sky, extinction, seed, and storage choices in the run.
-See `python generate_kne_lightcurves.py --help` for non-interactive options.
+Available backends are `Bu2026_MLP`, `Bu2019_MLP`, `MetzgerModel`, and
+`MetzgerFullModel`.
 
-For a controlled comparison of two fixed distances, create the shared
-intrinsic catalogue in the first run. In the second run select `reuse`, enter
-the same intrinsic and sky seeds, then choose `current-fixed` for the catalogue
-distance policy. This preserves event-by-event ejecta parameters, inclination,
-sky position and extinction while replacing only luminosity distance and its
-Planck18 redshift. The historical `stored` policy retains the distance already
-written in the catalogue.
+The generator supports broad priors or, for `Bu2026_MLP`, posterior samples;
+fixed distance or uniform-in-comoving-volume sampling; paired filter systems;
+shared intrinsic catalogues; and CSV or sharded Parquet storage. Large runs
+should use Parquet. Physical choices, seeds, model metadata, sky assignment,
+distance conventions, and storage settings are recorded with every run.
 
-### 3. Build colour envelopes
+For controlled comparisons, create a shared intrinsic catalogue in the first
+run and reuse it in later runs. This preserves event-by-event ejecta parameters
+and inclination. Distance replacement is explicit through the catalogue
+distance policy; it must not be inferred from filenames.
+
+## 3. Build colour envelopes
 
 ```bash
 python build_color_envelopes.py --interactive
 ```
 
-For each colour, the builder separates four stages:
+The builder distinguishes four stages:
 
-| Stage | m5 cut | MW extinction in magnitudes |
+| Stage | m5 cut | MW extinction included in the magnitude |
 |---|---:|---:|
 | `intrinsic_no_m5_no_mw` | no | no |
 | `no_m5_with_mw` | no | yes |
 | `m5_no_mw` | yes | no |
 | `m5_with_mw` | yes | yes |
 
-The m5 table is discovered from the OpSim path stored in the run's
-`run_info.txt`. `--m5-quantile-table` remains available as an explicit
-override.
+The default interpolation is performed in logarithmic time without
+extrapolation. The exact statistical support, bootstrap rules, depth scenario,
+and population split are saved with the output. Optional SN Ia inputs and
+paired LSST–ZTF depth comparisons are documented in
+[`docs/snia_input.md`](docs/snia_input.md) and
+[`docs/methodology.md`](docs/methodology.md).
 
-#### Paired LSST--ZTF envelopes
+## 4. Measure population convergence
 
-Generate both filter systems in the same run so that the physical population,
-distance, merger epoch, OpSim sight line, and event IDs are paired:
-
-```bash
-python generate_kne_lightcurves.py \
-  --filter-system lsst+ztf \
-  --output-mode synthetic-mjd \
-  --synthetic-depth-cut none \
-  --storage-format parquet
-```
-
-The recommended mode is to provide explicit, documented 5-sigma limiting
-magnitudes. For example, for a `g-r` comparison:
+The recommended entry point reads the parent population once and reuses it for
+all nested sample sizes:
 
 ```bash
-python build_color_envelopes.py \
-  --run-dir runs/YOUR_LSST_ZTF_RUN \
-  --photometric-system lsst+ztf \
+python analyze_envelope_population_convergence_fast.py \
+  --run-dir runs/YOUR_PARENT_RUN \
+  --photometric-system lsst \
   --color-pair g-r \
-  --ztf-depth-source manual \
-  --ztf-m5-g 20.8 \
-  --ztf-m5-r 20.6 \
-  --m5-scenario median_p50 \
-  --t-min 0.4 --t-max 16.0 --bin-width 0.4
+  --stage m5_no_mw \
+  --sample-sizes 1000,3000,10000,30000,50000,75000,100000,200000,300000,400000,500000,1000000 \
+  --repetitions 10 \
+  --n-boot 200 \
+  --resume
 ```
 
-In combined mode, `--m5-scenario` selects the Rubin/LSST depth scenario; the
-ZTF values supplied with `--ztf-m5-*` are used directly. Only the bands in the
-requested colour are required. A calibrated CSV with columns `band`,
-`scenario`, and `m5` can instead be supplied with:
+The largest sample remains the reference population. Two questions are kept
+separate:
+
+1. Are the percentile values stable within the requested magnitude tolerance?
+2. Does the statistically valid envelope extend to the same time as the
+   reference, within the requested temporal tolerance?
+
+The default multi-percentile analysis evaluates `p5–p95`, `p16–p84`, and
+`p25–p75`. Existing CSV products can be replotted without loading the parent
+population or rerunning bootstrap calculations:
 
 ```bash
---ztf-depth-source table \
---ztf-depth-quantile-table ztf_depth_quantiles.csv
+python replot_envelope_population_convergence.py \
+  --analysis-dir runs/YOUR_PARENT_RUN/analysis/YOUR_CONVERGENCE_DIRECTORY \
+  --shape-horizon-mode reference-minus-tolerance
 ```
 
-The exact thresholds and their provenance are recorded in
-`ztf/ztf_depth_thresholds_used.csv`.
+See [`MULTI_PERCENTILE_CONVERGENCE.md`](MULTI_PERCENTILE_CONVERGENCE.md) and
+[`CONVERGENCE_REPLOT_USAGE.md`](CONVERGENCE_REPLOT_USAGE.md).
 
-For backward compatibility only, the builder can still read the historical
-NMMA joblib distributions from a local, unversioned directory:
-
-```text
-ztf_depth_distributions/
-├── lims_public_g.joblib
-├── lims_public_r.joblib
-└── lims_i.joblib
-```
-
-Build the paired `g-r` envelopes with:
+## 5. Inspect the selected physical-parameter space
 
 ```bash
-python build_color_envelopes.py \
-  --run-dir runs/YOUR_LSST_ZTF_RUN \
-  --photometric-system lsst+ztf \
+python plot_kne_colour_parameter_space.py \
+  --run-dir runs/YOUR_PARENT_RUN \
+  --photometric-system lsst \
   --color-pair g-r \
-  --ztf-depth-source joblib \
-  --ztf-depth-dir ztf_depth_distributions \
-  --m5-scenario median_p50 \
-  --t-min 0.4 --t-max 16.0 --bin-width 0.4
+  --stage m5_no_mw \
+  --times 1,2,4,6 \
+  --parameter-pairs Ye_wind:log10_mej_dyn \
+  --bounds-file runs/YOUR_PARENT_RUN/analysis/YOUR_CONVERGENCE_DIRECTORY \
+  --envelope-family p16-p84 \
+  --hdr-level 90
 ```
 
-The legacy `lims` files contain smooth empirical distributions of the ZTF 5-sigma
-limiting magnitude for individual images. A larger limiting magnitude means a
-deeper exposure. The builder draws reproducibly from each distribution and
-uses its p25, p50, or p75 as the global band threshold. It writes the exact
-values, source checksums, seed, and number of draws to the recorded threshold
-table.
+`p16–p84` is the colour-selection interval. `HDR90` is the highest-density
+region containing approximately 90% of the selected events in parameter
+space; these are independent quantities. Only statistically valid colour bins
+are used. See
+[`PARAMETER_SPACE_COLOUR_SELECTION.md`](PARAMETER_SPACE_COLOUR_SELECTION.md).
 
-This is a controlled depth comparison, not a full ZTF survey simulation: it
-does not reproduce visit cadence, weather correlations, or per-visit noise.
-The root output directory contains direct LSST--ZTF overlays for all four
-stages, named `LSST_ZTF_*_comparison.png`.
-
-The joblib format is pickle-based and can execute code while loading. Only use
-files from a trusted source. The files are external inputs and are deliberately
-not committed to this repository; see `THIRD_PARTY_NOTICES.md`.
-
-An SN Ia Parquet input is optional. When provided, its events can be assigned
-deterministically to KNe sight lines so that the foreground extinction and m5
-selection are compared on the same sky distribution. The expected input
-schema and scientific limitations are documented in `docs/snia_input.md`.
-
-### 4. Measure convergence with KNe population size
-
-Use one parent run containing at least the largest population to be tested:
+## 6. Study Galactic latitude
 
 ```bash
-python analyze_envelope_population_convergence.py
+python run_latitude_experiment.py
 ```
 
-The script constructs nested random subsets for every requested population
-size and repeats the experiment with independent subsampling seeds. It plots
-the last initial-consecutive valid envelope-bin edge against the number of
-injected KNe, with the 16--84% subsampling interval. The optional exponential
-curve is a visual saturation guide only.
+The orchestrator reuses one intrinsic catalogue across latitude bins, runs the
+per-bin analysis, and compares paired event outcomes. `--dry-run` prints the
+commands before a long calculation. The low/high plateau diagnostic can also
+be run directly with:
 
-The reported threshold is the first tested size for which both the median and
-the requested fraction of repetitions lie within the time tolerance of the
-largest-size reference, provided that every larger tested size also passes.
-By default the tolerance is zero: the final temporal bin must be identical,
-as in a comparison of 10.2 d with 10.2 d. A one-bin-width tolerance can be
-chosen as a relaxed sensitivity test. The CSV outputs retain the individual
-repetitions, the selected percentile at the last valid bin, and the effective
-number of events in that bin.
+```bash
+python plot_kne_low_high_plateau.py --interactive
+```
 
-The parent run must be large enough: a grid ending at one million events
-requires a parent population of at least one million saved events. Do not
-interpret the threshold as asymptotic if the curve is still increasing at the
-largest tested size.
+The plateau is an operational stability criterion, not a physical Galactic
+boundary. Read [`docs/low_high_plateau.md`](docs/low_high_plateau.md) before
+interpreting it.
 
+## 7. Estimate colour reach with distance
 
-## Data and repository policy
+```bash
+python estimate_kne_lsst_distance_reach.py
+```
 
-The following are deliberately excluded from Git:
+For each distance bin, the script measures the fraction of injected events
+with at least one temporal bin in which both requested bands are finite and
+above the selected global m5 thresholds. It reports binomial intervals and
+isotonic crossing distances. This remains a synthetic colour-availability
+metric, not a full cadence-dependent survey efficiency.
 
-- `runs/`, OpSim export directories, generated figures and tables;
-- SN Ia Parquet populations and other large data products;
-- local FIESTA model weights;
-- credentials, private keys, machine-specific paths, and environment prefixes.
+## Testing and reproducibility
 
-Never commit a file such as `ssh_key.txt`. Use GitHub's SSH-agent or credential
-manager outside the repository.
+Run the default test suite before every commit that changes scientific code:
 
-## Provenance and citation
+```bash
+python -m compileall -q .
+python -m unittest discover -s tests -v
+```
 
-`generate_kne_lightcurves.py` was developed from the MIT-licensed FIESTA
-example `examples/generate_lightcurves.py`; the immutable upstream reference,
-license notice, and requested scientific citation are recorded in
-`THIRD_PARTY_NOTICES.md` and `CITATION.cff`.
+The optional real-FIESTA integration test is enabled explicitly:
 
-Before publishing, replace the author and repository placeholders in
-`CITATION.cff`, `pyproject.toml`, and `LICENSE`, then archive a release
-with a DOI if the analysis is intended to be cited.
+```bash
+KNE_RUN_FIESTA_INTEGRATION_TESTS=1 \
+  python -m unittest discover -s tests -p 'test_metzger_fiesta_integration.py' -v
+```
+
+The reproducibility checklist is in
+[`docs/reproducibility.md`](docs/reproducibility.md). Numerical equivalence,
+not line count, is the acceptance criterion for refactoring scientific code.
+
+## Repository policy
+
+Do not commit:
+
+- `runs/`, OpSim exports, generated figures, or analysis tables;
+- external SN Ia populations or posterior archives;
+- FIESTA model weights or NMMA joblib inputs;
+- local backup files, credentials, private keys, or machine-specific paths.
+
+Keep immutable source revisions and checksums in run metadata or an external
+data manifest. Publish large scientific products in a DOI-backed archive when
+they are needed to reproduce a paper.
+
+## Attribution, AI use, and citation
+
+`generate_kne_lightcurves.py` was developed from FIESTA's MIT-licensed
+`examples/generate_lightcurves.py` and substantially extended. The immutable
+upstream reference, scientific citations, model provenance, and external-data
+notices are recorded in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
+
+The use of generative AI for code development, debugging, repository
+organisation, and supporting documentation is described transparently in
+[`AI_USAGE.md`](AI_USAGE.md). Scientific responsibility and validation remain
+with the repository author.
+
+To cite this software, use [`CITATION.cff`](CITATION.cff). The repository's own
+source code is released under the [`MIT License`](LICENSE); third-party
+software and data retain their respective terms.
