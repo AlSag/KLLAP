@@ -236,46 +236,6 @@ requires a parent population of at least one million saved events. Do not
 interpret the threshold as asymptotic if the curve is still increasing at the
 largest tested size.
 
-### 5. Estimate LSST colour reach in luminosity distance
-
-Generate a variable-distance population, normally uniform in comoving volume,
-with synthetic depth cut set to `none`, then run:
-
-```bash
-python estimate_kne_lsst_distance_reach.py
-```
-
-For each distance bin, the script measures the fraction of all injected KNe
-having at least one temporal-bin centre where both requested LSST bands are
-finite and brighter than the chosen p25, p50 or p75 global m5 thresholds. It
-reports raw binomial fractions, Wilson confidence intervals, a decreasing
-isotonic interpolation, and D50/D30/D20/D10/D1 crossing distances.
-
-This statistic uses synthetic colour availability under global m5 thresholds.
-It does not include the probability that the Rubin cadence actually samples
-both bands, and is therefore not a full survey-detection efficiency.
-
-### 6. Run the Galactic-latitude experiment
-
-```bash
-python run_latitude_experiment.py
-```
-
-The orchestrator creates or reuses one intrinsic catalogue, projects the same
-event IDs into disjoint `|b|` bins with independent sky seeds, analyzes every
-bin, and produces one relative-loss plot plus one PNG value table. Use
-`--dry-run` to inspect commands and output paths before a long run.
-
-The primary ratio for bin `k` is
-
-```text
-loss rate in bin k / loss rate in the [0°, 5°[ reference bin.
-```
-
-The bootstrap remains paired by `event_id`, and the reported plateau is the
-first bin from which all later ratios are compatible with a common level under
-the configured relative tolerance. See `docs/methodology.md` before assigning
-a physical interpretation to that operational threshold.
 
 ## Data and repository policy
 
