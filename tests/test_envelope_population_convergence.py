@@ -8,7 +8,7 @@ from kne_convergence_common import (
     aggregate_results,
     parse_sample_sizes,
 )
-from build_color_envelopes import select_metadata_subset
+from kne_envelope_core import select_metadata_subset
 
 
 class EnvelopePopulationConvergenceTest(unittest.TestCase):

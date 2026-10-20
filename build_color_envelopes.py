@@ -73,14 +73,12 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from matplotlib.collections import LineCollection
 from matplotlib.colors import hsv_to_rgb, to_hex
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 
 from dynamic_color_cut_common import (
     assign_event_splits,
-    bootstrap_percentiles_batched,
     canonical_event_id,
     discover_synthetic_files,
     event_id_from_path,
@@ -92,36 +90,29 @@ from dynamic_color_cut_common import (
     run_root,
 )
 from kne_pipeline_common import discover_m5_quantile_table
-
-
-RUBIN_MW_R = {
-    "u": 4.757217815396922,
-    "g": 3.6605664439892616,
-    "r": 2.70136780871597,
-    "i": 2.0536599130965882,
-    "z": 1.5900964472616756,
-    "y": 1.3077049588254708,
-}
-
-PS1_MW_R = {
-    "g": 3.172,
-    "r": 2.271,
-    "i": 1.682,
-    "z": 1.322,
-    "y": 1.087,
-}
-
-ZTF_MW_R = {
-    "g": 3.303,
-    "r": 2.285,
-    "i": 1.698,
-}
-
-MW_R_BY_SYSTEM = {
-    "lsst": RUBIN_MW_R,
-    "ps1": PS1_MW_R,
-    "ztf": ZTF_MW_R,
-}
+from kne_envelope_plots import (
+    comparison_ylim,
+    draw_comparison_envelope,
+    draw_envelope,
+    draw_population,
+    draw_population_style,
+    format_axes,
+    format_snia_axes,
+)
+from kne_envelope_core import (
+    DEFAULT_TAIL_GRID,
+    M5_STAGES,
+    MW_EXTINCTED_STAGES,
+    MW_R_BY_SYSTEM,
+    PS1_MW_R,
+    RUBIN_MW_R,
+    STAGES,
+    STAGE_BOOTSTRAP_SEED_OFFSETS,
+    ZTF_MW_R,
+    event_extinction_mag,
+    percentile_diagnostics,
+    select_metadata_subset,
+)
 
 ZTF_DEPTH_FILENAMES = {
     "g": ("lims_public_g.joblib", "lims_g.joblib"),
@@ -159,35 +150,10 @@ SNIA_BOOTSTRAP_SEED_OFFSETS = {
     "m5_with_mw": 8004,
 }
 
-# q is the lower percentile of the symmetric p_q--p_(100-q) envelope.
-DEFAULT_TAIL_GRID = (
-    "0.02,0.05,0.1,0.25,0.5,0.53,1,2.5,5,10,16,20,25,30,35,"
-    "40,42,44,45,46,47,48,49,50"
-)
-
 M5_SCENARIOS = {
     "worst_p25": "worst p25",
     "median_p50": "median p50",
     "best_p75": "best p75",
-}
-
-STAGES = (
-    "intrinsic_no_m5_no_mw",
-    "no_m5_with_mw",
-    "m5_no_mw",
-    "m5_with_mw",
-)
-
-MW_EXTINCTED_STAGES = frozenset({"no_m5_with_mw", "m5_with_mw"})
-M5_STAGES = frozenset({"m5_no_mw", "m5_with_mw"})
-
-# Preserve the historical bootstrap streams of the original three stages.
-# The new no-m5/MW stage receives its own previously unused offset.
-STAGE_BOOTSTRAP_SEED_OFFSETS = {
-    "intrinsic_no_m5_no_mw": 1,
-    "m5_no_mw": 2,
-    "m5_with_mw": 3,
-    "no_m5_with_mw": 4,
 }
 
 AT2017GFO_DEFAULT_MERGER_MJD = 57982.52851852
@@ -1081,51 +1047,6 @@ def load_ztf_depth_thresholds(
     return lookup, pd.DataFrame(rows)
 
 
-def event_extinction_mag(
-    metadata_row: pd.Series,
-    photometric_system: str,
-    band: str,
-) -> float:
-    """Return the exact A_band stored by the paired generator when available.
-
-    New LSST+PS1 runs store ``A_<system>_<band>_mw`` once per event.  Older
-    LSST runs are supported through ``R_band * E(B-V)``.  PS1 fallback uses
-    the same Schlafly & Finkbeiner coefficients as the generator.
-    """
-    column = f"A_{photometric_system}_{band}_mw"
-    if column in metadata_row.index:
-        value = pd.to_numeric(pd.Series([metadata_row[column]]), errors="coerce").iloc[0]
-        if np.isfinite(value):
-            return float(value)
-    ebv = float(metadata_row["ebv_mw"])
-    return float(MW_R_BY_SYSTEM[photometric_system][band] * ebv)
-
-
-def select_metadata_subset(
-    metadata: pd.DataFrame,
-    maximum_events: int,
-    subsample_seed: int | None,
-) -> pd.DataFrame:
-    """Select a reproducible event subset, optionally nested across sample sizes.
-
-    With one fixed ``subsample_seed``, each requested size is a prefix of the
-    same random permutation.  Consequently, the N=1,000 sample is contained in
-    the N=10,000 sample.  A missing seed preserves the historical first-event
-    selection used by ``--max-events``.
-    """
-    if maximum_events <= 0 or maximum_events >= len(metadata):
-        return metadata.copy().reset_index(drop=True)
-    maximum = min(int(maximum_events), len(metadata))
-    if subsample_seed is None:
-        return metadata.iloc[:maximum].copy().reset_index(drop=True)
-    subset_rng = np.random.default_rng(subsample_seed)
-    selected = subset_rng.permutation(len(metadata))[:maximum]
-    subset = metadata.iloc[selected].copy()
-    return subset.sort_values(
-        "event_id", key=lambda s: pd.to_numeric(s, errors="coerce")
-    ).reset_index(drop=True)
-
-
 def prepare_metadata(
     args: argparse.Namespace,
     available_event_ids: set[str],
@@ -1233,166 +1154,6 @@ def prepare_metadata(
             "have a saved synthetic light curve"
         )
     return metadata
-
-
-def percentile_diagnostics(
-    values: np.ndarray,
-    lower_grid: list[float],
-    n_boot: int,
-    bootstrap_threshold: float,
-    minimum_tail_events: float,
-    rng: np.random.Generator,
-) -> tuple[pd.DataFrame, dict[str, float] | None]:
-    lower = sorted(set(float(q) for q in lower_grid if 0.0 < q <= 50.0))
-    percentiles = sorted(set(lower + [100.0 - q for q in lower] + [50.0]))
-    estimate, boot16, boot84, half = bootstrap_percentiles_batched(
-        values, percentiles, n_boot, rng
-    )
-    n_values = len(values)
-    rows = []
-    for q, value, low, high, width in zip(percentiles, estimate, boot16, boot84, half):
-        expected_tail = n_values * min(q, 100.0 - q) / 100.0
-        width_valid = bool(np.isfinite(width) and width <= bootstrap_threshold)
-        tail_valid = bool(expected_tail >= minimum_tail_events)
-        rows.append({
-            "percentile": q,
-            "value": value,
-            "bootstrap_p16": low,
-            "bootstrap_p84": high,
-            "bootstrap_half_width_68": width,
-            "expected_nearest_tail_events": expected_tail,
-            "bootstrap_width_valid": width_valid,
-            "tail_support_valid": tail_valid,
-            "percentile_valid": bool(width_valid and tail_valid),
-        })
-    diagnostics = pd.DataFrame(rows)
-    by_q = diagnostics.set_index("percentile")
-    median_valid = bool(by_q.loc[50.0, "percentile_valid"])
-    valid_pairs = [
-        q for q in lower
-        if median_valid
-        and bool(by_q.loc[q, "percentile_valid"])
-        and bool(by_q.loc[100.0 - q, "percentile_valid"])
-    ]
-    if not valid_pairs:
-        return diagnostics, None
-
-    # The smallest q is the widest statistically valid envelope.  If broad
-    # pairs fail, the search continues through p45-p55, p49-p51 and p50-p50.
-    q_low = min(valid_pairs)
-    q_high = 100.0 - q_low
-    selected = {
-        "low_percentile": q_low,
-        "high_percentile": q_high,
-        "color_min": float(by_q.loc[q_low, "value"]),
-        "color_median": float(by_q.loc[50.0, "value"]),
-        "color_max": float(by_q.loc[q_high, "value"]),
-        "low_bootstrap_half_width_68": float(by_q.loc[q_low, "bootstrap_half_width_68"]),
-        "median_bootstrap_half_width_68": float(by_q.loc[50.0, "bootstrap_half_width_68"]),
-        "high_bootstrap_half_width_68": float(by_q.loc[q_high, "bootstrap_half_width_68"]),
-        "expected_lower_tail_events": float(n_values * q_low / 100.0),
-        "expected_upper_tail_events": float(n_values * q_low / 100.0),
-        "nominal_coverage_percent": float(q_high - q_low),
-    }
-    return diagnostics, selected
-
-
-def draw_population(
-    ax: plt.Axes,
-    time_tracks: list[np.ndarray],
-    color_tracks: list[np.ndarray],
-    trajectory_colors: list[str] | None = None,
-) -> None:
-    """Draw every event trajectory without time/colour binning."""
-    segments = []
-    segment_colors = []
-    isolated_times = []
-    isolated_colors = []
-    isolated_plot_colors = []
-    for track_index, (times, colors) in enumerate(zip(time_tracks, color_tracks)):
-        times = np.asarray(times, dtype=float)
-        colors = np.asarray(colors, dtype=float)
-        plot_color = (
-            trajectory_colors[track_index]
-            if trajectory_colors is not None else "black"
-        )
-        finite = np.isfinite(times) & np.isfinite(colors)
-        points = np.column_stack((times[finite], colors[finite]))
-        if len(points) >= 2:
-            segments.append(points)
-            segment_colors.append(plot_color)
-        elif len(points) == 1:
-            isolated_times.append(points[0, 0])
-            isolated_colors.append(points[0, 1])
-            isolated_plot_colors.append(plot_color)
-    if segments:
-        collection = LineCollection(
-            segments,
-            colors=segment_colors,
-            linewidths=0.16 if trajectory_colors is None else 0.75,
-            alpha=0.018 if trajectory_colors is None else 0.78,
-            rasterized=True,
-        )
-        ax.add_collection(collection)
-    if isolated_times:
-        ax.scatter(
-            isolated_times,
-            isolated_colors,
-            s=0.18 if trajectory_colors is None else 3.0,
-            alpha=0.025 if trajectory_colors is None else 0.78,
-            color=isolated_plot_colors,
-            edgecolors="none",
-            rasterized=True,
-        )
-    if not segments and not isolated_times:
-        return
-
-
-def draw_envelope(ax: plt.Axes, rules: pd.DataFrame) -> None:
-    for row in rules.itertuples():
-        x = [row.t_min_days, row.t_max_days]
-        ax.fill_between(
-            x,
-            [row.color_min, row.color_min],
-            [row.color_max, row.color_max],
-            color="#4c78a8",
-            alpha=0.24,
-        )
-        ax.plot(x, [row.color_min] * 2, color="#2f5f98", lw=1.0)
-        ax.plot(x, [row.color_max] * 2, color="#2f5f98", lw=1.0)
-        ax.plot(x, [row.color_median] * 2, color="#d55e00", lw=1.25)
-
-
-def format_axes(ax: plt.Axes, pair: str, t_min: float, t_max: float) -> None:
-    ax.set_xlabel(r"$t-t_{\rm merger}$ [days]")
-    ax.set_ylabel(f"{pair} [mag]")
-    ax.set_xlim(t_min, t_max)
-    ax.grid(alpha=0.18)
-
-
-def format_snia_axes(
-    ax: plt.Axes,
-    pair: str,
-    t_min: float,
-    t_max: float,
-    comparison: bool,
-    time_reference: str,
-) -> None:
-    snia_reference = (
-        r"$t-t_{\rm first\ observation}$"
-        if time_reference == "first_observation"
-        else r"$t-t_{\rm max}$"
-    )
-    if comparison:
-        ax.set_xlabel(
-            r"phase [days] (KNe: $t-t_{\rm merger}$; SNe Ia: "
-            + snia_reference + ")"
-        )
-    else:
-        ax.set_xlabel(snia_reference + " [days]")
-    ax.set_ylabel(f"{pair} [mag]")
-    ax.set_xlim(t_min, t_max)
-    ax.grid(alpha=0.18)
 
 
 def first_existing_column(columns: pd.Index, aliases: tuple[str, ...]) -> str | None:
@@ -1833,83 +1594,6 @@ def build_population_envelope_tables(
         if diagnostics_frames else pd.DataFrame()
     )
     return rules_all, rules_consecutive, availability_frame, diagnostics_frame
-
-
-def draw_population_style(
-    ax: plt.Axes,
-    time_tracks: list[np.ndarray],
-    color_tracks: list[np.ndarray],
-    color: str,
-    alpha: float,
-    linewidth: float,
-) -> None:
-    segments = []
-    for times, colours in zip(time_tracks, color_tracks):
-        times = np.asarray(times, dtype=float)
-        colours = np.asarray(colours, dtype=float)
-        finite = np.isfinite(times) & np.isfinite(colours)
-        points = np.column_stack((times[finite], colours[finite]))
-        if len(points) >= 2:
-            segments.append(points)
-        elif len(points) == 1:
-            ax.scatter(
-                points[0, 0], points[0, 1], s=0.2, color=color,
-                alpha=alpha, edgecolors="none", rasterized=True,
-            )
-    if segments:
-        ax.add_collection(LineCollection(
-            segments, colors=color, linewidths=linewidth, alpha=alpha,
-            rasterized=True,
-        ))
-
-
-def draw_comparison_envelope(
-    ax: plt.Axes,
-    rules: pd.DataFrame,
-    color: str,
-    linestyle: str,
-    alpha: float,
-) -> None:
-    for row in rules.itertuples():
-        x = [row.t_min_days, row.t_max_days]
-        ax.fill_between(
-            x, [row.color_min] * 2, [row.color_max] * 2,
-            color=color, alpha=alpha,
-        )
-        ax.plot(x, [row.color_min] * 2, color=color, lw=0.9, linestyle=linestyle)
-        ax.plot(x, [row.color_max] * 2, color=color, lw=0.9, linestyle=linestyle)
-        ax.plot(x, [row.color_median] * 2, color=color, lw=1.4, linestyle=linestyle)
-
-
-def comparison_ylim(
-    *collections: list[np.ndarray] | pd.DataFrame,
-) -> tuple[float, float] | None:
-    arrays: list[np.ndarray] = []
-    for collection in collections:
-        if isinstance(collection, pd.DataFrame):
-            if not collection.empty:
-                arrays.append(
-                    collection[["color_min", "color_max"]].to_numpy(float).ravel()
-                )
-        else:
-            finite_tracks = [
-                np.asarray(values, dtype=float) for values in collection
-                if len(values)
-            ]
-            if finite_tracks:
-                values = np.concatenate(finite_tracks)
-                values = values[np.isfinite(values)]
-                if values.size:
-                    arrays.append(np.nanpercentile(values, [0.05, 99.95]))
-    if not arrays:
-        return None
-    values = np.concatenate(arrays)
-    values = values[np.isfinite(values)]
-    if not values.size:
-        return None
-    low, high = float(values.min()), float(values.max())
-    padding = max(0.1, 0.05 * max(high - low, 0.1))
-    return low - padding, high + padding
 
 
 def compute_kne_snia_overlap(

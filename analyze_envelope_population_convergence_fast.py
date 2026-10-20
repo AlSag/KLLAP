@@ -23,6 +23,7 @@ import pandas as pd
 
 import kne_convergence_common as convergence
 import build_color_envelopes as builder
+import kne_envelope_core as envelope_core
 from dynamic_color_cut_common import (
     assign_event_splits,
     canonical_event_id,
@@ -271,10 +272,10 @@ def load_population_once(a: argparse.Namespace, root: Path, bands: tuple[str, st
         m2 = interpolate_band(target, band2, centres)
         s1 = interpolate_band(select, band1, centres)
         s2 = interpolate_band(select, band2, centres)
-        a1 = builder.event_extinction_mag(row, system, band1)
-        a2 = builder.event_extinction_mag(row, system, band2)
-        sa1 = builder.event_extinction_mag(row, selection_system, band1)
-        sa2 = builder.event_extinction_mag(row, selection_system, band2)
+        a1 = envelope_core.event_extinction_mag(row, system, band1)
+        a2 = envelope_core.event_extinction_mag(row, system, band2)
+        sa1 = envelope_core.event_extinction_mag(row, selection_system, band1)
+        sa2 = envelope_core.event_extinction_mag(row, selection_system, band2)
         arrays["colour_extincted"][i] = m1 - m2
         arrays["colour_intrinsic"][i] = (m1 - a1) - (m2 - a2)
         arrays["mag_sel_ext_1"][i] = s1
@@ -293,7 +294,7 @@ def select_loaded_metadata_subset(metadata: pd.DataFrame, maximum_events: int,
     rank_column = f"_subsample_rank_{subsample_seed}"
     if rank_column not in metadata:
         # Compatibility fallback for callers supplying a conventional table.
-        return builder.select_metadata_subset(
+        return envelope_core.select_metadata_subset(
             metadata, maximum_events, subsample_seed
         )
     subset = metadata.loc[metadata[rank_column] < int(maximum_events)].copy()
@@ -316,23 +317,23 @@ def last_consecutive_edge(a: argparse.Namespace, sample: pd.DataFrame, arrays: d
     ids = sample.event_id.astype(str).tolist()
     split = assign_event_splits(ids, a.train_fraction, a.validation_fraction, a.builder_seed)
     train = split.split.to_numpy() == "train"
-    if a.stage in builder.MW_EXTINCTED_STAGES:
+    if a.stage in envelope_core.MW_EXTINCTED_STAGES:
         colours = arrays["colour_extincted"][indices]
     else:
         colours = arrays["colour_intrinsic"][indices]
     available = np.isfinite(arrays["colour_intrinsic"][indices]) & np.isfinite(arrays["colour_extincted"][indices])
-    if a.stage in builder.M5_STAGES:
+    if a.stage in envelope_core.M5_STAGES:
         if a.stage == "m5_no_mw":
             one, two = "mag_sel_int_1", "mag_sel_int_2"
         else:
             one, two = "mag_sel_ext_1", "mag_sel_ext_2"
         available &= np.isfinite(arrays[one][indices]) & np.isfinite(arrays[two][indices])
         available &= (arrays[one][indices] <= depths[bands[0]]) & (arrays[two][indices] <= depths[bands[1]])
-    tails = parse_floats(a.tail_percentiles or builder.DEFAULT_TAIL_GRID)
+    tails = parse_floats(a.tail_percentiles or envelope_core.DEFAULT_TAIL_GRID)
     for fallback in (25, 30, 35, 40, 42, 44, 45, 46, 47, 48, 49, 50):
         if fallback not in tails:
             tails.append(float(fallback))
-    seed_offset = builder.STAGE_BOOTSTRAP_SEED_OFFSETS[a.stage]
+    seed_offset = envelope_core.STAGE_BOOTSTRAP_SEED_OFFSETS[a.stage]
     rng = np.random.default_rng(a.builder_seed + 1000 * seed_offset)
     count = 0
     low_q = high_q = np.nan
@@ -341,7 +342,7 @@ def last_consecutive_edge(a: argparse.Namespace, sample: pd.DataFrame, arrays: d
         values = colours[train & available[:, b], b].astype(float)
         if len(values) < a.minimum_events:
             break
-        _, selected = builder.percentile_diagnostics(
+        _, selected = envelope_core.percentile_diagnostics(
             values, tails, a.n_boot, a.bootstrap_threshold_mag,
             a.minimum_tail_events, rng,
         )
