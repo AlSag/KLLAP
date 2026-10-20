@@ -63,22 +63,38 @@ several pipeline stages. `kne_m5.py` owns m5-table discovery and percentile
 selection. These shared modules avoid maintaining subtly different copies of
 the same convention in multiple scripts.
 
+`get_opsim_baseline.py` follows the same import-safety rule as the generator:
+importing it does not parse terminal input, locate the Rubin database, or
+create export products.
+
+### Envelope construction
+
+`build_color_envelopes.py` remains the user-facing command and orchestration
+layer. `kne_envelope_core.py` owns the numerical conventions shared with the
+convergence and parameter-space analyses: MW extinction, reproducible nested
+subsets, bootstrap percentile validity, tail support, and selection of the
+widest valid symmetric envelope.
+
+`kne_envelope_plots.py` receives already computed tracks and envelope tables.
+It cannot select events, calculate percentiles, apply extinction, or impose an
+m5 cut. Representative figures produced before and after extraction were
+identical pixel by pixel.
+
 ## Analysis path
 
 | Layer | Public entry point | Internal dependencies |
 |---|---|---|
-| Envelope construction | `build_color_envelopes.py` | `dynamic_color_cut_common.py`, `kne_m5.py` |
-| Convergence | `analyze_envelope_population_convergence_fast.py` | `analyze_envelope_population_convergence.py`, `envelope_colour_convergence.py`, `envelope_multiquantile_convergence.py` |
+| Envelope construction | `build_color_envelopes.py` | `kne_envelope_core.py`, `kne_envelope_plots.py`, `dynamic_color_cut_common.py`, `kne_m5.py` |
+| Convergence | `analyze_envelope_population_convergence_fast.py` | `kne_convergence_common.py`, `kne_envelope_core.py`, `envelope_colour_convergence.py`, `envelope_multiquantile_convergence.py` |
 | Saved-result replot | `replot_envelope_population_convergence.py` | `envelope_multiquantile_convergence.py` |
 | Realization comparison | `plot_colour_envelope_realizations.py` | `dynamic_color_cut_common.py`, `kne_m5.py` |
 | Parameter-space maps | `plot_kne_colour_parameter_space.py` | shared population loaders |
 | Iso-colour maps | `plot_kne_colour_isocontours.py` | `plot_kne_colour_parameter_space.py`, `kne_m5.py` |
 | Latitude experiment | `run_latitude_experiment.py` | generator, latitude analyzer, comparator |
 
-`analyze_envelope_population_convergence.py` looks like a legacy duplicate,
-but it cannot yet be removed: the recommended fast implementation imports
-shared constants and aggregation/plotting functions from it. Those utilities
-must first move into a neutral module.
+The recommended fast convergence command no longer imports the legacy entry
+point. Shared parsing, aggregation, and plotting definitions live in
+`kne_convergence_common.py`.
 
 ## How to review a scientific change
 
@@ -94,11 +110,11 @@ must first move into a neutral module.
 
 ## Remaining refactoring order
 
-1. Split the configuration and orchestration sections of
-   `generate_kne_lightcurves.py` into explicit runtime objects.
-2. Split the large `build_color_envelopes.main()` by responsibility while
-   preserving its envelope tables exactly.
-3. Move shared convergence utilities out of the legacy entry point.
+1. Split the remaining `build_color_envelopes.main()` by output family while
+   preserving its tables exactly.
+2. Add a deterministic golden-output envelope fixture before moving population
+   I/O.
+3. Compare legacy and fast convergence outputs end to end.
 4. Archive a legacy script only after no public command, import, test, or
    documentation page depends on it.
 

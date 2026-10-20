@@ -31,14 +31,18 @@ in the code and methodology documents referenced below.
 | `dynamic_color_cut_common.py` | Colour matching, event splits, rule evaluation, bootstrap helpers |
 | `kne_m5.py` | Shared discovery and parsing of m5 percentile tables and raw OpSim depth files |
 | `kne_model_backends.py` | FIESTA surrogate and semi-analytical backend selection |
+| `kne_generation_core.py` | Deterministic generation table transformations |
+| `kne_generation_plots.py` | Generation-only diagnostic figures |
+| `kne_envelope_core.py` | Extinction, nested subsets, percentile validity, and envelope selection |
+| `kne_envelope_plots.py` | Plotting primitives for envelope products |
+| `kne_convergence_common.py` | Parsing, aggregation, and plotting conventions shared by convergence commands |
 | `envelope_colour_convergence.py` | Detailed colour-value convergence calculations |
 | `envelope_multiquantile_convergence.py` | Multi-percentile value and temporal-extent convergence |
-| `analyze_envelope_population_convergence.py` | Legacy subprocess workflow and shared convergence utilities used by the fast path |
+| `analyze_envelope_population_convergence.py` | Legacy subprocess workflow retained for compatibility |
 
-The legacy convergence entry point cannot yet be removed because the fast
-implementation imports its parsing, aggregation, and plotting utilities. A
-future refactor should move those reusable functions into a neutral module,
-then retain the legacy script only as a compatibility wrapper.
+The fast convergence command no longer imports the legacy entry point. Both
+use `kne_convergence_common.py`; the older command remains until an end-to-end
+equivalence fixture establishes whether it can be archived.
 
 ## Utilities
 
@@ -66,15 +70,14 @@ small, documented, and stored under `tests/` only when a test requires them.
 
 ## Refactoring priorities
 
-1. Split the 1,000-line `build_color_envelopes.main()` into orchestration
-   functions without changing calculations.
-2. Separate interactive configuration from execution in
-   `generate_kne_lightcurves.py`; the current module performs substantial work
-   at import time.
-3. Move shared convergence utilities out of the legacy entry point.
-4. Add golden-output tests for a small deterministic population before moving
-   interpolation, envelope, or extinction code.
-5. Keep performance-critical population loading vectorized and benchmarked.
+1. Split the remaining `build_color_envelopes.main()` orchestration by output
+   family without changing tables.
+2. Add a small golden-output envelope fixture before moving population I/O.
+3. Compare the legacy and fast convergence commands end to end.
+4. Keep performance-critical population loading vectorized and benchmarked.
+
+Retention decisions are recorded in
+[`script_inventory.md`](script_inventory.md).
 
 Reducing total line count is not itself an acceptance criterion. A refactor is
 accepted only when the public commands remain understandable and deterministic
