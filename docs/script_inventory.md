@@ -34,6 +34,8 @@ required for every run, but they produce distinct scientific products.
 - `kne_model_backends.py`: FIESTA backend selection and validation;
 - `kne_generation_core.py` and `kne_generation_plots.py`: generation
   calculations and presentation;
+- `kne_generation_cli.py`, `kne_opsim_cli.py`, and `kne_envelope_cli.py`:
+  terminal parsers, interactive menus, and option validation only;
 - `kne_envelope_core.py`: extinction, nested subsets, percentile validity,
   tail support, and envelope selection;
 - `kne_envelope_plots.py`: envelope plotting primitives only;

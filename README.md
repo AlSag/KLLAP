@@ -43,7 +43,10 @@ cadence, image-by-image noise, alert production, or broker selection function.
 `kne_pipeline_common.py`, `dynamic_color_cut_common.py`,
 `kne_generation_core.py`, `kne_envelope_core.py`, and
 `kne_convergence_common.py` contain shared implementation. Plotting-only code
-is separated into dedicated modules. Small inspection tools live in `tools/`.
+is separated into dedicated modules. The terminal interfaces of the three
+main commands live in `kne_opsim_cli.py`, `kne_generation_cli.py`, and
+`kne_envelope_cli.py`; the public scripts reexport them for compatibility.
+Small inspection tools live in `tools/`.
 A more detailed ownership map is available in
 [`docs/code_map.md`](docs/code_map.md). The separation between command-line
 entry points, numerical modules, and plotting modules is described in
