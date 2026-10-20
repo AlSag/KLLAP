@@ -19,7 +19,11 @@ ROOT = Path(__file__).resolve().parents[1]
 def generator_functions(*names, **namespace):
     """Load selected definitions without executing the simulation at import."""
     tree = ast.parse((ROOT / "generate_kne_lightcurves.py").read_text())
-    definitions = [n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.ClassDef)) and n.name in names]
+    definitions = [
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, (ast.FunctionDef, ast.ClassDef)) and n.name in names
+    ]
     if len(definitions) != len(names):
         raise AssertionError("Missing generator definition")
     ns = dict(vars(backend), argparse=argparse, np=np, pd=pd, Path=Path, json=json, sys=sys)
