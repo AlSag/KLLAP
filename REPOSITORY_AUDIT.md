@@ -29,10 +29,12 @@
 - `replot_envelope_population_convergence.py`
 - `plot_kne_colour_parameter_space.py`
 
-`analyze_envelope_population_convergence.py` remains required because the fast
-entry point imports shared parsing, aggregation, and plotting functions from
-it. It should later become a compatibility wrapper after those functions are
-moved into a neutral module.
+The original audit found that the fast convergence entry point imported the
+legacy subprocess command. This dependency has since been removed: both
+commands now import parsing, aggregation, and plotting definitions from
+`kne_convergence_common.py`. The legacy command is retained only as an
+explicitly documented compatibility workflow pending an end-to-end output
+comparison.
 
 ### Latitude and reach analysis
 
