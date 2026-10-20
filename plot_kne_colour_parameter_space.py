@@ -27,11 +27,12 @@ import pandas as pd
 from scipy.ndimage import gaussian_filter, gaussian_filter1d, map_coordinates
 
 import kne_envelope_core as envelope_core
+from kne_m5 import M5_SCENARIOS
 
 
-STAGES = (
-    "intrinsic_no_m5_no_mw", "no_m5_with_mw", "m5_no_mw", "m5_with_mw",
-)
+# Public compatibility alias; the canonical stage ordering lives in the
+# numerical envelope module.
+STAGES = envelope_core.STAGES
 PARAMETER_LABELS = {
     "log10_mej_dyn": r"$\log_{10}(M_{\rm dyn}/M_\odot)$",
     "log10_mej_wind": r"$\log_{10}(M_{\rm wind}/M_\odot)$",
@@ -95,7 +96,7 @@ def build_parser():
         help="Deprecated explicit low,high override. Prefer --envelope-family.",
     )
     parser.add_argument("--reference-repetition", type=int, default=0, help="Reference CSV repetition when multiple profiles are saved.")
-    parser.add_argument("--m5-scenario", choices=("worst_p25", "median_p50", "best_p75"), default="best_p75")
+    parser.add_argument("--m5-scenario", choices=M5_SCENARIOS, default="best_p75")
     parser.add_argument("--threshold-scope", choices=("common_global", "latitude_conditioned"), default="common_global")
     parser.add_argument("--m5-quantile-table", type=Path)
     parser.add_argument("--ztf-m5-g", type=float)

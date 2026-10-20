@@ -13,18 +13,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-STAGES = (
-    "intrinsic_no_m5_no_mw",
-    "no_m5_with_mw",
-    "m5_no_mw",
-    "m5_with_mw",
-)
-
-
-M5_STAGES = frozenset({"m5_no_mw", "m5_with_mw"})
-
-
-M5_SCENARIOS = ("worst_p25", "median_p50", "best_p75")
+from kne_envelope_core import M5_STAGES, STAGES
+from kne_m5 import M5_SCENARIOS
 
 
 def parse_sample_sizes(text: str) -> list[int]:

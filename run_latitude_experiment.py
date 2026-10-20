@@ -21,6 +21,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
+from kne_m5 import M5_SCENARIOS
+
 
 DEFAULT_EDGES = (0.0, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0, 40.0, 50.0, 90.0)
 M5_REQUIRED_COLUMNS = {
@@ -88,7 +90,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--synthetic-cadence-days", type=float, default=0.1)
     parser.add_argument(
         "--m5-scenario",
-        choices=["worst_p25", "median_p50", "best_p75"],
+        choices=M5_SCENARIOS,
         default="best_p75",
     )
     parser.add_argument("--t-min", type=float, default=0.4)

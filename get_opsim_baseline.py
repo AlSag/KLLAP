@@ -13,7 +13,6 @@ import sys
 from kne_pipeline_common import (
     prompt_choice,
     prompt_text,
-    slugify,
     write_m5_depth_quantiles,
 )
 

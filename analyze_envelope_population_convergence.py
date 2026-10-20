@@ -26,6 +26,7 @@ import numpy as np
 import pandas as pd
 
 from kne_pipeline_common import prompt_choice, prompt_text
+from kne_m5 import M5_SCENARIO_LABELS
 from kne_convergence_common import (
     M5_SCENARIOS,
     M5_STAGES,
@@ -175,11 +176,7 @@ def interactive(args: argparse.Namespace) -> argparse.Namespace:
     ))
     args.m5_scenario = prompt_choice(
         "m5 threshold scenario",
-        [
-            ("worst_p25", "worst p25"),
-            ("median_p50", "median p50"),
-            ("best_p75", "best p75"),
-        ],
+        list(M5_SCENARIO_LABELS.items()),
         args.m5_scenario,
     )
     if args.photometric_system == "ztf":

@@ -39,6 +39,7 @@ from dynamic_color_cut_common import (
     run_root,
 )
 from kne_pipeline_common import prompt_choice, prompt_text
+from kne_m5 import M5_SCENARIO_LABELS, M5_SCENARIOS
 
 
 def parse_colour_pair(value: str) -> tuple[str, str]:
@@ -177,7 +178,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--bin-width", type=float, default=0.4)
     parser.add_argument(
         "--m5-scenario",
-        choices=["worst_p25", "median_p50", "best_p75"],
+        choices=M5_SCENARIOS,
         default="median_p50",
     )
     parser.add_argument(
@@ -215,11 +216,7 @@ def interactive(args: argparse.Namespace) -> argparse.Namespace:
     args.bin_width = float(prompt_text("Fixed temporal-bin width [days]", str(args.bin_width)))
     args.m5_scenario = prompt_choice(
         "Rubin/LSST m5 threshold",
-        [
-            ("worst_p25", "worst p25"),
-            ("median_p50", "median p50"),
-            ("best_p75", "best p75"),
-        ],
+        list(M5_SCENARIO_LABELS.items()),
         args.m5_scenario,
     )
     args.threshold_scope = prompt_choice(

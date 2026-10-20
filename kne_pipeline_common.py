@@ -61,6 +61,8 @@ from typing import Any, BinaryIO, Iterable, Mapping, Sequence, TextIO
 import numpy as np
 import pandas as pd
 
+from kne_m5 import M5_SCENARIO_PERCENTILES
+
 
 # =============================================================================
 # 1. PIPELINE CONSTANTS
@@ -1041,9 +1043,8 @@ def save_m5_products(run_dir: Path, summary: pd.DataFrame, thresholds: pd.DataFr
 # containing p25, p50 and p75 thresholds for both the complete OpSim sample and
 # (when field coordinates are available) high/low Galactic-latitude subsets.
 M5_DEPTH_SCENARIOS = {
-    "worst_p25": 0.25,
-    "median_p50": 0.50,
-    "best_p75": 0.75,
+    scenario: percentile / 100.0
+    for scenario, percentile in M5_SCENARIO_PERCENTILES.items()
 }
 
 

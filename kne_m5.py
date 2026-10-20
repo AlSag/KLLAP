@@ -22,6 +22,19 @@ import numpy as np
 import pandas as pd
 
 
+M5_SCENARIO_PERCENTILES = {
+    "worst_p25": 25.0,
+    "median_p50": 50.0,
+    "best_p75": 75.0,
+}
+M5_SCENARIO_LABELS = {
+    "worst_p25": "worst p25",
+    "median_p50": "median p50",
+    "best_p75": "best p75",
+}
+M5_SCENARIOS = tuple(M5_SCENARIO_PERCENTILES)
+
+
 _M5_SOURCE_CACHE: dict[
     tuple[str, float, tuple[str, ...], str | None],
     tuple[dict[str, float], str],
