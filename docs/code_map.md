@@ -13,7 +13,10 @@ in the code and methodology documents referenced below.
 | `build_color_envelopes.py` | Construct colour populations and statistically valid envelopes | Core |
 | `analyze_envelope_population_convergence_fast.py` | Recommended nested-subsample convergence workflow | Core |
 | `replot_envelope_population_convergence.py` | Rebuild convergence plots from saved CSV products | Core |
+| `plot_convergence_support_diagnostics.py` | Display per-bin support and percentile errors from convergence CSV products | Diagnostic |
+| `plot_colour_envelope_realizations.py` | Compare nested population sizes across independent realizations and inspect bootstrap distributions | Core analysis |
 | `plot_kne_colour_parameter_space.py` | Map colour selections into physical-parameter space | Core analysis |
+| `plot_kne_colour_isocontours.py` | Map median colour and iso-colour contours in physical-parameter planes | Core analysis |
 | `run_latitude_experiment.py` | Orchestrate paired latitude-bin populations | Core analysis |
 | `analyze_kne_latitude_losses.py` | Compute per-population latitude outcomes | Core analysis |
 | `compare_kne_latitude_bins.py` | Compare paired latitude bins | Core analysis |
@@ -47,6 +50,11 @@ Every scientific analysis added to the public workflow must have at least one
 test covering its numerical convention or failure mode. The default suite is
 deliberately independent of surrogate weights and large data. Tests requiring
 real FIESTA models or downloads remain opt-in.
+
+The realization comparison tests distinguish median validity from envelope-tail
+validity and preserve the inclusive 20-event p16/p84 boundary.  The isocontour
+tests preserve cell medians, logarithmic mass-axis conversion, and the rule
+that smoothing must never populate an unsupported parameter-space cell.
 
 ## Files that should remain local
 
