@@ -1,12 +1,21 @@
 """Deterministic numerical contracts for the light-curve generator."""
 import ast
+import io
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
 from kne_pipeline_common import interpolate_magnitude_log_time
+from kne_generation_core import (
+    apply_synthetic_m5_median_cut,
+    derive_sky_seed,
+    ensure_mw_extinction_columns,
+    keep_only_mw_extincted_synthetic_magnitude,
+    trim_lsstlike_after_last_detection,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -39,6 +48,30 @@ class MidpointRng:
 
 
 class GeneratorNumericsTest(unittest.TestCase):
+    def test_lazy_rubin_initialization_updates_multisystem_coefficients(self):
+        coefficients = {band: float(index) for index, band in enumerate("ugrizy", 1)}
+
+        class PhotometricParameters:
+            def __init__(self, bandpass):
+                self.bandpass = bandpass
+
+        scope = generator_functions(
+            "initialize_rubin_photometry",
+            BP=None,
+            PHOT=None,
+            DUST_R_X=None,
+            DUST_R_X_BY_SYSTEM={"lsst": None},
+            rubin_bandpasses=lambda: {band: f"bp-{band}" for band in "ugrizy"},
+            PhotometricParameters=PhotometricParameters,
+            get_rubin_dust_coefficients=lambda: coefficients,
+        )
+        with redirect_stdout(io.StringIO()):
+            scope["initialize_rubin_photometry"]()
+
+        self.assertEqual(scope["DUST_R_X"], coefficients)
+        self.assertIs(scope["DUST_R_X_BY_SYSTEM"]["lsst"], coefficients)
+        self.assertEqual(scope["PHOT"]["g"].bandpass, "g")
+
     def test_log_time_interpolation_has_no_extrapolation(self):
         query = np.array([0.5, 1.0, np.sqrt(10.0), 10.0, 100.0, 101.0])
         result = interpolate_magnitude_log_time(
@@ -65,11 +98,8 @@ class GeneratorNumericsTest(unittest.TestCase):
             "z": 1.2,
             "y": 1.0,
         }
-        function = generator_functions(
-            "ensure_mw_extinction_columns", DUST_R_X=coefficients
-        )["ensure_mw_extinction_columns"]
         visits = pd.DataFrame({"band": ["g", "r"], "ebv_mw": [0.1, 0.2]})
-        result = function(visits)
+        result = ensure_mw_extinction_columns(visits, coefficients)
 
         np.testing.assert_allclose(result["R_mw"], [3.0, 2.0])
         np.testing.assert_allclose(result["A_mw"], [0.3, 0.4])
@@ -77,9 +107,6 @@ class GeneratorNumericsTest(unittest.TestCase):
         self.assertNotIn("A_mw", visits.columns)
 
     def test_m5_cut_is_inclusive_and_rebuilds_identifiers(self):
-        function = generator_functions("apply_synthetic_m5_median_cut")[
-            "apply_synthetic_m5_median_cut"
-        ]
         measurements = pd.DataFrame(
             {
                 "band": ["g", "g", "r", "i"],
@@ -88,7 +115,9 @@ class GeneratorNumericsTest(unittest.TestCase):
                 "candidate_id": ["old_1", "old_2", "old_3", "old_4"],
             }
         )
-        result = function(measurements, "event42", {"g": 24.0, "r": 22.3})
+        result = apply_synthetic_m5_median_cut(
+            measurements, "event42", {"g": 24.0, "r": 22.3}
+        )
 
         self.assertEqual(result["band"].tolist(), ["g"])
         self.assertEqual(result["mag"].tolist(), [24.0])
@@ -96,22 +125,16 @@ class GeneratorNumericsTest(unittest.TestCase):
         self.assertEqual(result["candidate_id"].tolist(), ["event42_1"])
 
     def test_saved_synthetic_magnitude_is_the_extincted_value(self):
-        function = generator_functions(
-            "keep_only_mw_extincted_synthetic_magnitude"
-        )["keep_only_mw_extincted_synthetic_magnitude"]
         measurements = pd.DataFrame(
             {"mag": [20.0, 21.0], "mag_mw_extincted": [20.3, 21.4]}
         )
-        result = function(measurements)
+        result = keep_only_mw_extincted_synthetic_magnitude(measurements)
 
         np.testing.assert_allclose(result["mag"], [20.3, 21.4])
         self.assertNotIn("mag_mw_extincted", result.columns)
         np.testing.assert_allclose(measurements["mag"], [20.0, 21.0])
 
     def test_last_detection_window_never_removes_a_detection(self):
-        function = generator_functions("trim_lsstlike_after_last_detection")[
-            "trim_lsstlike_after_last_detection"
-        ]
         observations = pd.DataFrame(
             {
                 "observationStartMJD": [109.0, 101.0, 108.0, 105.0, 102.0, 110.0],
@@ -120,8 +143,10 @@ class GeneratorNumericsTest(unittest.TestCase):
                 "detected": [False, False, False, True, True, False],
             }
         )
-        result, last_detection, window_end, has_detection = function(
+        result, last_detection, window_end, has_detection = (
+            trim_lsstlike_after_last_detection(
             observations, days_after_last_detection=3.0
+            )
         )
 
         self.assertTrue(has_detection)
@@ -149,20 +174,19 @@ class GeneratorNumericsTest(unittest.TestCase):
         self.assertAlmostEqual(isotropic(rng), np.pi / 3.0)
 
     def test_sky_seeds_are_reproducible_and_latitude_specific(self):
-        function = generator_functions("derive_sky_seed")["derive_sky_seed"]
         values = {
-            function(12345, "all", 0.0),
-            function(12345, "low", 10.0),
-            function(12345, "high", 10.0),
-            function(12345, "bin", 10.0, 20.0),
+            derive_sky_seed(12345, "all", 0.0),
+            derive_sky_seed(12345, "low", 10.0),
+            derive_sky_seed(12345, "high", 10.0),
+            derive_sky_seed(12345, "bin", 10.0, 20.0),
         }
         self.assertEqual(len(values), 4)
         self.assertEqual(
-            function(12345, "bin", 10.0, 20.0),
-            function(12345, "bin", 10.0, 20.0),
+            derive_sky_seed(12345, "bin", 10.0, 20.0),
+            derive_sky_seed(12345, "bin", 10.0, 20.0),
         )
         with self.assertRaises(ValueError):
-            function(12345, "bin", 10.0)
+            derive_sky_seed(12345, "bin", 10.0)
 
 
 if __name__ == "__main__":
