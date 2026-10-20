@@ -26,11 +26,11 @@ because OpSim supplies Rubin rather than PS1 visit depths. Thus the code never
 compares a PS1 magnitude directly with an LSST m5 threshold.
 
 For a ZTF envelope, colour values, MW coefficients and depth selection are all
-ZTF. The depth threshold is the requested p25/p50/p75 quantile of the empirical
-per-image limiting-magnitude KDE in each band. This controlled global-depth
+ZTF. Depth thresholds can be entered directly, read from a quantile table,
+or obtained from legacy per-image limiting-magnitude KDEs. This controlled global-depth
 comparison does not simulate ZTF cadence, weather correlations or visit noise.
 
-The script never reloads or evaluates Bu2026_MLP.  Consequently, the numerical
+The script never reloads or evaluates the light-curve model. Consequently, the numerical
 support cut chosen during generation is preserved exactly.  Saved synthetic
 ``mag`` values include MW extinction; intrinsic magnitudes are reconstructed
 with ``m_intrinsic = m_saved - R_band E(B-V)``.
@@ -1133,14 +1133,16 @@ def prepare_metadata(
     summary = load_summary(args.run_dir)
     if summary.empty:
         raise FileNotFoundError(f"Missing usable {run_root(args.run_dir) / 'summary.csv'}")
-    # Columns common to Bu2026_MLP and Bu2019_MLP. The latter has ``phi`` but
-    # no v_ej/Ye parameters, so model-specific physical columns remain optional.
+    # The builder reads saved magnitudes, not a surrogate parameter vector.
+    # Require only the distance/extinction/orientation bookkeeping shared by
+    # the generator; a Metzger population has no dynamical/wind mass pair.
     required_columns = (
-        "ebv_mw", "log10_mej_dyn", "log10_mej_wind", "inclination_EM",
-        "luminosity_distance", "redshift",
+        "ebv_mw", "inclination_EM", "luminosity_distance", "redshift",
     )
     optional_physical_columns = (
-        "v_ej_dyn", "Ye_dyn", "v_ej_wind", "Ye_wind", "phi",
+        "log10_mej_dyn", "log10_mej_wind", "v_ej_dyn", "Ye_dyn",
+        "v_ej_wind", "Ye_wind", "phi", "log10_mej", "log10_vej",
+        "beta", "log10_kappa_r",
     )
     missing = [c for c in required_columns if c not in summary]
     if missing:
@@ -2756,6 +2758,8 @@ PERMANENT_EXIT_COLUMNS = [
     "M_ej_dyn_Msun", "v_ej_dyn_c", "Ye_dyn", "M_ej_wind_Msun",
     "v_ej_wind_c", "Ye_wind", "phi_deg", "inclination_deg",
     "luminosity_distance_Mpc", "redshift",
+    "model", "M_ej_Msun", "v_min_c", "beta", "kappa_r_cm2_g",
+    "inclination_used_by_model",
 ]
 
 
@@ -2859,6 +2863,12 @@ def identify_permanent_exits(
             "inclination_deg": float(np.degrees(metadata_row["inclination_EM"])),
             "luminosity_distance_Mpc": float(metadata_row["luminosity_distance"]),
             "redshift": float(metadata_row["redshift"]),
+            "model": str(metadata_row.get("model", "")),
+            "M_ej_Msun": 10.0 ** float(metadata_row.get("log10_mej", np.nan)),
+            "v_min_c": 10.0 ** float(metadata_row.get("log10_vej", np.nan)),
+            "beta": float(metadata_row.get("beta", np.nan)),
+            "kappa_r_cm2_g": 10.0 ** float(metadata_row.get("log10_kappa_r", np.nan)),
+            "inclination_used_by_model": str(metadata_row.get("model", "")) not in {"MetzgerModel", "MetzgerFullModel"},
         }
         rows.append(row)
 
@@ -2885,18 +2895,23 @@ def save_permanent_exit_table_png(
     shown = exits.head(maximum_rows).copy()
     base_columns = [
         "event_id", "last_outside_time_days", "exit_direction",
-        "M_ej_dyn_Msun", "M_ej_wind_Msun",
     ]
+    base_columns += [column for column in ("M_ej_dyn_Msun", "M_ej_wind_Msun")
+                     if column in shown and pd.to_numeric(shown[column], errors="coerce").notna().any()]
     optional_columns = [
         column for column in (
-            "v_ej_dyn_c", "Ye_dyn", "v_ej_wind_c", "Ye_wind", "phi_deg"
+            "v_ej_dyn_c", "Ye_dyn", "v_ej_wind_c", "Ye_wind", "phi_deg",
+            "M_ej_Msun", "v_min_c", "beta", "kappa_r_cm2_g",
         )
         if column in shown
         and pd.to_numeric(shown[column], errors="coerce").notna().any()
     ]
-    display_columns = base_columns + optional_columns + [
-        "inclination_deg", "luminosity_distance_Mpc"
-    ]
+    uses_inclination = ("inclination_used_by_model" not in shown
+                        or shown["inclination_used_by_model"].fillna(True).astype(bool).any())
+    display_columns = base_columns + optional_columns
+    if uses_inclination:
+        display_columns.append("inclination_deg")
+    display_columns.append("luminosity_distance_Mpc")
     label_by_column = {
         "event_id": "event",
         "last_outside_time_days": "last out [d]",
@@ -2910,6 +2925,10 @@ def save_permanent_exit_table_png(
         "phi_deg": "phi [deg]",
         "inclination_deg": "incl. [deg]",
         "luminosity_distance_Mpc": "DL [Mpc]",
+        "M_ej_Msun": r"Mej [$M_\odot$]",
+        "v_min_c": "vmin/c",
+        "beta": "beta",
+        "kappa_r_cm2_g": r"kappa [cm$^2$/g]",
     }
     labels = [label_by_column[column] for column in display_columns]
     figure_height = max(1.8, 0.38 * (len(shown) + 2))
@@ -2937,6 +2956,9 @@ def save_permanent_exit_table_png(
                 lambda x: f"{x:.1f}"
             ),
         })
+        for column in ("M_ej_Msun", "v_min_c", "beta", "kappa_r_cm2_g"):
+            if column in shown:
+                formatted[column] = shown[column].map(lambda x: f"{x:.3g}")
         table = ax.table(
             cellText=formatted[display_columns].to_numpy(),
             colLabels=labels,
