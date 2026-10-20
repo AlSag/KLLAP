@@ -27,10 +27,10 @@ import numpy as np
 import pandas as pd
 
 from build_color_envelopes import (
-    SyntheticPopulationSource,
     discover_m5_table,
     load_m5,
 )
+from kne_population_io import SyntheticPopulationSource
 from kne_envelope_core import event_extinction_mag
 from dynamic_color_cut_common import (
     canonical_event_id,

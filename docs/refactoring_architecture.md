@@ -92,6 +92,18 @@ convergence and parameter-space analyses: MW extinction, reproducible nested
 subsets, bootstrap percentile validity, tail support, and selection of the
 widest valid symmetric envelope.
 
+`kne_population_io.py` owns discovery of Parquet shards or legacy CSV files
+and the metadata/latitude selection. It deliberately performs no colour,
+depth, bootstrap, or plotting calculation. Analysis commands can therefore
+read the saved population without importing the envelope command as their
+storage backend.
+
+`kne_envelope_population.py` owns the next scientific step: interpolation at
+fixed bin centres and construction of native colour tracks. It uses only the
+saved temporal support, never extrapolates, and does not decide m5 or
+statistical validity. Those decisions remain visible in
+`build_stage_matrix()` and `build_stage_rules()` respectively.
+
 `kne_envelope_plots.py` receives already computed tracks and envelope tables.
 It cannot select events, calculate percentiles, apply extinction, or impose an
 m5 cut. `kne_envelope_product_plots.py` assembles the complete stage,
@@ -110,7 +122,7 @@ summary while the remaining I/O orchestration is reviewed.
 
 | Layer | Public entry point | Internal dependencies |
 |---|---|---|
-| Envelope construction | `build_color_envelopes.py` | `kne_envelope_core.py`, `kne_envelope_plots.py`, `dynamic_color_cut_common.py`, `kne_m5.py` |
+| Envelope construction | `build_color_envelopes.py` | `kne_population_io.py`, `kne_envelope_population.py`, `kne_envelope_core.py`, `kne_envelope_product_plots.py`, `dynamic_color_cut_common.py`, `kne_m5.py` |
 | Convergence | `analyze_envelope_population_convergence_fast.py` | `kne_convergence_common.py`, `kne_envelope_core.py`, `envelope_colour_convergence.py`, `envelope_multiquantile_convergence.py` |
 | Saved-result replot | `replot_envelope_population_convergence.py` | `envelope_multiquantile_convergence.py` |
 | Realization comparison | `plot_colour_envelope_realizations.py` | `dynamic_color_cut_common.py`, `kne_m5.py` |
