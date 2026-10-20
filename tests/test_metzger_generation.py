@@ -12,6 +12,7 @@ import numpy as np
 import pandas as pd
 
 import kne_model_backends as backend
+from kne_generation_cli import build_runtime_parser
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -33,8 +34,7 @@ def generator_functions(*names, **namespace):
 
 
 def model_args(model="MetzgerModel", **updates):
-    ns = generator_functions("build_runtime_parser")
-    args = ns["build_runtime_parser"]().parse_args(["--model", model])
+    args = build_runtime_parser().parse_args(["--model", model])
     for key, value in updates.items():
         setattr(args, key, value)
     return args
@@ -42,9 +42,8 @@ def model_args(model="MetzgerModel", **updates):
 
 class MetzgerGenerationTest(unittest.TestCase):
     def test_four_models_and_distance_pairing_are_available(self):
-        ns = generator_functions("build_runtime_parser")
         for name in backend.MODEL_NAMES:
-            args = ns["build_runtime_parser"]().parse_args([
+            args = build_runtime_parser().parse_args([
                 "--model", name, "--catalog-distance-policy", "current-fixed"])
             self.assertEqual(args.model, name)
             self.assertEqual(args.catalog_distance_policy, "current-fixed")
