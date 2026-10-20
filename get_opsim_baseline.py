@@ -1,13 +1,8 @@
-from rubin_sim import data
-from rubin_sim.maf.maps import DustMap
-from rubin_sim.phot_utils import DustValues
 import sqlite3
 import pandas as pd
 import numpy as np
-from astropy.coordinates import SkyCoord
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
-import astropy.units as u
 import secrets
 import re
 from pathlib import Path
@@ -33,7 +28,7 @@ except Exception:
 # CONFIG / CLI
 # ============================================================
 
-def runtime_configuration() -> argparse.Namespace:
+def runtime_configuration(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("--selection-mode", choices=["ALL_DDF", "LOWDUST", "ALL_NON_DDF", "ALL_SURVEY", "ONE_DDF", "TARGET"], default="ALL_SURVEY")
     parser.add_argument("--opsim-db", type=Path, help="Explicit baseline SQLite database; default uses rubin_sim.data.get_baseline()")
@@ -68,8 +63,8 @@ def runtime_configuration() -> argparse.Namespace:
     )
     parser.add_argument("--outdir", type=Path)
     parser.add_argument("--interactive", action="store_true")
-    args = parser.parse_args()
-    if args.interactive or len(sys.argv) == 1:
+    args = parser.parse_args(argv)
+    if args.interactive or (argv is None and len(sys.argv) == 1):
         args.selection_mode = prompt_choice(
             "OpSim survey selection",
             [("ALL_SURVEY", "All survey visits"), ("LOWDUST", "Low-dust WFD"), ("ALL_DDF", "All DDF"), ("ALL_NON_DDF", "All non-DDF"), ("ONE_DDF", "One DDF"), ("TARGET", "Exact target name")],
@@ -100,24 +95,10 @@ def runtime_configuration() -> argparse.Namespace:
         parser.error("--m5-latitude-threshold-deg must lie in [0, 90]")
     return args
 
-
-RUNTIME = runtime_configuration()
-SELECTION_MODE = RUNTIME.selection_mode
-DDF_NAME = RUNTIME.ddf_name
-TARGET_NAME = RUNTIME.target_name
-N_FIELDS = int(RUNTIME.n_fields)
-FOV_RADIUS_DEG = float(RUNTIME.fov_radius_deg)
-SEED = int(RUNTIME.seed)
-DUST_MAP_NSIDE = int(RUNTIME.dust_map_nside)
-DUST_MAP_PATH = RUNTIME.dust_map_path.expanduser().resolve() if RUNTIME.dust_map_path else None
-DUST_INTERP = bool(RUNTIME.dust_interp)
-M5_LATITUDE_THRESHOLD_DEG = float(RUNTIME.m5_latitude_threshold_deg)
-
 # Calcul d'aire HEALPix
 AREA_NSIDE = 1024
 
 # Mode d'échantillonnage des centres
-SAMPLING_MODE = RUNTIME.sampling_mode      # "UNIFORM" | "STRATIFIED"
 STRATIFY_WEIGHT = "n_centers"     # "n_centers" | "n_obs"
 MIN_FIELDS_PER_TARGET = 1
 
@@ -244,6 +225,8 @@ def save_m5_violin_plot(m5_values_by_band, outfile):
 
 def get_rubin_dust_coefficients() -> dict[str, float]:
     """Return Rubin coefficients R_band for A_band = R_band * E(B-V)."""
+    from rubin_sim.phot_utils import DustValues
+
     raw = getattr(DustValues(), "r_x", None)
     if raw is None:
         raise RuntimeError("DustValues() has no attribute r_x")
@@ -262,7 +245,7 @@ def get_rubin_dust_coefficients() -> dict[str, float]:
     return coefficients
 
 
-def lookup_mw_ebv(dust_map, ra_deg, dec_deg) -> np.ndarray:
+def lookup_mw_ebv(dust_map, ra_deg, dec_deg, *, map_path=None) -> np.ndarray:
     """Evaluate the Rubin Milky-Way E(B-V) map at ICRS positions in degrees."""
     ra = np.atleast_1d(np.asarray(ra_deg, dtype=float))
     dec = np.atleast_1d(np.asarray(dec_deg, dtype=float))
@@ -282,7 +265,7 @@ def lookup_mw_ebv(dust_map, ra_deg, dec_deg) -> np.ndarray:
     try:
         result = dust_map.run(slice_points)
     except Exception as exc:
-        location = str(DUST_MAP_PATH) if DUST_MAP_PATH is not None else "RUBIN_SIM_DATA_DIR"
+        location = str(map_path) if map_path is not None else "RUBIN_SIM_DATA_DIR"
         raise RuntimeError(
             "Unable to read the Rubin Milky-Way dust map. Install the Rubin data "
             f"files (for example with rs_download_data) or set --dust-map-path. "
@@ -306,6 +289,8 @@ def add_mw_extinction_to_centers(
     centers: pd.DataFrame,
     dust_map,
     dust_coefficients: dict[str, float],
+    *,
+    map_path=None,
 ) -> pd.DataFrame:
     """Add one E(B-V) and the six Rubin A_band values to each event position."""
     out = centers.copy()
@@ -313,6 +298,7 @@ def add_mw_extinction_to_centers(
         dust_map,
         out["fieldRA"].to_numpy(dtype=float),
         out["fieldDec"].to_numpy(dtype=float),
+        map_path=map_path,
     )
     for band in "ugrizy":
         out[f"R_{band}_mw"] = float(dust_coefficients[band])
@@ -679,6 +665,9 @@ def visits_covering_position(con, selection, ra0_deg, dec0_deg, fov_radius_deg):
     Extrait les visites qui couvrent une position (ra0,dec0)
     dans la sélection demandée.
     """
+    from astropy.coordinates import SkyCoord
+    import astropy.units as u
+
     dec_min = dec0_deg - fov_radius_deg
     dec_max = dec0_deg + fov_radius_deg
 
@@ -771,375 +760,411 @@ def union_area_of_fields_healpy(ra_deg, dec_deg, radius_deg, nside=1024):
 # EXPLORATION RAPIDE DE LA DATABASE
 # ============================================================
 
-opsim_db = RUNTIME.opsim_db.expanduser().resolve() if RUNTIME.opsim_db else data.get_baseline()
-if not Path(opsim_db).exists():
-    raise FileNotFoundError(f"OpSim database not found: {opsim_db}")
-print("Baseline opsim sqlite:", opsim_db)
+def main(runtime: argparse.Namespace | None = None) -> None:
+    """Export an OpSim field sample and its reusable survey summaries."""
+    if runtime is None:
+        runtime = runtime_configuration()
 
-con = sqlite3.connect(opsim_db)
+    # Rubin imports remain lazy: importing this module must not require the
+    # optional Rubin stack or access its data directory.
+    from rubin_sim import data
+    from rubin_sim.maf.maps import DustMap
 
-top = pd.read_sql_query(
-    """
-    SELECT target_name, COUNT(*) AS n
-    FROM observations
-    GROUP BY target_name
-    ORDER BY n DESC
-    LIMIT 30;
-    """,
-    con
-)
-print("Top targets:\n", top)
+    selection_mode = runtime.selection_mode
+    ddf_name = runtime.ddf_name
+    target_name = runtime.target_name
+    n_fields = int(runtime.n_fields)
+    fov_radius_deg = float(runtime.fov_radius_deg)
+    seed = int(runtime.seed)
+    dust_map_nside = int(runtime.dust_map_nside)
+    dust_map_path = (
+        runtime.dust_map_path.expanduser().resolve()
+        if runtime.dust_map_path
+        else None
+    )
+    dust_interp = bool(runtime.dust_interp)
+    m5_latitude_threshold_deg = float(runtime.m5_latitude_threshold_deg)
+    sampling_mode = runtime.sampling_mode
 
-target = top["target_name"].iloc[0]
-visits = pd.read_sql_query(
-    """
-    SELECT observationStartMJD, band, fiveSigmaDepth, target_name
-    FROM observations
-    WHERE target_name = ?
-    ORDER BY observationStartMJD;
-    """,
-    con,
-    params=(target,)
-)
+    # These analysis settings are intentionally explicit and recorded below.
+    area_nside = AREA_NSIDE
+    stratify_weight = STRATIFY_WEIGHT
+    min_fields_per_target = MIN_FIELDS_PER_TARGET
 
-print("Chosen target_name:", target, "Nvisits:", len(visits))
-print(visits.head())
+    opsim_db = runtime.opsim_db.expanduser().resolve() if runtime.opsim_db else data.get_baseline()
+    if not Path(opsim_db).exists():
+        raise FileNotFoundError(f"OpSim database not found: {opsim_db}")
+    print("Baseline opsim sqlite:", opsim_db)
 
+    con = sqlite3.connect(opsim_db)
 
-# ============================================================
-# MAIN
-# ============================================================
+    top = pd.read_sql_query(
+        """
+        SELECT target_name, COUNT(*) AS n
+        FROM observations
+        GROUP BY target_name
+        ORDER BY n DESC
+        LIMIT 30;
+        """,
+        con
+    )
+    print("Top targets:\n", top)
 
-rng = np.random.default_rng(SEED)
-
-selection = build_selection(
-    SELECTION_MODE,
-    ddf_name=DDF_NAME,
-    target_name=TARGET_NAME,
-)
-
-matched = list_matching_targets(con, selection)
-print("Matching targets:")
-print(matched.head(20))
-
-print("Selection mode:", SELECTION_MODE)
-print("Export label:", selection["label"])
-print("Sampling mode:", SAMPLING_MODE)
-if SAMPLING_MODE.upper() == "STRATIFIED":
-    print("Stratify weight:", STRATIFY_WEIGHT)
-    print("Min fields per target:", MIN_FIELDS_PER_TARGET)
-
-sampled_centers, strata_report, parent_centers = sample_positions_from_selection(
-    con=con,
-    selection=selection,
-    n_fields=N_FIELDS,
-    rng=rng,
-    sampling_mode=SAMPLING_MODE,
-    stratify_weight=STRATIFY_WEIGHT,
-    min_fields_per_target=MIN_FIELDS_PER_TARGET,
-)
-
-# One dust-map lookup per sampled source position. The same foreground value is
-# then attached to all OpSim visits covering that position.
-DUST_R_X = get_rubin_dust_coefficients()
-mw_dust_map = DustMap(
-    interp=DUST_INTERP,
-    nside=DUST_MAP_NSIDE,
-    map_path=str(DUST_MAP_PATH) if DUST_MAP_PATH is not None else None,
-)
-sampled_centers = add_mw_extinction_to_centers(
-    sampled_centers,
-    mw_dust_map,
-    DUST_R_X,
-)
-
-OUTDIR = RUNTIME.outdir.expanduser().resolve() if RUNTIME.outdir else Path(f"opsim_exports_{selection['label']}_{slugify(SAMPLING_MODE)}_seed_{SEED}")
-OUTDIR.mkdir(parents=True, exist_ok=True)
-
-run_txt = OUTDIR / "run.txt"
-content = (
-    f"SELECTION_MODE: {SELECTION_MODE}\n"
-    f"OPSIM_DB: {opsim_db}\n"
-    f"DDF_NAME: {DDF_NAME}\n"
-    f"TARGET_NAME: {TARGET_NAME}\n"
-    f"EXPORT_LABEL: {selection['label']}\n"
-    f"WHERE_SQL: {selection['where_sql']}\n"
-    f"PARAMS: {selection['params']}\n"
-    f"SEED: {SEED}\n"
-    f"N_FIELDS: {N_FIELDS}\n"
-    f"FOV_RADIUS_DEG: {FOV_RADIUS_DEG}\n"
-    f"AREA_NSIDE: {AREA_NSIDE}\n"
-    f"SAMPLING_MODE: {SAMPLING_MODE}\n"
-    f"STRATIFY_WEIGHT: {STRATIFY_WEIGHT}\n"
-    f"MIN_FIELDS_PER_TARGET: {MIN_FIELDS_PER_TARGET}\n"
-    f"DUST_MAP: rubin_sim.maf.maps.DustMap\n"
-    f"DUST_MAP_NSIDE: {DUST_MAP_NSIDE}\n"
-    f"DUST_MAP_INTERP: {DUST_INTERP}\n"
-    f"DUST_MAP_PATH: {DUST_MAP_PATH if DUST_MAP_PATH is not None else 'RUBIN_SIM_DATA_DIR'}\n"
-    f"DUST_RELATION: A_band = R_band * E(B-V)\n"
-    f"DUST_R_X: {DUST_R_X}\n"
-    f"VISIT_FILE_COLUMNS: MJD,band,m5\n"
-    f"FIELD_METADATA_FILE: opsim_fields_index.csv\n"
-    f"TIMESTAMP: {datetime.now().isoformat(timespec='seconds')}\n"
-)
-run_txt.write_text(content)
-print("Saved:", run_txt)
-
-if strata_report is not None:
-    strata_report.to_csv(OUTDIR / "strata_sampling_summary.csv", index=False)
-    print("Saved:", OUTDIR / "strata_sampling_summary.csv")
-    print(strata_report.head(20))
-
-fields_index = []
-all_dt = []
-counts = []
-m5_values_by_band = {band: [] for band in "ugrizy"}
-
-global_mjd_min_exported = np.inf
-global_mjd_max_exported = -np.inf
-
-for j, row in sampled_centers.iterrows():
-    ra0 = float(row["fieldRA"])
-    dec0 = float(row["fieldDec"])
-    target_name = row["target_name"]
-    n_target_names = int(row["n_target_names"])
-    ebv_mw = float(row["ebv_mw"])
-
-    v = visits_covering_position(con, selection, ra0, dec0, FOV_RADIUS_DEG)
-    counts.append(len(v))
-
-    # Keep visit files deliberately compact.  Field identity, sky position and
-    # Milky-Way extinction are stored once per field in opsim_fields_index.csv.
-    # The shared pipeline reader accepts this schema and the older verbose one.
-    visits_csv = (
-        v[["observationStartMJD", "band", "fiveSigmaDepth"]]
-        .rename(columns={"observationStartMJD": "MJD", "fiveSigmaDepth": "m5"})
-        .sort_values("MJD")
-        .reset_index(drop=True)
+    target = top["target_name"].iloc[0]
+    visits = pd.read_sql_query(
+        """
+        SELECT observationStartMJD, band, fiveSigmaDepth, target_name
+        FROM observations
+        WHERE target_name = ?
+        ORDER BY observationStartMJD;
+        """,
+        con,
+        params=(target,)
     )
 
-    # Keep the exact finite m5 values from the rows exported for each sampled
-    # field. These pooled, per-visit values define the synthetic depth cut.
-    for band in m5_values_by_band:
-        band_values = pd.to_numeric(
-            visits_csv.loc[visits_csv["band"].astype(str) == band, "m5"],
-            errors="coerce",
-        ).to_numpy(float)
-        band_values = band_values[np.isfinite(band_values)]
-        if band_values.size:
-            m5_values_by_band[band].append(band_values)
+    print("Chosen target_name:", target, "Nvisits:", len(visits))
+    print(visits.head())
 
-    outname = OUTDIR / f"opsim_visits_field{j:03d}.csv"
-    visits_csv.to_csv(outname, index=False)
 
-    if len(visits_csv) > 0:
-        field_mjd_min = float(visits_csv["MJD"].min())
-        field_mjd_max = float(visits_csv["MJD"].max())
-        field_span_days = field_mjd_max - field_mjd_min
-        field_span_years = field_span_days / 365.25
+    # ============================================================
+    # MAIN
+    # ============================================================
 
-        global_mjd_min_exported = min(global_mjd_min_exported, field_mjd_min)
-        global_mjd_max_exported = max(global_mjd_max_exported, field_mjd_max)
-    else:
-        field_mjd_min = np.nan
-        field_mjd_max = np.nan
-        field_span_days = np.nan
-        field_span_years = np.nan
+    rng = np.random.default_rng(seed)
 
-    field_metadata = {
-        "field_index": j,
-        "ra0_deg": ra0,
-        "dec0_deg": dec0,
-        "target_name": target_name,
-        "n_target_names": n_target_names,
-        "Nvisits": len(visits_csv),
-        "field_mjd_min": field_mjd_min,
-        "field_mjd_max": field_mjd_max,
-        "field_span_days": field_span_days,
-        "field_span_years": field_span_years,
-        "ebv_mw": ebv_mw,
-    }
-    for band in "ugrizy":
-        field_metadata[f"R_{band}_mw"] = float(DUST_R_X[band])
-        field_metadata[f"A_{band}_mw"] = ebv_mw * float(DUST_R_X[band])
-    fields_index.append(field_metadata)
+    selection = build_selection(
+        selection_mode,
+        ddf_name=ddf_name,
+        target_name=target_name,
+    )
 
-    if j < 3:
-        print("Saved:", outname, "Nvisits:", len(visits_csv), "target_name:", target_name)
+    matched = list_matching_targets(con, selection)
+    print("Matching targets:")
+    print(matched.head(20))
 
-    if len(v) < 2:
-        continue
+    print("Selection mode:", selection_mode)
+    print("Export label:", selection["label"])
+    print("Sampling mode:", sampling_mode)
+    if sampling_mode.upper() == "STRATIFIED":
+        print("Stratify weight:", stratify_weight)
+        print("Min fields per target:", min_fields_per_target)
 
-    v["delta_t_days"] = v.groupby("band")["observationStartMJD"].diff()
-    dt = v[["observationStartMJD", "band", "delta_t_days", "fiveSigmaDepth"]].dropna()
-    dt = dt.rename(columns={"fiveSigmaDepth": "m5"})
-    dt["field_index"] = j
-    all_dt.append(dt)
+    sampled_centers, strata_report, parent_centers = sample_positions_from_selection(
+        con=con,
+        selection=selection,
+        n_fields=n_fields,
+        rng=rng,
+        sampling_mode=sampling_mode,
+        stratify_weight=stratify_weight,
+        min_fields_per_target=min_fields_per_target,
+    )
 
-fields_index_df = pd.DataFrame(fields_index)
-fields_index_df.to_csv(OUTDIR / "opsim_fields_index.csv", index=False)
-print("Saved fields index:", OUTDIR / "opsim_fields_index.csv")
+    # One dust-map lookup per sampled source position. The same foreground value is
+    # then attached to all OpSim visits covering that position.
+    DUST_R_X = get_rubin_dust_coefficients()
+    mw_dust_map = DustMap(
+        interp=dust_interp,
+        nside=dust_map_nside,
+        map_path=str(dust_map_path) if dust_map_path is not None else None,
+    )
+    sampled_centers = add_mw_extinction_to_centers(
+        sampled_centers,
+        mw_dust_map,
+        DUST_R_X,
+        map_path=dust_map_path,
+    )
 
-# This is an OpSim field-sample property, so calculate and store it once here.
-# generate_kne_lightcurves.py only reads this summary and never recomputes it.
-m5_summary_rows = []
-for band in "ugrizy":
-    chunks = m5_values_by_band[band]
-    values = np.concatenate(chunks) if chunks else np.array([], dtype=float)
-    m5_summary_rows.append(
-        {
-            "band": band,
-            "m5_median": float(np.median(values)) if values.size else np.nan,
-            "N_exported_visit_rows": int(values.size),
-            "weighting": "one_equal_weight_per_exported_field_visit_row",
+    OUTDIR = runtime.outdir.expanduser().resolve() if runtime.outdir else Path(f"opsim_exports_{selection['label']}_{slugify(sampling_mode)}_seed_{seed}")
+    OUTDIR.mkdir(parents=True, exist_ok=True)
+
+    run_txt = OUTDIR / "run.txt"
+    content = (
+        f"SELECTION_MODE: {selection_mode}\n"
+        f"OPSIM_DB: {opsim_db}\n"
+        f"DDF_NAME: {ddf_name}\n"
+        f"TARGET_NAME: {target_name}\n"
+        f"EXPORT_LABEL: {selection['label']}\n"
+        f"WHERE_SQL: {selection['where_sql']}\n"
+        f"PARAMS: {selection['params']}\n"
+        f"SEED: {seed}\n"
+        f"N_FIELDS: {n_fields}\n"
+        f"FOV_RADIUS_DEG: {fov_radius_deg}\n"
+        f"AREA_NSIDE: {area_nside}\n"
+        f"SAMPLING_MODE: {sampling_mode}\n"
+        f"STRATIFY_WEIGHT: {stratify_weight}\n"
+        f"MIN_FIELDS_PER_TARGET: {min_fields_per_target}\n"
+        f"DUST_MAP: rubin_sim.maf.maps.DustMap\n"
+        f"DUST_MAP_NSIDE: {dust_map_nside}\n"
+        f"DUST_MAP_INTERP: {dust_interp}\n"
+        f"DUST_MAP_PATH: {dust_map_path if dust_map_path is not None else 'RUBIN_SIM_DATA_DIR'}\n"
+        f"DUST_RELATION: A_band = R_band * E(B-V)\n"
+        f"DUST_R_X: {DUST_R_X}\n"
+        f"VISIT_FILE_COLUMNS: MJD,band,m5\n"
+        f"FIELD_METADATA_FILE: opsim_fields_index.csv\n"
+        f"TIMESTAMP: {datetime.now().isoformat(timespec='seconds')}\n"
+    )
+    run_txt.write_text(content)
+    print("Saved:", run_txt)
+
+    if strata_report is not None:
+        strata_report.to_csv(OUTDIR / "strata_sampling_summary.csv", index=False)
+        print("Saved:", OUTDIR / "strata_sampling_summary.csv")
+        print(strata_report.head(20))
+
+    fields_index = []
+    all_dt = []
+    counts = []
+    m5_values_by_band = {band: [] for band in "ugrizy"}
+
+    global_mjd_min_exported = np.inf
+    global_mjd_max_exported = -np.inf
+
+    for j, row in sampled_centers.iterrows():
+        ra0 = float(row["fieldRA"])
+        dec0 = float(row["fieldDec"])
+        target_name = row["target_name"]
+        n_target_names = int(row["n_target_names"])
+        ebv_mw = float(row["ebv_mw"])
+
+        v = visits_covering_position(con, selection, ra0, dec0, fov_radius_deg)
+        counts.append(len(v))
+
+        # Keep visit files deliberately compact.  Field identity, sky position and
+        # Milky-Way extinction are stored once per field in opsim_fields_index.csv.
+        # The shared pipeline reader accepts this schema and the older verbose one.
+        visits_csv = (
+            v[["observationStartMJD", "band", "fiveSigmaDepth"]]
+            .rename(columns={"observationStartMJD": "MJD", "fiveSigmaDepth": "m5"})
+            .sort_values("MJD")
+            .reset_index(drop=True)
+        )
+
+        # Keep the exact finite m5 values from the rows exported for each sampled
+        # field. These pooled, per-visit values define the synthetic depth cut.
+        for band in m5_values_by_band:
+            band_values = pd.to_numeric(
+                visits_csv.loc[visits_csv["band"].astype(str) == band, "m5"],
+                errors="coerce",
+            ).to_numpy(float)
+            band_values = band_values[np.isfinite(band_values)]
+            if band_values.size:
+                m5_values_by_band[band].append(band_values)
+
+        outname = OUTDIR / f"opsim_visits_field{j:03d}.csv"
+        visits_csv.to_csv(outname, index=False)
+
+        if len(visits_csv) > 0:
+            field_mjd_min = float(visits_csv["MJD"].min())
+            field_mjd_max = float(visits_csv["MJD"].max())
+            field_span_days = field_mjd_max - field_mjd_min
+            field_span_years = field_span_days / 365.25
+
+            global_mjd_min_exported = min(global_mjd_min_exported, field_mjd_min)
+            global_mjd_max_exported = max(global_mjd_max_exported, field_mjd_max)
+        else:
+            field_mjd_min = np.nan
+            field_mjd_max = np.nan
+            field_span_days = np.nan
+            field_span_years = np.nan
+
+        field_metadata = {
+            "field_index": j,
+            "ra0_deg": ra0,
+            "dec0_deg": dec0,
+            "target_name": target_name,
+            "n_target_names": n_target_names,
+            "Nvisits": len(visits_csv),
+            "field_mjd_min": field_mjd_min,
+            "field_mjd_max": field_mjd_max,
+            "field_span_days": field_span_days,
+            "field_span_years": field_span_years,
+            "ebv_mw": ebv_mw,
         }
+        for band in "ugrizy":
+            field_metadata[f"R_{band}_mw"] = float(DUST_R_X[band])
+            field_metadata[f"A_{band}_mw"] = ebv_mw * float(DUST_R_X[band])
+        fields_index.append(field_metadata)
+
+        if j < 3:
+            print("Saved:", outname, "Nvisits:", len(visits_csv), "target_name:", target_name)
+
+        if len(v) < 2:
+            continue
+
+        v["delta_t_days"] = v.groupby("band")["observationStartMJD"].diff()
+        dt = v[["observationStartMJD", "band", "delta_t_days", "fiveSigmaDepth"]].dropna()
+        dt = dt.rename(columns={"fiveSigmaDepth": "m5"})
+        dt["field_index"] = j
+        all_dt.append(dt)
+
+    fields_index_df = pd.DataFrame(fields_index)
+    fields_index_df.to_csv(OUTDIR / "opsim_fields_index.csv", index=False)
+    print("Saved fields index:", OUTDIR / "opsim_fields_index.csv")
+
+    # This is an OpSim field-sample property, so calculate and store it once here.
+    # generate_kne_lightcurves.py only reads this summary and never recomputes it.
+    m5_summary_rows = []
+    for band in "ugrizy":
+        chunks = m5_values_by_band[band]
+        values = np.concatenate(chunks) if chunks else np.array([], dtype=float)
+        m5_summary_rows.append(
+            {
+                "band": band,
+                "m5_median": float(np.median(values)) if values.size else np.nan,
+                "N_exported_visit_rows": int(values.size),
+                "weighting": "one_equal_weight_per_exported_field_visit_row",
+            }
+        )
+
+    m5_summary = pd.DataFrame(m5_summary_rows)
+    m5_summary_path = OUTDIR / "opsim_m5_medians_by_band.csv"
+    m5_summary.to_csv(m5_summary_path, index=False)
+    print("Saved per-band m5 medians:", m5_summary_path)
+    print(m5_summary)
+
+    # This canonical table is consumed directly from the OpSim export directory by
+    # the envelope and latitude-loss scripts. It therefore needs to be generated
+    # only once and never copied into individual simulation runs.
+    m5_quantile_path = write_m5_depth_quantiles(
+        OUTDIR,
+        latitude_threshold_deg=m5_latitude_threshold_deg,
+    )
+    print("Saved canonical m5 depth quantiles:", m5_quantile_path)
+
+    save_m5_violin_plot(
+        m5_values_by_band,
+        OUTDIR / "m5_distribution_by_band_violin.png",
     )
 
-m5_summary = pd.DataFrame(m5_summary_rows)
-m5_summary_path = OUTDIR / "opsim_m5_medians_by_band.csv"
-m5_summary.to_csv(m5_summary_path, index=False)
-print("Saved per-band m5 medians:", m5_summary_path)
-print(m5_summary)
+    parent_time_stats = selection_time_span(con, selection)
 
-# This canonical table is consumed directly from the OpSim export directory by
-# the envelope and latitude-loss scripts. It therefore needs to be generated
-# only once and never copied into individual simulation runs.
-m5_quantile_path = write_m5_depth_quantiles(
-    OUTDIR,
-    latitude_threshold_deg=M5_LATITUDE_THRESHOLD_DEG,
-)
-print("Saved canonical m5 depth quantiles:", m5_quantile_path)
+    parent_area_deg2, parent_n_healpix = union_area_of_fields_healpy(
+        ra_deg=parent_centers["fieldRA"].to_numpy(dtype=float),
+        dec_deg=parent_centers["fieldDec"].to_numpy(dtype=float),
+        radius_deg=fov_radius_deg,
+        nside=area_nside,
+    )
+    parent_f_sky = parent_area_deg2 / 41253.0 if np.isfinite(parent_area_deg2) else np.nan
 
-save_m5_violin_plot(
-    m5_values_by_band,
-    OUTDIR / "m5_distribution_by_band_violin.png",
-)
+    exported_area_deg2, exported_n_healpix = union_area_of_fields_healpy(
+        ra_deg=fields_index_df["ra0_deg"].to_numpy(dtype=float),
+        dec_deg=fields_index_df["dec0_deg"].to_numpy(dtype=float),
+        radius_deg=fov_radius_deg,
+        nside=area_nside,
+    )
+    exported_f_sky = exported_area_deg2 / 41253.0 if np.isfinite(exported_area_deg2) else np.nan
 
-parent_time_stats = selection_time_span(con, selection)
+    if np.isfinite(global_mjd_min_exported) and np.isfinite(global_mjd_max_exported):
+        exported_span_days = global_mjd_max_exported - global_mjd_min_exported
+        exported_span_years = exported_span_days / 365.25
+    else:
+        exported_span_days = np.nan
+        exported_span_years = np.nan
 
-parent_area_deg2, parent_n_healpix = union_area_of_fields_healpy(
-    ra_deg=parent_centers["fieldRA"].to_numpy(dtype=float),
-    dec_deg=parent_centers["fieldDec"].to_numpy(dtype=float),
-    radius_deg=FOV_RADIUS_DEG,
-    nside=AREA_NSIDE,
-)
-parent_f_sky = parent_area_deg2 / 41253.0 if np.isfinite(parent_area_deg2) else np.nan
+    mean_field_span_years = float(np.nanmean(fields_index_df["field_span_years"])) if len(fields_index_df) else np.nan
+    median_field_span_years = float(np.nanmedian(fields_index_df["field_span_years"])) if len(fields_index_df) else np.nan
+    m5_median_by_band = m5_summary.set_index("band")["m5_median"].to_dict()
 
-exported_area_deg2, exported_n_healpix = union_area_of_fields_healpy(
-    ra_deg=fields_index_df["ra0_deg"].to_numpy(dtype=float),
-    dec_deg=fields_index_df["dec0_deg"].to_numpy(dtype=float),
-    radius_deg=FOV_RADIUS_DEG,
-    nside=AREA_NSIDE,
-)
-exported_f_sky = exported_area_deg2 / 41253.0 if np.isfinite(exported_area_deg2) else np.nan
+    survey_summary = pd.DataFrame([{
+        "selection_mode": selection_mode,
+        "selection_label": selection["label"],
+        "sampling_mode": sampling_mode,
+        "stratify_weight": stratify_weight if sampling_mode.upper() == "STRATIFIED" else "",
+        "N_FIELDS_requested": n_fields,
+        "N_FIELDS_exported": len(fields_index_df),
+        "N_parent_unique_centers": len(parent_centers),
+        "FOV_RADIUS_DEG": fov_radius_deg,
 
-if np.isfinite(global_mjd_min_exported) and np.isfinite(global_mjd_max_exported):
-    exported_span_days = global_mjd_max_exported - global_mjd_min_exported
-    exported_span_years = exported_span_days / 365.25
-else:
-    exported_span_days = np.nan
-    exported_span_years = np.nan
+        "parent_area_deg2_union_all_centers": parent_area_deg2,
+        "parent_f_sky_union_all_centers": parent_f_sky,
 
-mean_field_span_years = float(np.nanmean(fields_index_df["field_span_years"])) if len(fields_index_df) else np.nan
-median_field_span_years = float(np.nanmedian(fields_index_df["field_span_years"])) if len(fields_index_df) else np.nan
-m5_median_by_band = m5_summary.set_index("band")["m5_median"].to_dict()
+        "exported_area_deg2_union_sampled_fields": exported_area_deg2,
+        "exported_f_sky_union_sampled_fields": exported_f_sky,
 
-survey_summary = pd.DataFrame([{
-    "selection_mode": SELECTION_MODE,
-    "selection_label": selection["label"],
-    "sampling_mode": SAMPLING_MODE,
-    "stratify_weight": STRATIFY_WEIGHT if SAMPLING_MODE.upper() == "STRATIFIED" else "",
-    "N_FIELDS_requested": N_FIELDS,
-    "N_FIELDS_exported": len(fields_index_df),
-    "N_parent_unique_centers": len(parent_centers),
-    "FOV_RADIUS_DEG": FOV_RADIUS_DEG,
+        "exported_over_parent_area_ratio": (
+            exported_area_deg2 / parent_area_deg2
+            if np.isfinite(exported_area_deg2) and np.isfinite(parent_area_deg2) and parent_area_deg2 > 0
+            else np.nan
+        ),
 
-    "parent_area_deg2_union_all_centers": parent_area_deg2,
-    "parent_f_sky_union_all_centers": parent_f_sky,
+        "exported_mjd_min": global_mjd_min_exported if np.isfinite(global_mjd_min_exported) else np.nan,
+        "exported_mjd_max": global_mjd_max_exported if np.isfinite(global_mjd_max_exported) else np.nan,
+        "exported_span_days": exported_span_days,
+        "exported_span_years": exported_span_years,
 
-    "exported_area_deg2_union_sampled_fields": exported_area_deg2,
-    "exported_f_sky_union_sampled_fields": exported_f_sky,
+        "mean_field_span_years": mean_field_span_years,
+        "median_field_span_years": median_field_span_years,
 
-    "exported_over_parent_area_ratio": (
-        exported_area_deg2 / parent_area_deg2
-        if np.isfinite(exported_area_deg2) and np.isfinite(parent_area_deg2) and parent_area_deg2 > 0
-        else np.nan
-    ),
+        "parent_mjd_min": parent_time_stats["parent_mjd_min"],
+        "parent_mjd_max": parent_time_stats["parent_mjd_max"],
+        "parent_span_days": parent_time_stats["parent_span_days"],
+        "parent_span_years": parent_time_stats["parent_span_years"],
+        "parent_n_visits": parent_time_stats["parent_n_visits"],
 
-    "exported_mjd_min": global_mjd_min_exported if np.isfinite(global_mjd_min_exported) else np.nan,
-    "exported_mjd_max": global_mjd_max_exported if np.isfinite(global_mjd_max_exported) else np.nan,
-    "exported_span_days": exported_span_days,
-    "exported_span_years": exported_span_years,
+        "parent_healpy_area_npix": parent_n_healpix,
+        "exported_healpy_area_npix": exported_n_healpix,
+        "dust_map_nside": dust_map_nside,
+        "dust_map_interp": dust_interp,
+        "exported_ebv_mw_min": float(fields_index_df["ebv_mw"].min()) if len(fields_index_df) else np.nan,
+        "exported_ebv_mw_median": float(fields_index_df["ebv_mw"].median()) if len(fields_index_df) else np.nan,
+        "exported_ebv_mw_max": float(fields_index_df["ebv_mw"].max()) if len(fields_index_df) else np.nan,
+        "m5_medians_file": m5_summary_path.name,
+        "m5_quantiles_file": m5_quantile_path.name,
+        "m5_latitude_threshold_deg": m5_latitude_threshold_deg,
+        "visit_file_columns": "MJD,band,m5",
+        "field_metadata_file": "opsim_fields_index.csv",
+        **{f"m5_median_{band}": m5_median_by_band.get(band, np.nan) for band in "ugrizy"},
+    }])
 
-    "mean_field_span_years": mean_field_span_years,
-    "median_field_span_years": median_field_span_years,
+    survey_summary.to_csv(OUTDIR / "opsim_survey_summary.csv", index=False)
+    print("Saved survey summary:", OUTDIR / "opsim_survey_summary.csv")
+    print(survey_summary.T)
 
-    "parent_mjd_min": parent_time_stats["parent_mjd_min"],
-    "parent_mjd_max": parent_time_stats["parent_mjd_max"],
-    "parent_span_days": parent_time_stats["parent_span_days"],
-    "parent_span_years": parent_time_stats["parent_span_years"],
-    "parent_n_visits": parent_time_stats["parent_n_visits"],
+    con.close()
 
-    "parent_healpy_area_npix": parent_n_healpix,
-    "exported_healpy_area_npix": exported_n_healpix,
-    "dust_map_nside": DUST_MAP_NSIDE,
-    "dust_map_interp": DUST_INTERP,
-    "exported_ebv_mw_min": float(fields_index_df["ebv_mw"].min()) if len(fields_index_df) else np.nan,
-    "exported_ebv_mw_median": float(fields_index_df["ebv_mw"].median()) if len(fields_index_df) else np.nan,
-    "exported_ebv_mw_max": float(fields_index_df["ebv_mw"].max()) if len(fields_index_df) else np.nan,
-    "m5_medians_file": m5_summary_path.name,
-    "m5_quantiles_file": m5_quantile_path.name,
-    "m5_latitude_threshold_deg": M5_LATITUDE_THRESHOLD_DEG,
-    "visit_file_columns": "MJD,band,m5",
-    "field_metadata_file": "opsim_fields_index.csv",
-    **{f"m5_median_{band}": m5_median_by_band.get(band, np.nan) for band in "ugrizy"},
-}])
+    print("N_FIELDS =", n_fields)
+    print("Visits per field: min/median/max =", np.min(counts), np.median(counts), np.max(counts))
 
-survey_summary.to_csv(OUTDIR / "opsim_survey_summary.csv", index=False)
-print("Saved survey summary:", OUTDIR / "opsim_survey_summary.csv")
-print(survey_summary.T)
-
-con.close()
-
-print("N_FIELDS =", N_FIELDS)
-print("Visits per field: min/median/max =", np.min(counts), np.median(counts), np.max(counts))
-
-all_dt = (
-    pd.concat(all_dt, ignore_index=True)
-    if len(all_dt)
-    else pd.DataFrame(columns=["band", "delta_t_days", "field_index"])
-)
-print(all_dt.head())
+    all_dt = (
+        pd.concat(all_dt, ignore_index=True)
+        if len(all_dt)
+        else pd.DataFrame(columns=["band", "delta_t_days", "field_index"])
+    )
+    print(all_dt.head())
 
 
-# ============================================================
-# PLOTS Δt
-# ============================================================
+    # ============================================================
+    # PLOTS Δt
+    # ============================================================
 
-for b in sorted(all_dt["band"].unique()):
-    x_all = all_dt.loc[all_dt["band"] == b, "delta_t_days"].to_numpy()
+    for b in sorted(all_dt["band"].unique()):
+        x_all = all_dt.loc[all_dt["band"] == b, "delta_t_days"].to_numpy()
 
-    if PLOT_LIN:
-        x = x_all[np.isfinite(x_all)]
-        if len(x) > 0:
-            fig, ax = plt.subplots(figsize=(8, 4.5), constrained_layout=True)
-            ax.hist(x, bins=BINS, histtype="step", linewidth=2.0)
-            ax.set_xlabel(r"$\Delta t$ (days)")
-            ax.set_ylabel("Counts")
-            ax.set_title(f"Revisit Δt (linear bins) in band {b} (N_FIELDS={N_FIELDS})")
-            ax.grid(True, alpha=0.25)
-            plt.show()
+        if PLOT_LIN:
+            x = x_all[np.isfinite(x_all)]
+            if len(x) > 0:
+                fig, ax = plt.subplots(figsize=(8, 4.5), constrained_layout=True)
+                ax.hist(x, bins=BINS, histtype="step", linewidth=2.0)
+                ax.set_xlabel(r"$\Delta t$ (days)")
+                ax.set_ylabel("Counts")
+                ax.set_title(f"Revisit Δt (linear bins) in band {b} (N_FIELDS={n_fields})")
+                ax.grid(True, alpha=0.25)
+                plt.show()
 
-    if PLOT_LOG:
-        x = x_all[np.isfinite(x_all) & (x_all > 0)]
-        if len(x) > 0:
-            bins_log = np.logspace(np.log10(x.min()), np.log10(x.max()), BINS)
+        if PLOT_LOG:
+            x = x_all[np.isfinite(x_all) & (x_all > 0)]
+            if len(x) > 0:
+                bins_log = np.logspace(np.log10(x.min()), np.log10(x.max()), BINS)
 
-            fig, ax = plt.subplots(figsize=(8, 4.5), constrained_layout=True)
-            ax.hist(x, bins=bins_log, histtype="step", linewidth=2.0)
-            ax.set_xscale("log")
-            ax.set_xlabel(r"$\Delta t$ (days)")
-            ax.set_ylabel("Counts")
-            ax.set_title(f"Revisit Δt (log bins + log x) in band {b} (N_FIELDS={N_FIELDS})")
-            ax.grid(True, alpha=0.25)
-            plt.show()
+                fig, ax = plt.subplots(figsize=(8, 4.5), constrained_layout=True)
+                ax.hist(x, bins=bins_log, histtype="step", linewidth=2.0)
+                ax.set_xscale("log")
+                ax.set_xlabel(r"$\Delta t$ (days)")
+                ax.set_ylabel("Counts")
+                ax.set_title(f"Revisit Δt (log bins + log x) in band {b} (N_FIELDS={n_fields})")
+                ax.grid(True, alpha=0.25)
+                plt.show()
+
+
+if __name__ == "__main__":
+    main()
