@@ -43,7 +43,9 @@ cadence, image-by-image noise, alert production, or broker selection function.
 `kne_pipeline_common.py`, `dynamic_color_cut_common.py`, and
 `kne_model_backends.py` contain shared implementation. Small inspection tools
 live in `tools/`. A more detailed ownership map is available in
-[`docs/code_map.md`](docs/code_map.md).
+[`docs/code_map.md`](docs/code_map.md). The separation between command-line
+entry points, numerical modules, and plotting modules is described in
+[`docs/refactoring_architecture.md`](docs/refactoring_architecture.md).
 
 ## Installation
 
