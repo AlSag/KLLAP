@@ -55,6 +55,25 @@ workflow. The fast command no longer imports it: both now use
 establishes whether the subprocess workflow still provides a distinct
 reproducibility benefit.
 
+## Cleanup status
+
+| Candidate | Current decision | Evidence still required before deletion |
+|---|---|---|
+| `analyze_envelope_population_convergence.py` | Keep temporarily | End-to-end legacy/fast comparison on the same small saved population |
+| `plot_convergence_support_diagnostics.py` | Keep | Produces per-bin support and heatmap diagnostics not emitted by the main convergence command |
+| `estimate_kne_lsst_distance_reach.py` | Keep | Produces distance-completeness products not emitted elsewhere |
+| `tools/*.py` | Keep as optional utilities | Each has a distinct data-inspection or conversion purpose |
+
+The repository contains no tracked `.bak`, numbered-copy, or `*_before_*`
+Python source file. Generated runs and local review reports remain excluded by
+`.gitignore` rather than being treated as code.
+
+Internal duplication can be removed sooner than commands. The four envelope
+stages now have one canonical definition in `kne_envelope_core.py`; named m5
+scenarios, labels, and percentages have one canonical definition in
+`kne_m5.py`. Public compatibility aliases are retained where external imports
+may reasonably depend on them.
+
 ## Deletion checklist
 
 A script may be archived or deleted only when all of the following are true:
