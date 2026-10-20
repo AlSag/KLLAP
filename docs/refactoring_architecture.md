@@ -79,7 +79,9 @@ the same convention in multiple scripts.
 
 `get_opsim_baseline.py` follows the same import-safety rule as the generator:
 importing it does not parse terminal input, locate the Rubin database, or
-create export products.
+create export products. Its completed depth and revisit tables are presented
+by `kne_opsim_plots.py`; database and sky-selection code does not call
+Matplotlib directly.
 
 ### Envelope construction
 
@@ -92,8 +94,11 @@ widest valid symmetric envelope.
 
 `kne_envelope_plots.py` receives already computed tracks and envelope tables.
 It cannot select events, calculate percentiles, apply extinction, or impose an
-m5 cut. Representative figures produced before and after extraction were
-identical pixel by pixel.
+m5 cut. `kne_envelope_product_plots.py` assembles the complete stage,
+AT2017gfo, SN Ia, permanent-exit, and two-survey figures from those primitives.
+Neither plotting module owns interpolation or statistical validity.
+Representative figures produced before and after extraction were identical
+pixel by pixel.
 
 ## Analysis path
 

@@ -46,7 +46,9 @@ cadence, image-by-image noise, alert production, or broker selection function.
 is separated into dedicated modules. The terminal interfaces of the three
 main commands live in `kne_opsim_cli.py`, `kne_generation_cli.py`, and
 `kne_envelope_cli.py`; the public scripts reexport them for compatibility.
-Small inspection tools live in `tools/`.
+Generation, envelope-product, and OpSim plots live respectively in
+`kne_generation_plots.py`, `kne_envelope_product_plots.py`, and
+`kne_opsim_plots.py`. Small inspection tools live in `tools/`.
 A more detailed ownership map is available in
 [`docs/code_map.md`](docs/code_map.md). The separation between command-line
 entry points, numerical modules, and plotting modules is described in
