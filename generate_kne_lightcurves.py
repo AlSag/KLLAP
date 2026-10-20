@@ -222,9 +222,8 @@ import astropy.units as u
 
 import pandas as pd
 
-# --- PLOT AND OUTDIR ---
+# --- OUTPUT DIRECTORIES ---
 
-import matplotlib.pyplot as plt
 from pathlib import Path
 from datetime import datetime
 
@@ -237,11 +236,6 @@ from rubin_sim.phot_utils import (
     calc_snr_m5,
     rubin_bandpasses,
 )
-
-
-# --- Plot helpers (only needed if overlay plots are enabled) ---
-from matplotlib.lines import Line2D
-# NOTE: Line2D is only required for plot_synthetic_and_lsstlike().
 
 from kne_pipeline_common import (
     add_lsstlike_candidate_ids,
@@ -259,12 +253,21 @@ from kne_pipeline_common import (
     resample_synthetic_output_grid,
     slugify,
 )
-
-# Some FIESTA imports enable external TeX globally when a latex executable is
-# found. Pipeline diagnostics use Matplotlib text and need no TeX installation.
-plt.rcParams["text.usetex"] = False
-plt.rcParams["font.family"] = "DejaVu Sans"
-
+from kne_generation_core import (
+    apply_synthetic_m5_median_cut as _apply_synthetic_m5_median_cut,
+    derive_sky_seed as _derive_sky_seed,
+    ensure_mw_extinction_columns as _ensure_mw_extinction_columns,
+    get_event_mw_extinction_summary as _get_event_mw_extinction_summary,
+    keep_only_mw_extincted_synthetic_magnitude as _keep_only_mw_extincted_synthetic_magnitude,
+    trim_lsstlike_after_last_detection as _trim_lsstlike_after_last_detection,
+)
+from kne_generation_plots import (
+    plot_lsstlike_only as _plot_lsstlike_only,
+    plot_numerical_floor_diagnostic as _plot_numerical_floor_diagnostic,
+    plot_saved_synthetic_measurements as _plot_saved_synthetic_measurements,
+    plot_synthetic_and_lsstlike as _plot_synthetic_and_lsstlike,
+    plot_synthetic_only as _plot_synthetic_only,
+)
 
 # OpSim uses single-letter Rubin bands, whereas FIESTA uses explicit filter
 # names.  This mapping selects the model curve required by each visit.
@@ -311,51 +314,12 @@ def ensure_mw_extinction_columns(visits: pd.DataFrame) -> pd.DataFrame:
     visit files remain supported. Missing A values are derived from E(B-V)
     and Rubin coefficients when possible.
     """
-    v = visits.copy()
-    if "ebv_mw" not in v.columns:
-        # Backward-compatible aliases, if a user manually added an E(B-V) column.
-        for cand in ["ebv", "E_BV", "EBV", "sfd_ebv"]:
-            if cand in v.columns:
-                v["ebv_mw"] = pd.to_numeric(v[cand], errors="coerce")
-                break
-    if "ebv_mw" not in v.columns:
-        v["ebv_mw"] = np.nan
-    v["ebv_mw"] = pd.to_numeric(v["ebv_mw"], errors="coerce")
-
-    for b in "ugrizy":
-        if f"R_{b}_mw" not in v.columns:
-            v[f"R_{b}_mw"] = float(DUST_R_X[b])
-        if f"A_{b}_mw" not in v.columns:
-            v[f"A_{b}_mw"] = v["ebv_mw"] * float(DUST_R_X[b])
-
-    if "R_mw" not in v.columns:
-        v["R_mw"] = v["band"].astype(str).map({b: float(DUST_R_X[b]) for b in "ugrizy"})
-    if "A_mw" not in v.columns:
-        v["A_mw"] = v["band"].astype(str).map({b: float(DUST_R_X[b]) for b in "ugrizy"}) * v["ebv_mw"]
-
-    return v
+    return _ensure_mw_extinction_columns(visits, DUST_R_X)
 
 
 def get_event_mw_extinction_summary(visits: pd.DataFrame) -> dict[str, object]:
     """Summarize E(B-V)_MW and Rubin A_band values for one selected field/event."""
-    v = ensure_mw_extinction_columns(visits)
-    ebv_vals = pd.to_numeric(v.get("ebv_mw", pd.Series(np.nan, index=v.index)), errors="coerce").to_numpy(float)
-    ebv = float(np.nanmedian(ebv_vals)) if np.any(np.isfinite(ebv_vals)) else np.nan
-    out = {"ebv_mw": ebv}
-    for column in ("fieldRA", "fieldDec"):
-        values = pd.to_numeric(v.get(column, pd.Series(np.nan, index=v.index)), errors="coerce").to_numpy(float)
-        out[column] = float(np.nanmedian(values)) if np.any(np.isfinite(values)) else np.nan
-    target_values = v.get("target_name", pd.Series("", index=v.index)).dropna().astype(str)
-    out["target_name"] = target_values.iloc[0] if len(target_values) else ""
-    for b in "ugrizy":
-        out[f"R_{b}_mw"] = float(DUST_R_X[b])
-        col = f"A_{b}_mw"
-        vals = pd.to_numeric(v.get(col, pd.Series(np.nan, index=v.index)), errors="coerce").to_numpy(float)
-        if np.any(np.isfinite(vals)):
-            out[col] = float(np.nanmedian(vals))
-        else:
-            out[col] = float(DUST_R_X[b] * ebv) if np.isfinite(ebv) else np.nan
-    return out
+    return _get_event_mw_extinction_summary(visits, DUST_R_X)
 
 # Standard Rubin throughput curves and detector/exposure parameters used by
 # the m5-based photometric-noise model. They are initialized only for an
@@ -376,53 +340,15 @@ def initialize_rubin_photometry() -> None:
         for band in "ugrizy"
     }
     DUST_R_X = get_rubin_dust_coefficients()
+    DUST_R_X_BY_SYSTEM["lsst"] = DUST_R_X
     print("Rubin MW dust coefficients R_x =", DUST_R_X)
 
 
 def plot_synthetic_only(times, mag_dict, filters, filter_colors, mag_lim, outfile):
-    """Save a diagnostic plot of the dense synthetic FIESTA light curves."""
-    t = np.asarray(times, float)
-
-    fig, ax = plt.subplots(figsize=(10, 5.5), constrained_layout=True)
-
-    for f in filters:
-        y = np.asarray(mag_dict[f], float).copy()
-        y[y > mag_lim] = np.nan
-        ax.plot(t, y, linewidth=2.6, color=filter_colors.get(f, None), label=f)
-
-    ax.axhline(mag_lim, linestyle="--", linewidth=1.1, alpha=0.7, color="gray",
-               label=f"lim {mag_lim:g} mag")
-
-    # FIESTA model times are strictly positive, so a logarithmic axis is valid.
-    ax.set_xscale("log")
-    ax.set_xlabel("Time [days] (observer-frame)")
-    ax.set_ylabel("AB magnitude")
-    ax.invert_yaxis()
-    ax.grid(True, which="major", alpha=0.25)
-    ax.grid(True, which="minor", alpha=0.10)
-    ax.tick_params(which="both", direction="in", top=True, right=True)
-
-    finite_chunks = []
-    for f in filters:
-        yy = np.asarray(mag_dict[f], float).copy()
-        yy[yy > mag_lim] = np.nan
-        yy = yy[np.isfinite(yy)]
-        if yy.size > 0:
-            finite_chunks.append(yy)
-
-    if len(finite_chunks) == 0:
-        plt.close(fig)
-        return
-
-    y_all = np.concatenate(finite_chunks)
-    ybright = np.nanmin(y_all)
-    ax.set_ylim(mag_lim + 0.2, ybright - 0.3)
-
-    ax.legend(loc="upper left", bbox_to_anchor=(1.02, 1.0),
-              frameon=True, framealpha=0.95, title="Filters (synthetic)")
-
-    fig.savefig(outfile, bbox_inches="tight", dpi=200)
-    plt.close(fig)
+    """Compatibility wrapper for :mod:`kne_generation_plots`."""
+    return _plot_synthetic_only(
+        times, mag_dict, filters, filter_colors, mag_lim, outfile
+    )
 
 
 def plot_saved_synthetic_measurements(
@@ -431,76 +357,15 @@ def plot_saved_synthetic_measurements(
     outfile,
     event_index,
 ):
-    """Plot the final synthetic table exactly as it is written to CSV.
-
-    Unlike the legacy dense-model diagnostic above, this plot is built after
-    Milky-Way extinction, the optional resampling, the magnitude cap, and the
-    optional median-m5 cut. It therefore represents the saved synthetic
-    product rather than the unprocessed FIESTA prediction.
-    """
-    required = {"t_days", "band", "mag"}
-    missing = required.difference(measurements.columns)
-    if missing:
-        raise ValueError(
-            f"Cannot plot synthetic event {event_index}: missing columns "
-            f"{sorted(missing)}"
-        )
-
-    plot_table = measurements.copy()
-    plot_table["t_days"] = pd.to_numeric(plot_table["t_days"], errors="coerce")
-    plot_table["mag"] = pd.to_numeric(plot_table["mag"], errors="coerce")
-    plot_table = plot_table.loc[
-        np.isfinite(plot_table["t_days"])
-        & (plot_table["t_days"] > 0)
-        & np.isfinite(plot_table["mag"])
-    ].copy()
-    if plot_table.empty:
-        return False
-
-    if "photometric_system" not in plot_table:
-        plot_table["photometric_system"] = "lsst"
-    plot_table["photometric_system"] = (
-        plot_table["photometric_system"].astype(str).str.lower()
+    """Compatibility wrapper for :mod:`kne_generation_plots`."""
+    return _plot_saved_synthetic_measurements(
+        measurements,
+        filter_colors,
+        outfile,
+        event_index,
+        FILTER_SYSTEMS,
+        FILTER_BY_SYSTEM,
     )
-
-    fig, ax = plt.subplots(figsize=(10, 5.5), constrained_layout=True)
-    plotted = False
-    for system in FILTER_SYSTEMS:
-        for band, filter_name in FILTER_BY_SYSTEM[system].items():
-            subset = plot_table.loc[
-                (plot_table["photometric_system"] == system)
-                & (plot_table["band"].astype(str) == band)
-            ]
-            if subset.empty:
-                continue
-            subset = subset.sort_values("t_days")
-            ax.plot(
-                subset["t_days"],
-                subset["mag"],
-                marker="o",
-                markersize=2.2,
-                linewidth=1.6,
-                linestyle="-" if system == "lsst" else "--",
-                color=filter_colors.get(filter_name),
-                label=f"{system.upper()} {band}",
-            )
-            plotted = True
-
-    if not plotted:
-        plt.close(fig)
-        return False
-
-    ax.set_xscale("log")
-    ax.set_xlabel("Time since merger [days]")
-    ax.set_ylabel("AB magnitude (including Milky-Way extinction)")
-    ax.invert_yaxis()
-    ax.grid(True, which="major", alpha=0.25)
-    ax.grid(True, which="minor", alpha=0.10)
-    ax.tick_params(which="both", direction="in", top=True, right=True)
-    ax.legend(title="Photometric band", ncol=2, frameon=True, framealpha=0.95)
-    fig.savefig(outfile, bbox_inches="tight", dpi=200)
-    plt.close(fig)
-    return True
 
 
 def plot_numerical_floor_diagnostic(
@@ -511,176 +376,30 @@ def plot_numerical_floor_diagnostic(
     apparent_cut_mag,
     outfile,
 ):
-    """Show the complete Bu2026 prediction and the distance-dependent cut.
-
-    The solid part is numerically retained.  Starting at the first point with
-    ``m >= apparent_cut_mag``, the raw model continuation is drawn with a dotted
-    line even though it is excluded from every saved light curve and from the
-    LSST-like calculation.  Magnitudes are shown before Milky-Way extinction so
-    the same numerical-support cut applies to every band.
-    """
-    t = np.asarray(times, dtype=float)
-    fig, ax = plt.subplots(figsize=(10, 5.5), constrained_layout=True)
-    finite_for_limits = []
-
-    for filter_name in filters:
-        raw = np.asarray(raw_magnitudes_by_filter[filter_name], dtype=float)
-        valid = np.isfinite(t) & (t > 0) & np.isfinite(raw)
-        if not np.any(valid):
-            continue
-        finite_for_limits.append(raw[valid])
-        indices = np.flatnonzero(valid)
-        crossing = indices[raw[indices] >= float(apparent_cut_mag)]
-        color = filter_colors.get(filter_name)
-        band_label = filter_name.replace("lsst", "")
-
-        if crossing.size == 0:
-            ax.plot(t[valid], raw[valid], color=color, linewidth=2.1, label=band_label)
-            continue
-
-        first = int(crossing[0])
-        retained = valid & (np.arange(len(t)) < first)
-        if np.any(retained):
-            ax.plot(
-                t[retained], raw[retained], color=color, linewidth=2.1,
-                label=band_label,
-            )
-
-        # Include the last retained sample in the dotted segment so the visual
-        # transition remains connected across the support boundary.
-        rejected = valid & (np.arange(len(t)) >= max(first - 1, 0))
-        ax.plot(
-            t[rejected], raw[rejected], color=color, linewidth=1.7,
-            linestyle=":", alpha=0.9,
-            label=band_label if not np.any(retained) else None,
-        )
-
-    ax.axhline(
-        float(apparent_cut_mag),
-        color="black",
-        linestyle="--",
-        linewidth=1.4,
-        label=f"Numerical-support cut ({apparent_cut_mag:.2f} mag)",
+    """Compatibility wrapper for :mod:`kne_generation_plots`."""
+    return _plot_numerical_floor_diagnostic(
+        times,
+        raw_magnitudes_by_filter,
+        filters,
+        filter_colors,
+        apparent_cut_mag,
+        outfile,
     )
-    ax.set_xscale("log")
-    ax.set_xlabel("Time since merger [days]")
-    ax.set_ylabel("AB magnitude (before Milky-Way extinction)")
-    ax.invert_yaxis()
-    ax.grid(True, which="major", alpha=0.25)
-    ax.grid(True, which="minor", alpha=0.10)
-    ax.tick_params(which="both", direction="in", top=True, right=True)
-
-    if finite_for_limits:
-        all_values = np.concatenate(finite_for_limits)
-        ax.set_ylim(np.nanmax(all_values) + 0.3, np.nanmin(all_values) - 0.3)
-    ax.legend(title="LSST band", ncol=2, frameon=True, framealpha=0.95)
-    fig.savefig(outfile, bbox_inches="tight", dpi=200)
-    plt.close(fig)
 
 
 
 def plot_synthetic_and_lsstlike(times, mag_dict, obs, filters, filter_colors, mag_lim, outfile):
-    """Overlay dense model curves, detections, and per-visit upper limits."""
-    t = np.asarray(times, float)
-
-    fig, ax = plt.subplots(figsize=(10, 5.5), constrained_layout=True)
-
-    # Dense synthetic truth curves.
-    for f in filters:
-        y = np.asarray(mag_dict[f], float)
-        y = y.copy()
-        y[y > mag_lim] = np.nan
-        ax.plot(t, y, linewidth=2.6, color=filter_colors.get(f, None))
-
-    # Keep only visits with model truth inside the surrogate time interval.
-    obs2 = obs.copy()
-    obs2 = obs2[np.isfinite(obs2["mag_true"])]
-    obs2 = obs2[(obs2["t_days"] >= np.nanmin(t[t > 0])) & (obs2["t_days"] <= np.nanmax(t))]
-
-    # A non-positive time cannot be displayed on a logarithmic axis.
-    eps = 1e-3
-    obs2["t_plot"] = np.where(obs2["t_days"].to_numpy() <= 0, eps, obs2["t_days"].to_numpy())
-
-    # Plot detections and non-detections band by band.
-    for b in sorted(obs2["band"].unique()):
-        f = BAND_TO_FIESTA.get(b, None)
-        if f is None or f not in filters:
-            continue
-
-        col = filter_colors.get(f, None)
-        sub = obs2[obs2["band"] == b]
-
-        det = sub[sub["detected"] & np.isfinite(sub["mag_obs"]) & np.isfinite(sub["mag_err"])]
-        nd  = sub[(~sub["detected"]) & np.isfinite(sub["mag_ulim"])]
-
-        if len(det) > 0:
-            ax.errorbar(
-                det["t_plot"], det["mag_obs"],
-                yerr=det["mag_err"],
-                fmt="o", linestyle="none", markersize=4,
-                elinewidth=1.0, capsize=0,
-                color=col,
-            )
-
-        if len(nd) > 0:
-            ax.scatter(
-                nd["t_plot"], nd["mag_ulim"],
-                marker="v", s=28,
-                facecolors="none", edgecolors=col,
-                linewidths=1.2
-            )
-
-    # Display the configured faint-magnitude storage limit.
-    ax.axhline(mag_lim, linestyle="--", linewidth=1.1, alpha=0.7, color="gray", label=f"lim {mag_lim:g} mag")
-
-    # Plot axes and limits.
-    ax.set_xscale("log")
-    ax.set_xlabel("Time since trigger [days]")
-    ax.set_ylabel("AB magnitude")
-    ax.invert_yaxis()
-    ax.grid(True, which="major", alpha=0.25)
-    ax.grid(True, which="minor", alpha=0.10)
-    ax.tick_params(which="both", direction="in", top=True, right=True)
-
-    ax.set_xlim(np.nanmin(t[t > 0]), np.nanmax(t))
-
-    # Determine magnitude limits from every visible product.
-    y_all = []
-    for f in filters:
-        y = np.asarray(mag_dict[f], float)
-        y = y.copy()
-        y[y > mag_lim] = np.nan
-        y_all.append(y)
-    if len(obs2) > 0:
-        y_all.append(obs2["mag_obs"].to_numpy())
-        y_all.append(obs2["mag_ulim"].to_numpy())
-
-    y_all = np.concatenate([yy[np.isfinite(yy)] for yy in y_all if np.any(np.isfinite(yy))])
-    if len(y_all) > 0:
-        ybright = np.nanmin(y_all)
-        ax.set_ylim(mag_lim + 0.2, ybright - 0.3)
-
-    # Build separate legend entries for truth, upper limits, and detections.
-    handles, labels = [], []
-    for f in filters:
-        col = filter_colors.get(f, None)
-        handles.append(Line2D([0],[0], color=col, lw=2.6))
-        labels.append(f"{f} (synthetic)")
-    for f in filters:
-        col = filter_colors.get(f, None)
-        handles.append(Line2D([0],[0], marker="v", color=col, lw=0, markersize=6,
-                              markerfacecolor="none", markeredgewidth=1.2))
-        labels.append(f"{f} (upper-limit)")
-    for f in filters:
-        col = filter_colors.get(f, None)
-        handles.append(Line2D([0],[0], marker="o", color=col, lw=0, markersize=5))
-        labels.append(f"{f} (obs)")
-
-    ax.legend(handles, labels, loc="upper left", bbox_to_anchor=(1.02, 1.0), frameon=True, framealpha=0.95)
-
-
-    fig.savefig(outfile, bbox_inches="tight", dpi=200)
-    plt.close(fig)
+    """Compatibility wrapper for :mod:`kne_generation_plots`."""
+    return _plot_synthetic_and_lsstlike(
+        times,
+        mag_dict,
+        obs,
+        filters,
+        filter_colors,
+        mag_lim,
+        outfile,
+        BAND_TO_FIESTA,
+    )
 
 
 def plot_lsstlike_only(
@@ -691,146 +410,16 @@ def plot_lsstlike_only(
     outfile,
     tmax_days=None,
 ):
-    """Plot LSST-like detections and upper limits without dense model curves.
-
-    This function contains only diagnostic visualization.  Moving it outside
-    the simulation loop keeps the scientific workflow readable and does not
-    change any CSV, SNR, detection, or random-number calculation.
-    """
-    fig, ax = plt.subplots(figsize=(10, 5.5), constrained_layout=True)
-
-    # Logarithmic time axes cannot display t <= 0.  Also discard visits for
-    # which the FIESTA model has no finite truth magnitude.
-    obs_plot = observations[
-        np.isfinite(observations["mag_true"])
-        & (observations["t_days"] > 0)
-    ].copy()
-    if tmax_days is not None:
-        obs_plot = obs_plot[obs_plot["t_days"] <= tmax_days]
-
-    if obs_plot.empty:
-        plt.close(fig)
-        return
-
-    for band in sorted(obs_plot["band"].unique()):
-        filter_name = BAND_TO_FIESTA.get(band)
-        if filter_name is None or filter_name not in filters:
-            continue
-
-        subset = obs_plot[obs_plot["band"] == band]
-        detections = subset[
-            subset["detected"]
-            & np.isfinite(subset["mag_obs"])
-            & np.isfinite(subset["mag_err"])
-        ]
-        upper_limits = subset[
-            (~subset["detected"]) & np.isfinite(subset["mag_ulim"])
-        ]
-        color = filter_colors.get(filter_name)
-
-        if len(detections):
-            ax.errorbar(
-                detections["t_days"],
-                detections["mag_obs"],
-                yerr=detections["mag_err"],
-                fmt="o",
-                linestyle="none",
-                markersize=4,
-                elinewidth=1.0,
-                capsize=0,
-                color=color,
-            )
-        if len(upper_limits):
-            ax.scatter(
-                upper_limits["t_days"],
-                upper_limits["mag_ulim"],
-                marker="v",
-                s=28,
-                facecolors="none",
-                edgecolors=color,
-                linewidths=1.2,
-            )
-
-    ax.set_xscale("log")
-    ax.set_xlabel("Time since trigger [days]")
-    ax.set_ylabel("AB magnitude")
-    ax.invert_yaxis()
-
-    # Derive display limits from all finite detections and upper limits.
-    visible_magnitudes = []
-    for column in ("mag_obs", "mag_ulim"):
-        values = obs_plot[column].to_numpy(float)
-        if np.any(np.isfinite(values)):
-            visible_magnitudes.append(values[np.isfinite(values)])
-    if visible_magnitudes:
-        y_all = np.concatenate(visible_magnitudes)
-        ax.set_ylim(np.max(y_all) + 0.2, np.min(y_all) - 0.3)
-
-    ax.grid(True, which="major", alpha=0.25)
-    ax.grid(True, which="minor", alpha=0.10)
-    ax.tick_params(which="both", direction="in", top=True, right=True)
-
-    # Give detections and upper limits separate legend entries in each band.
-    legend_handles = []
-    legend_labels = []
-    for band in sorted(obs_plot["band"].unique()):
-        filter_name = BAND_TO_FIESTA.get(band)
-        if filter_name is None or filter_name not in filters:
-            continue
-
-        subset = obs_plot[obs_plot["band"] == band]
-        color = filter_colors.get(filter_name)
-        has_detection = np.any(
-            subset["detected"]
-            & np.isfinite(subset["mag_obs"])
-            & np.isfinite(subset["mag_err"])
-        )
-        has_upper_limit = np.any(
-            (~subset["detected"]) & np.isfinite(subset["mag_ulim"])
-        )
-
-        if has_detection:
-            legend_handles.append(
-                Line2D(
-                    [0],
-                    [0],
-                    marker="o",
-                    linestyle="none",
-                    color=color,
-                    markerfacecolor=color,
-                    markeredgecolor=color,
-                    markersize=5,
-                )
-            )
-            legend_labels.append(filter_name)
-        if has_upper_limit:
-            legend_handles.append(
-                Line2D(
-                    [0],
-                    [0],
-                    marker="v",
-                    linestyle="none",
-                    color=color,
-                    markerfacecolor="none",
-                    markeredgecolor=color,
-                    markersize=6,
-                )
-            )
-            legend_labels.append(f"ul_{filter_name}")
-
-    if legend_labels:
-        ax.legend(
-            legend_handles,
-            legend_labels,
-            title="Filters",
-            loc="upper left",
-            bbox_to_anchor=(1.02, 1.0),
-            frameon=True,
-            framealpha=0.95,
-        )
-
-    fig.savefig(outfile, bbox_inches="tight", dpi=200)
-    plt.close(fig)
+    """Compatibility wrapper for :mod:`kne_generation_plots`."""
+    return _plot_lsstlike_only(
+        observations,
+        filters,
+        filter_colors,
+        event_index,
+        outfile,
+        BAND_TO_FIESTA,
+        tmax_days=tmax_days,
+    )
 
 
 
@@ -1033,33 +622,10 @@ def trim_lsstlike_after_last_detection(
     observations: pd.DataFrame,
     days_after_last_detection: float = 10.0,
 ) -> tuple[pd.DataFrame, float, float, bool]:
-    """Keep valid KNe visits through a fixed time after the last detection.
-
-    Rows without finite ``mag_true`` are outside the supported FIESTA truth
-    interval (or beyond the configured truth cap), so they are not meaningful
-    KNe upper limits and are removed before locating the last detection. The
-    anchor is determined from the complete valid visit sequence before any
-    temporal trimming, so this operation can never remove a detection. If no
-    valid visit is detected, all valid visits are returned but no LSST-like
-    file will pass the positive ``min_detections`` selection.
-    """
-    if days_after_last_detection < 0:
-        raise ValueError("days_after_last_detection must be non-negative")
-
-    out = observations.loc[
-        np.isfinite(pd.to_numeric(observations["mag_true"], errors="coerce"))
-        & np.isfinite(pd.to_numeric(observations["t_days"], errors="coerce"))
-    ].copy()
-    out = out.sort_values("observationStartMJD").reset_index(drop=True)
-
-    detected = out["detected"].astype(bool)
-    if not detected.any():
-        return out, np.nan, np.nan, False
-
-    last_detection = float(out.loc[detected, "t_days"].iloc[-1])
-    window_end = last_detection + float(days_after_last_detection)
-    out = out.loc[out["t_days"] <= window_end].reset_index(drop=True)
-    return out, last_detection, window_end, True
+    """Compatibility wrapper for :mod:`kne_generation_core`."""
+    return _trim_lsstlike_after_last_detection(
+        observations, days_after_last_detection
+    )
 
 
 def apply_synthetic_m5_median_cut(
@@ -1067,56 +633,15 @@ def apply_synthetic_m5_median_cut(
     objectid: str,
     m5_medians: dict[str, float],
 ) -> pd.DataFrame:
-    """Keep only synthetic points brighter than their band's median OpSim m5.
-
-    The saved ``mag`` column is compared with m5. In ``compact-extincted``
-    mode, this column has already been replaced by the MW-extincted magnitude.
-    Identifiers are rebuilt after filtering so the first retained row carries
-    ``objectid`` and every retained point has one contiguous, unique
-    ``candidate_id``.
-    """
-    out = measurements.copy()
-    comparison_magnitude = pd.to_numeric(
-        out["mag"], errors="coerce"
-    ).to_numpy(float)
-    thresholds = pd.to_numeric(
-        out["band"].map(m5_medians), errors="coerce"
-    ).to_numpy(float)
-    keep = (
-        np.isfinite(comparison_magnitude)
-        & np.isfinite(thresholds)
-        & (comparison_magnitude <= thresholds)
-    )
-    out = out.loc[keep].reset_index(drop=True)
-
-    out["objectid"] = ""
-    if len(out):
-        out.at[0, "objectid"] = str(objectid)
-    out["candidate_id"] = [
-        f"{objectid}_{measurement_index}"
-        for measurement_index in range(1, len(out) + 1)
-    ]
-    return out
+    """Compatibility wrapper for :mod:`kne_generation_core`."""
+    return _apply_synthetic_m5_median_cut(measurements, objectid, m5_medians)
 
 
 def keep_only_mw_extincted_synthetic_magnitude(
     measurements: pd.DataFrame,
 ) -> pd.DataFrame:
-    """Store only the MW-extincted synthetic magnitude under ``mag``.
-
-    ``build_synthetic_measurement_table`` temporarily creates both ``mag``
-    (intrinsic) and ``mag_mw_extincted``. This helper replaces ``mag`` with the
-    extincted value and removes the extra column, matching the VM convention
-    requested for this generator.
-    """
-    if "mag_mw_extincted" not in measurements.columns:
-        raise ValueError(
-            "MW-extincted synthetic output requires finite A_band values from "
-            "the selected OpSim field"
-        )
-    out = measurements.copy()
-    out["mag"] = pd.to_numeric(out["mag_mw_extincted"], errors="coerce")
-    return out.drop(columns=["mag_mw_extincted"])
+    """Compatibility wrapper for :mod:`kne_generation_core`."""
+    return _keep_only_mw_extincted_synthetic_magnitude(measurements)
 
 
 class UniformComovingVolumeSampler:
@@ -1313,23 +838,10 @@ def derive_sky_seed(
     threshold_deg,
     latitude_max_deg=None,
 ):
-    """Derive a reproducible sky seed that differs by latitude selection.
-
-    The historical all/low/high formula is preserved exactly.  Latitude-bin
-    runs additionally encode both interval edges, so every disjoint bin gets
-    an independent but reproducible sky assignment.
-    """
-    role_code = {"all": 0xA11, "low": 0x10A, "high": 0xA19, "bin": 0xB17}[
-        latitude_mode
-    ]
-    threshold_code = int(round(float(threshold_deg) * 1000.0))
-    seed_value = int(intrinsic_seed) ^ 0x534B59 ^ role_code ^ threshold_code
-    if latitude_mode == "bin":
-        if latitude_max_deg is None:
-            raise ValueError("latitude_max_deg is required for latitude_mode='bin'")
-        maximum_code = int(round(float(latitude_max_deg) * 1000.0))
-        seed_value ^= (maximum_code * 0x9E3779B1) & 0xFFFFFFFF
-    return int(seed_value % (2**32))
+    """Compatibility wrapper for :mod:`kne_generation_core`."""
+    return _derive_sky_seed(
+        intrinsic_seed, latitude_mode, threshold_deg, latitude_max_deg
+    )
 
 
 def build_runtime_parser() -> argparse.ArgumentParser:
