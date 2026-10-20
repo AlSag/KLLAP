@@ -6,10 +6,27 @@ from pathlib import Path
 
 import pandas as pd
 
-from kne_m5 import depths_from_table, load_m5_percentile
+from kne_m5 import (
+    M5_SCENARIO_LABELS,
+    M5_SCENARIO_PERCENTILES,
+    M5_SCENARIOS,
+    depths_from_table,
+    load_m5_percentile,
+)
 
 
 class SharedM5Test(unittest.TestCase):
+    def test_named_scenarios_have_one_canonical_order(self):
+        self.assertEqual(
+            M5_SCENARIOS,
+            ("worst_p25", "median_p50", "best_p75"),
+        )
+        self.assertEqual(
+            tuple(M5_SCENARIO_PERCENTILES),
+            tuple(M5_SCENARIO_LABELS),
+        )
+        self.assertEqual(M5_SCENARIO_PERCENTILES["best_p75"], 75.0)
+
     def test_unscoped_lookup_prefers_common_global_both_rows(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "m5_depth_quantiles_by_band.csv"

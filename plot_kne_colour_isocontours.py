@@ -37,17 +37,12 @@ import pandas as pd
 from scipy.ndimage import gaussian_filter
 from scipy.stats import binned_statistic_2d
 
-from kne_m5 import load_m5_percentile
+from kne_m5 import M5_SCENARIO_PERCENTILES, load_m5_percentile
 import plot_kne_colour_parameter_space as base
 
 
 COMPARE_STAGES = ("compare_no_mw", "compare_with_mw")
 STAGE_CHOICES = (*base.STAGES, *COMPARE_STAGES)
-M5_SCENARIO_PERCENTILES = {
-    "worst_p25": 25.0,
-    "median_p50": 50.0,
-    "best_p75": 75.0,
-}
 MASS_AXIS_LABELS = {
     "log10_mej_dyn": r"$M_{\mathrm{ej}}^{\mathrm{dyn}}\ [M_\odot]$",
     "log10_mej_wind": r"$M_{\mathrm{ej}}^{\mathrm{wind}}\ [M_\odot]$",

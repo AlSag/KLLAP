@@ -90,6 +90,7 @@ from dynamic_color_cut_common import (
     run_root,
 )
 from kne_pipeline_common import discover_m5_quantile_table
+from kne_m5 import M5_SCENARIO_LABELS, M5_SCENARIO_PERCENTILES
 from kne_envelope_plots import (
     comparison_ylim,
     draw_comparison_envelope,
@@ -120,12 +121,6 @@ ZTF_DEPTH_FILENAMES = {
     "i": ("lims_i.joblib", "lims_public_i.joblib"),
 }
 
-M5_SCENARIO_PERCENTILES = {
-    "worst_p25": 25.0,
-    "median_p50": 50.0,
-    "best_p75": 75.0,
-}
-
 LATITUDE_COLUMNS = (
     "galactic_b_deg",
     "galactic_latitude_deg",
@@ -148,12 +143,6 @@ SNIA_BOOTSTRAP_SEED_OFFSETS = {
     "mw_present": 8002,
     "m5_no_mw": 8003,
     "m5_with_mw": 8004,
-}
-
-M5_SCENARIOS = {
-    "worst_p25": "worst p25",
-    "median_p50": "median p50",
-    "best_p75": "best p75",
 }
 
 AT2017GFO_DEFAULT_MERGER_MJD = 57982.52851852
@@ -298,7 +287,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--m5-scenario",
-        choices=list(M5_SCENARIOS),
+        choices=list(M5_SCENARIO_LABELS),
         default="median_p50",
     )
     parser.add_argument(
@@ -571,7 +560,7 @@ def interactive(args: argparse.Namespace) -> argparse.Namespace:
     ):
         args.m5_scenario = prompt_choice(
             "m5 threshold used for the depth cut",
-            [(key, label) for key, label in M5_SCENARIOS.items()],
+            list(M5_SCENARIO_LABELS.items()),
             args.m5_scenario,
         )
     else:

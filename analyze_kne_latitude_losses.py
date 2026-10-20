@@ -33,6 +33,7 @@ import numpy as np
 import pandas as pd
 
 from kne_pipeline_common import discover_m5_quantile_table
+from kne_m5 import M5_SCENARIOS
 
 
 LSST_R = {
@@ -72,7 +73,7 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--t-max", type=float, default=16.0)
     p.add_argument("--bin-width", type=float, default=0.4)
     p.add_argument("--m5-quantile-table", type=Path)
-    p.add_argument("--m5-scenario", choices=["worst_p25", "median_p50", "best_p75"],
+    p.add_argument("--m5-scenario", choices=M5_SCENARIOS,
                    default="median_p50")
     p.add_argument("--threshold-scope", choices=["common_global", "latitude_conditioned"],
                    default="common_global",
