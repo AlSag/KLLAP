@@ -29,12 +29,12 @@
 - `replot_envelope_population_convergence.py`
 - `plot_kne_colour_parameter_space.py`
 
-The original audit found that the fast convergence entry point imported the
-legacy subprocess command. This dependency has since been removed: both
-commands now import parsing, aggregation, and plotting definitions from
-`kne_convergence_common.py`. The legacy command is retained only as an
-explicitly documented compatibility workflow pending an end-to-end output
-comparison.
+The original audit found that the fast convergence entry point imported a
+legacy subprocess command. The dependency was first removed and an end-to-end
+comparison then established that the fast `last-edge` mode preserved the
+legacy raw and summary tables. The redundant subprocess command was removed;
+shared aggregation and plotting definitions remain in
+`kne_convergence_common.py`.
 
 ### Latitude and reach analysis
 

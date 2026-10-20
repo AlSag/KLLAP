@@ -43,11 +43,9 @@ in the code and methodology documents referenced below.
 | `kne_convergence_common.py` | Parsing, aggregation, and plotting conventions shared by convergence commands |
 | `envelope_colour_convergence.py` | Detailed colour-value convergence calculations |
 | `envelope_multiquantile_convergence.py` | Multi-percentile value and temporal-extent convergence |
-| `analyze_envelope_population_convergence.py` | Legacy subprocess workflow retained for compatibility |
-
-The fast convergence command no longer imports the legacy entry point. Both
-use `kne_convergence_common.py`; the older command remains until an end-to-end
-equivalence fixture establishes whether it can be archived.
+The single-load convergence command replaces the former subprocess workflow.
+Its `--stability-metric last-edge` mode preserves the original last-bin
+analysis, while avoiding repeated reads and intermediate envelope builds.
 
 ## Utilities
 

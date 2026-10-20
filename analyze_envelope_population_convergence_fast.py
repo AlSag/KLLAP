@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Fast, single-load convergence analysis for KNe colour envelopes.
 
-Unlike ``analyze_envelope_population_convergence.py``, this program reads the
-saved synthetic light curves once and evaluates all nested sample sizes from
-in-memory arrays.  The default analysis uses 100% of every selected subset and
+This program reads the saved synthetic light curves once and evaluates all
+nested sample sizes from in-memory arrays.  It replaces the former subprocess
+workflow; ``--stability-metric last-edge`` preserves that workflow's original
+last-bin analysis and core CSV schema. The default analysis uses 100% of every selected subset and
 separates fixed-percentile value convergence on a fixed time window from
 convergence of the last statistically valid temporal bin.  Legacy adaptive-
 bound and last-bin-only modes remain available.  Bootstrap validation is
