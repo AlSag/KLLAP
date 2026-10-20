@@ -40,12 +40,16 @@ cadence, image-by-image noise, alert production, or broker selection function.
 | Latitude comparison | `compare_kne_latitude_bins.py` | Compare paired bins and estimate a plateau |
 | Distance reach | `estimate_kne_lsst_distance_reach.py` | Estimate two-band colour availability versus distance |
 
-`kne_pipeline_common.py`, `dynamic_color_cut_common.py`, and
-`kne_model_backends.py` contain shared implementation. Small inspection tools
-live in `tools/`. A more detailed ownership map is available in
+`kne_pipeline_common.py`, `dynamic_color_cut_common.py`,
+`kne_generation_core.py`, `kne_envelope_core.py`, and
+`kne_convergence_common.py` contain shared implementation. Plotting-only code
+is separated into dedicated modules. Small inspection tools live in `tools/`.
+A more detailed ownership map is available in
 [`docs/code_map.md`](docs/code_map.md). The separation between command-line
 entry points, numerical modules, and plotting modules is described in
 [`docs/refactoring_architecture.md`](docs/refactoring_architecture.md).
+The keep/support/archive assessment is recorded in
+[`docs/script_inventory.md`](docs/script_inventory.md).
 
 ## Installation
 
