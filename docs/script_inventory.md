@@ -51,19 +51,11 @@ Keeping shared functions in neutral modules provides one versioned definition
 of every convention and lets tests exercise it without launching an
 interactive workflow.
 
-## Compatibility command
-
-`analyze_envelope_population_convergence.py` is the older subprocess-based
-workflow. The fast command no longer imports it: both now use
-`kne_convergence_common.py`. It remains available until an end-to-end fixture
-establishes whether the subprocess workflow still provides a distinct
-reproducibility benefit.
-
 ## Cleanup status
 
-| Candidate | Current decision | Evidence still required before deletion |
+| Candidate | Decision | Evidence |
 |---|---|---|
-| `analyze_envelope_population_convergence.py` | Keep temporarily | End-to-end legacy/fast comparison on the same small saved population |
+| Former subprocess convergence command | Removed | Its raw and summary tables matched the fast `last-edge` mode on the deterministic envelope fixture |
 | `plot_convergence_support_diagnostics.py` | Keep | Produces per-bin support and heatmap diagnostics not emitted by the main convergence command |
 | `estimate_kne_lsst_distance_reach.py` | Keep | Produces distance-completeness products not emitted elsewhere |
 | `tools/*.py` | Keep as optional utilities | Each has a distinct data-inspection or conversion purpose |

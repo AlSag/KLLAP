@@ -100,6 +100,12 @@ Neither plotting module owns interpolation or statistical validity.
 Representative figures produced before and after extraction were identical
 pixel by pixel.
 
+The builder's orchestration exposes explicit functions for argument and time-
+grid validation, paired-system dispatch, the four scientific stage masks, and
+per-bin bootstrap rule construction. A deterministic 12-event golden test
+protects the emitted rules, support diagnostics, event split, and stage
+summary while the remaining I/O orchestration is reviewed.
+
 ## Analysis path
 
 | Layer | Public entry point | Internal dependencies |
@@ -117,8 +123,10 @@ Named m5 scenarios (`worst_p25`, `median_p50`, and `best_p75`) are owned by
 private copy of the allowed names or percentile values. Likewise, the four
 photometric envelope stages are owned by `kne_envelope_core.py`.
 
-The recommended fast convergence command no longer imports the legacy entry
-point. Shared parsing, aggregation, and plotting definitions live in
+The single-load convergence command is the only convergence entry point.
+Its `last-edge` mode was compared end to end with the removed subprocess
+workflow on the deterministic fixture: all common raw and summary columns
+were identical. Shared aggregation and plotting definitions live in
 `kne_convergence_common.py`.
 
 ## How to review a scientific change
@@ -135,13 +143,12 @@ point. Shared parsing, aggregation, and plotting definitions live in
 
 ## Remaining refactoring order
 
-1. Split the remaining `build_color_envelopes.main()` by output family while
-   preserving its tables exactly.
-2. Add a deterministic golden-output envelope fixture before moving population
-   I/O.
-3. Compare legacy and fast convergence outputs end to end.
-4. Archive a legacy script only after no public command, import, test, or
-   documentation page depends on it.
+1. Keep the golden-output fixture whenever population I/O or stage-product
+   orchestration changes.
+2. Move additional output families only when doing so gives a clear review
+   boundary and preserves the reference tables.
+3. Remove another script only after the inventory documents its replacement
+   and no command, import, test, or documentation page depends on it.
 
 Reducing line count is not an acceptance criterion by itself. A refactor is
 accepted when the public commands remain understandable and deterministic

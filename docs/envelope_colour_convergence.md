@@ -49,9 +49,8 @@ valide, car le critère d'exclusion porte sur les percentiles.
 
 ## Commande
 
-Installer les deux fichiers Python à la racine du dépôt, à côté de
-`build_color_envelopes.py` et `analyze_envelope_population_convergence.py`.
-Le générateur et le builder n'ont pas à être remplacés.
+La commande publique est `analyze_envelope_population_convergence_fast.py`,
+à la racine du dépôt. Le générateur et le builder n'ont pas à être remplacés.
 
 ```bash
 python analyze_envelope_population_convergence_fast.py \

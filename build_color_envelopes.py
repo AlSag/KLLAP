@@ -1771,19 +1771,10 @@ def identify_permanent_exits(
 
 
 
-def main(args: argparse.Namespace | None = None) -> Path:
-    """Build one system, or dispatch a paired two-system analysis.
-
-    The dual-system branch deliberately reuses the same event split, random
-    seed, temporal grid and physical population.  Only the photometric
-    throughput used for the colour changes. PS1 uses Rubin detectability by
-    construction; ZTF uses its own empirical limiting-magnitude distribution.
-    """
-    if args is None:
-        args = build_parser().parse_args()
-        if args.interactive or len(sys.argv) == 1:
-            args = interactive(args)
-
+def validate_analysis_arguments(
+    args: argparse.Namespace,
+) -> tuple[str, str, str, np.ndarray, np.ndarray]:
+    """Validate scientific options and construct the fixed temporal grid."""
     pieces = args.color_pair.lower().replace("_", "-").split("-")
     if len(pieces) != 2 or pieces[0] == pieces[1] or any(b not in RUBIN_MW_R for b in pieces):
         raise ValueError("Colour pair must look like g-r")
@@ -1834,86 +1825,218 @@ def main(args: argparse.Namespace | None = None) -> Path:
     if not np.isclose(edges[-1], args.t_max, atol=1e-8):
         raise ValueError("(t-max - t-min) must be an integer multiple of bin-width")
     centres = 0.5 * (edges[:-1] + edges[1:])
+    return band1, band2, pair, edges, centres
 
-    if args.photometric_system in {"both", "lsst+ztf"}:
-        systems = (
-            ("lsst", "ps1")
-            if args.photometric_system == "both"
-            else ("lsst", "ztf")
+
+def dispatch_dual_system_analysis(
+    args: argparse.Namespace,
+    band1: str,
+    band2: str,
+    pair: str,
+) -> Path | None:
+    """Run paired systems with the same population, split and temporal grid."""
+    if args.photometric_system not in {"both", "lsst+ztf"}:
+        return None
+
+    systems = (
+        ("lsst", "ps1")
+        if args.photometric_system == "both"
+        else ("lsst", "ztf")
+    )
+    comparison_slug = "_".join(systems)
+    comparison_label = "+".join(system.upper() for system in systems)
+    output = args.output_dir.expanduser().resolve() if args.output_dir else (
+        run_root(args.run_dir)
+        / "analysis"
+        / (
+            f"four_stage_{band1}_{band2}_envelopes_"
+            f"{args.m5_scenario}_{comparison_slug}_{population_latitude_tag(args)}"
         )
-        comparison_slug = "_".join(systems)
-        comparison_label = "+".join(system.upper() for system in systems)
-        output = args.output_dir.expanduser().resolve() if args.output_dir else (
-            run_root(args.run_dir)
-            / "analysis"
-            / (
-                f"four_stage_{band1}_{band2}_envelopes_"
-                f"{args.m5_scenario}_{comparison_slug}_{population_latitude_tag(args)}"
-            )
-        )
-        output.mkdir(parents=True, exist_ok=True)
-        for system in systems:
-            child_args = copy.deepcopy(args)
-            child_args.photometric_system = system
-            child_args.output_dir = output / system
-            child_args.interactive = False
-            if system != "lsst":
-                # The supplied SN Ia population is Rubin/LSST only.
-                child_args.snia_parquet = None
-            if args.photometric_system == "lsst+ztf":
-                # AT2017gfo measurements and best fit are PS1, not ZTF.
-                child_args.at2017gfo_file = None
-                child_args.at2017gfo_bestfit_file = None
-            main(child_args)
-        save_dual_system_comparison_plots(
-            output,
-            pair,
-            args.m5_scenario,
-            args.t_min,
-            args.t_max,
-            args.at2017gfo_file is not None and "ps1" in systems,
-            systems=systems,
-        )
-        (output / f"{comparison_label.replace('+', '_')}_comparison_configuration.json").write_text(
-            json.dumps(
-                {
-                    "color_pair": pair,
-                    "systems": list(systems),
-                    "same_injected_events": True,
-                    "same_event_split_and_random_seed": True,
-                    "same_OpSim_field_per_event": True,
-                    "depth_selection_system_by_envelope": {
-                        "lsst": "lsst",
-                        systems[1]: "lsst" if systems[1] == "ps1" else "ztf",
-                    },
-                    "m5_scenario": args.m5_scenario,
-                    "population_latitude_selection": (
-                        population_latitude_label(args)
-                    ),
-                    "population_latitude_threshold_deg": (
-                        args.latitude_threshold_deg
-                        if args.population_latitude_selection != "all"
-                        else None
-                    ),
-                    "AT2017gfo_photometric_system": (
-                        "ps1" if "ps1" in systems and args.at2017gfo_file is not None
-                        else None
-                    ),
-                    "SN_Ia_comparison_system": (
-                        "lsst" if args.snia_parquet is not None else None
-                    ),
-                    "interpretation": (
-                        "PS1 uses the corresponding Rubin LSST bands for the "
-                        "OpSim depth selection. ZTF uses its own supplied "
-                        "per-band limiting-magnitude thresholds."
-                    ),
+    )
+    output.mkdir(parents=True, exist_ok=True)
+    for system in systems:
+        child_args = copy.deepcopy(args)
+        child_args.photometric_system = system
+        child_args.output_dir = output / system
+        child_args.interactive = False
+        if system != "lsst":
+            child_args.snia_parquet = None
+        if args.photometric_system == "lsst+ztf":
+            child_args.at2017gfo_file = None
+            child_args.at2017gfo_bestfit_file = None
+        main(child_args)
+    save_dual_system_comparison_plots(
+        output,
+        pair,
+        args.m5_scenario,
+        args.t_min,
+        args.t_max,
+        args.at2017gfo_file is not None and "ps1" in systems,
+        systems=systems,
+    )
+    (output / f"{comparison_label.replace('+', '_')}_comparison_configuration.json").write_text(
+        json.dumps(
+            {
+                "color_pair": pair,
+                "systems": list(systems),
+                "same_injected_events": True,
+                "same_event_split_and_random_seed": True,
+                "same_OpSim_field_per_event": True,
+                "depth_selection_system_by_envelope": {
+                    "lsst": "lsst",
+                    systems[1]: "lsst" if systems[1] == "ps1" else "ztf",
                 },
-                indent=2,
-            )
-            + "\n"
+                "m5_scenario": args.m5_scenario,
+                "population_latitude_selection": population_latitude_label(args),
+                "population_latitude_threshold_deg": (
+                    args.latitude_threshold_deg
+                    if args.population_latitude_selection != "all" else None
+                ),
+                "AT2017gfo_photometric_system": (
+                    "ps1" if "ps1" in systems and args.at2017gfo_file is not None
+                    else None
+                ),
+                "SN_Ia_comparison_system": (
+                    "lsst" if args.snia_parquet is not None else None
+                ),
+                "interpretation": (
+                    "PS1 uses the corresponding Rubin LSST bands for the "
+                    "OpSim depth selection. ZTF uses its own supplied "
+                    "per-band limiting-magnitude thresholds."
+                ),
+            },
+            indent=2,
         )
-        print(f"Combined {comparison_label} output:", output)
-        return output
+        + "\n"
+    )
+    print(f"Combined {comparison_label} output:", output)
+    return output
+
+
+def build_stage_matrix(
+    stage: str,
+    support: np.ndarray,
+    selection_support: np.ndarray,
+    intrinsic_color: np.ndarray,
+    extincted_color: np.ndarray,
+    selection_int1: np.ndarray,
+    selection_int2: np.ndarray,
+    selection_ext1: np.ndarray,
+    selection_ext2: np.ndarray,
+    m5_band1: float,
+    m5_band2: float,
+) -> np.ndarray:
+    """Apply one of the four documented MW/m5 selections."""
+    if stage == "intrinsic_no_m5_no_mw":
+        keep, colours = support, intrinsic_color
+    elif stage == "no_m5_with_mw":
+        keep, colours = support, extincted_color
+    elif stage == "m5_no_mw":
+        keep = (
+            support & selection_support
+            & (selection_int1 <= m5_band1) & (selection_int2 <= m5_band2)
+        )
+        colours = intrinsic_color
+    elif stage == "m5_with_mw":
+        keep = (
+            support & np.isfinite(selection_ext1) & np.isfinite(selection_ext2)
+            & (selection_ext1 <= m5_band1) & (selection_ext2 <= m5_band2)
+        )
+        colours = extincted_color
+    else:
+        raise ValueError(f"Unknown envelope stage: {stage}")
+    return np.where(keep, colours, np.nan).astype(np.float32)
+
+
+def build_stage_rules(
+    matrix: np.ndarray,
+    support: np.ndarray,
+    train: np.ndarray,
+    stage: str,
+    edges: np.ndarray,
+    centres: np.ndarray,
+    tails: list[float],
+    args: argparse.Namespace,
+) -> tuple[pd.DataFrame, pd.DataFrame, list[pd.DataFrame], list[dict[str, object]]]:
+    """Bootstrap each time bin and return all-valid and consecutive rules."""
+    rng = np.random.default_rng(
+        args.seed + 1000 * STAGE_BOOTSTRAP_SEED_OFFSETS[stage]
+    )
+    rules: list[dict[str, object]] = []
+    diagnostic_frames: list[pd.DataFrame] = []
+    availability: list[dict[str, object]] = []
+    consecutive_open = True
+    for bin_index, centre in enumerate(centres):
+        values = matrix[train, bin_index]
+        values = values[np.isfinite(values)].astype(float)
+        if len(values) >= args.minimum_events:
+            diagnostics, selected = percentile_diagnostics(
+                values, tails, args.n_boot, args.bootstrap_threshold_mag,
+                args.minimum_tail_events, rng,
+            )
+        else:
+            diagnostics, selected = pd.DataFrame(), None
+        if not diagnostics.empty:
+            diagnostics.insert(0, "bin_index", bin_index)
+            diagnostics.insert(1, "t_min_days", edges[bin_index])
+            diagnostics.insert(2, "t_max_days", edges[bin_index + 1])
+            diagnostics.insert(3, "t_center_days", centre)
+            diagnostics.insert(4, "N_train_events", len(values))
+            diagnostic_frames.append(diagnostics)
+        valid = selected is not None
+        if not valid:
+            consecutive_open = False
+        availability.append({
+            "bin_index": bin_index,
+            "t_min_days": edges[bin_index],
+            "t_max_days": edges[bin_index + 1],
+            "t_center_days": centre,
+            "N_train_total": int(train.sum()),
+            "N_train_model_supported": int(support[train, bin_index].sum()),
+            "N_train_stage_available": len(values),
+            "candidate_envelope_valid": valid,
+            "initial_consecutive_valid": bool(valid and consecutive_open),
+        })
+        if valid:
+            rules.append({
+                "rule_id": f"{stage}_bin_{bin_index:03d}",
+                "bin_index": bin_index,
+                "stage": stage,
+                "t_min_days": edges[bin_index],
+                "t_max_days": edges[bin_index + 1],
+                "t_center_days": centre,
+                "bin_width_days": args.bin_width,
+                "N_train_events": len(values),
+                "initial_consecutive_valid": bool(consecutive_open),
+                **selected,
+                "bootstrap_threshold_mag": args.bootstrap_threshold_mag,
+                "minimum_tail_events": args.minimum_tail_events,
+                "target_interpolation_time_days": centre,
+                "interpolation_method": "linear_in_log10_time at fixed bin centre",
+            })
+    rules_all = pd.DataFrame(rules)
+    if rules_all.empty:
+        rules_all = pd.DataFrame(columns=[
+            "rule_id", "bin_index", "stage", "t_min_days", "t_max_days",
+            "t_center_days", "bin_width_days", "N_train_events",
+            "initial_consecutive_valid", "low_percentile", "high_percentile",
+            "color_min", "color_median", "color_max",
+        ])
+    rules_consecutive = rules_all.loc[
+        rules_all["initial_consecutive_valid"].astype(bool)
+    ].copy()
+    return rules_all, rules_consecutive, diagnostic_frames, availability
+
+
+def _run_single_system(
+    args: argparse.Namespace,
+    band1: str,
+    band2: str,
+    pair: str,
+    edges: np.ndarray,
+    centres: np.ndarray,
+) -> Path:
+    """Orchestrate I/O and products for one photometric system."""
 
     synthetic_source = SyntheticPopulationSource(args.run_dir)
     if synthetic_source.kind == "missing":
@@ -2246,105 +2369,33 @@ def main(args: argparse.Namespace | None = None) -> Path:
     summaries = []
     snia_overlap_summaries: list[dict[str, object]] = []
     for stage in STAGES:
-        if stage == "intrinsic_no_m5_no_mw":
-            keep = support
-            colour_matrix = intrinsic_color
-        elif stage == "no_m5_with_mw":
-            keep = support
-            colour_matrix = extincted_color
-        elif stage == "m5_no_mw":
-            keep = (
-                support
-                & selection_support
-                & (selection_int1 <= m5[band1])
-                & (selection_int2 <= m5[band2])
-            )
-            colour_matrix = intrinsic_color
-        else:
-            keep = (
-                support
-                & np.isfinite(selection_ext1)
-                & np.isfinite(selection_ext2)
-                & (selection_ext1 <= m5[band1])
-                & (selection_ext2 <= m5[band2])
-            )
-            colour_matrix = extincted_color
-        matrix = np.where(keep, colour_matrix, np.nan).astype(np.float32)
+        matrix = build_stage_matrix(
+            stage,
+            support,
+            selection_support,
+            intrinsic_color,
+            extincted_color,
+            selection_int1,
+            selection_int2,
+            selection_ext1,
+            selection_ext2,
+            m5[band1],
+            m5[band2],
+        )
 
         # Make the adopted depth scenario visible in every m5-dependent path.
         # This also prevents median/worst/best products from overwriting one
         # another when an explicit common --output-dir is supplied.
         stage_dir = output / stage_output_name(stage, args.m5_scenario)
         stage_dir.mkdir(parents=True, exist_ok=True)
-        rng = np.random.default_rng(
-            args.seed + 1000 * STAGE_BOOTSTRAP_SEED_OFFSETS[stage]
+        (
+            rules_all,
+            rules_consecutive,
+            diagnostic_frames,
+            availability,
+        ) = build_stage_rules(
+            matrix, support, train, stage, edges, centres, tails, args
         )
-        rules, diagnostic_frames, availability = [], [], []
-        consecutive_open = True
-        for bin_index, centre in enumerate(centres):
-            values = matrix[train, bin_index]
-            values = values[np.isfinite(values)].astype(float)
-            if len(values) >= args.minimum_events:
-                diagnostics, selected = percentile_diagnostics(
-                    values,
-                    tails,
-                    args.n_boot,
-                    args.bootstrap_threshold_mag,
-                    args.minimum_tail_events,
-                    rng,
-                )
-            else:
-                diagnostics, selected = pd.DataFrame(), None
-            if not diagnostics.empty:
-                diagnostics.insert(0, "bin_index", bin_index)
-                diagnostics.insert(1, "t_min_days", edges[bin_index])
-                diagnostics.insert(2, "t_max_days", edges[bin_index + 1])
-                diagnostics.insert(3, "t_center_days", centre)
-                diagnostics.insert(4, "N_train_events", len(values))
-                diagnostic_frames.append(diagnostics)
-            valid = selected is not None
-            if not valid:
-                consecutive_open = False
-            availability.append({
-                "bin_index": bin_index,
-                "t_min_days": edges[bin_index],
-                "t_max_days": edges[bin_index + 1],
-                "t_center_days": centre,
-                "N_train_total": int(train.sum()),
-                "N_train_model_supported": int(support[train, bin_index].sum()),
-                "N_train_stage_available": len(values),
-                "candidate_envelope_valid": valid,
-                "initial_consecutive_valid": bool(valid and consecutive_open),
-            })
-            if valid:
-                rules.append({
-                    "rule_id": f"{stage}_bin_{bin_index:03d}",
-                    "bin_index": bin_index,
-                    "stage": stage,
-                    "t_min_days": edges[bin_index],
-                    "t_max_days": edges[bin_index + 1],
-                    "t_center_days": centre,
-                    "bin_width_days": args.bin_width,
-                    "N_train_events": len(values),
-                    "initial_consecutive_valid": bool(consecutive_open),
-                    **selected,
-                    "bootstrap_threshold_mag": args.bootstrap_threshold_mag,
-                    "minimum_tail_events": args.minimum_tail_events,
-                    "target_interpolation_time_days": centre,
-                    "interpolation_method": "linear_in_log10_time at fixed bin centre",
-                })
-
-        rules_all = pd.DataFrame(rules)
-        if rules_all.empty:
-            rules_all = pd.DataFrame(columns=[
-                "rule_id", "bin_index", "stage", "t_min_days", "t_max_days", "t_center_days",
-                "bin_width_days", "N_train_events", "initial_consecutive_valid",
-                "low_percentile", "high_percentile", "color_min", "color_median",
-                "color_max",
-            ])
-        rules_consecutive = rules_all.loc[
-            rules_all["initial_consecutive_valid"].astype(bool)
-        ].copy()
         rules_all.to_csv(stage_dir / "dynamic_color_cut_rules_all_valid.csv", index=False)
         rules_consecutive.to_csv(stage_dir / "dynamic_color_cut_rules.csv", index=False)
         pd.DataFrame(availability).to_csv(
@@ -2769,6 +2820,19 @@ def main(args: argparse.Namespace | None = None) -> Path:
     )
     print("Output:", output)
     return output
+
+
+def main(args: argparse.Namespace | None = None) -> Path:
+    """Validate the request, dispatch paired analyses, or run one system."""
+    if args is None:
+        args = build_parser().parse_args()
+        if args.interactive or len(sys.argv) == 1:
+            args = interactive(args)
+    band1, band2, pair, edges, centres = validate_analysis_arguments(args)
+    combined_output = dispatch_dual_system_analysis(args, band1, band2, pair)
+    if combined_output is not None:
+        return combined_output
+    return _run_single_system(args, band1, band2, pair, edges, centres)
 
 
 if __name__ == "__main__":

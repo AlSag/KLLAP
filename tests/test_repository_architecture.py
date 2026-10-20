@@ -25,6 +25,10 @@ PUBLIC_COMMANDS = (
     "plot_kne_low_high_plateau.py",
 )
 
+RETIRED_COMMANDS = (
+    "analyze_envelope_population_convergence.py",
+)
+
 
 class RepositoryArchitectureTest(unittest.TestCase):
     def test_canonical_stage_and_m5_scenario_order(self):
@@ -61,6 +65,11 @@ class RepositoryArchitectureTest(unittest.TestCase):
                     for node in tree.body
                 )
                 self.assertTrue(guarded_main)
+
+    def test_retired_redundant_commands_do_not_return(self):
+        for relative in RETIRED_COMMANDS:
+            with self.subTest(command=relative):
+                self.assertFalse((ROOT / relative).exists())
 
 
 if __name__ == "__main__":
