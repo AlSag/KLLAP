@@ -25,6 +25,7 @@ import pandas as pd
 import kne_convergence_common as convergence
 import build_color_envelopes as builder
 import kne_envelope_core as envelope_core
+from kne_population_io import SyntheticPopulationSource, prepare_metadata
 from dynamic_color_cut_common import (
     assign_event_splits,
     canonical_event_id,
@@ -207,10 +208,10 @@ def get_depths(a: argparse.Namespace, bargs: argparse.Namespace, root: Path, ban
 
 def load_population_once(a: argparse.Namespace, root: Path, bands: tuple[str, str], centres: np.ndarray, sizes: list[int]):
     """Read relevant event photometry once and return compact numerical arrays."""
-    source = builder.SyntheticPopulationSource(root)
+    source = SyntheticPopulationSource(root)
     if source.kind == "missing":
         raise FileNotFoundError(f"No saved synthetic population under {root}")
-    metadata = builder.prepare_metadata(make_builder_args(a, root), source.available_event_ids())
+    metadata = prepare_metadata(make_builder_args(a, root), source.available_event_ids())
     maximum = sizes[-1]
     # Form the union of event IDs that can occur in any requested repetition.
     ids_needed: set[str] = set()

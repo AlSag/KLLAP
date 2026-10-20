@@ -44,6 +44,9 @@ required for every run, but they produce distinct scientific products.
 - `kne_convergence_common.py`: definitions shared by the legacy and fast
   convergence commands;
 - `dynamic_color_cut_common.py`: colour, event-split, and bootstrap helpers;
+- `kne_population_io.py`: shared saved-population and metadata reader;
+- `kne_envelope_population.py`: envelope-specific interpolation matrices and
+  native colour tracks;
 - `envelope_colour_convergence.py` and
   `envelope_multiquantile_convergence.py`: convergence calculations.
 
@@ -59,6 +62,11 @@ interactive workflow.
 | `plot_convergence_support_diagnostics.py` | Keep | Produces per-bin support and heatmap diagnostics not emitted by the main convergence command |
 | `estimate_kne_lsst_distance_reach.py` | Keep | Produces distance-completeness products not emitted elsewhere |
 | `tools/*.py` | Keep as optional utilities | Each has a distinct data-inspection or conversion purpose |
+
+The final dependency audit found no second public command whose outputs are
+fully reproduced by another retained command. The remaining files under
+`tools/` are explicitly optional inspection utilities rather than pipeline
+stages; keeping them does not create two competing scientific workflows.
 
 The repository contains no tracked `.bak`, numbered-copy, or `*_before_*`
 Python source file. Generated runs and local review reports remain excluded by

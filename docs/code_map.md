@@ -38,6 +38,8 @@ in the code and methodology documents referenced below.
 | `kne_generation_plots.py` | Generation-only diagnostic figures |
 | `kne_opsim_plots.py` | OpSim depth and revisit-cadence figures |
 | `kne_envelope_core.py` | Extinction, nested subsets, percentile validity, and envelope selection |
+| `kne_population_io.py` | Parquet/CSV discovery and scientific metadata selection shared by analyses |
+| `kne_envelope_population.py` | No-extrapolation interpolation and native colour tracks for envelope construction |
 | `kne_envelope_plots.py` | Plotting primitives for envelope products |
 | `kne_envelope_product_plots.py` | Complete envelope, AT2017gfo, SN Ia, and comparison figures |
 | `kne_convergence_common.py` | Parsing, aggregation, and plotting conventions shared by convergence commands |

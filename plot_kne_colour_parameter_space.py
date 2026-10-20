@@ -28,6 +28,7 @@ from scipy.ndimage import gaussian_filter, gaussian_filter1d, map_coordinates
 
 import kne_envelope_core as envelope_core
 from kne_m5 import M5_SCENARIOS
+from kne_population_io import SyntheticPopulationSource
 
 
 # Public compatibility alias; the canonical stage ordering lives in the
@@ -348,7 +349,7 @@ def load_event_colours(args, root, metadata, bands, times, depths):
     import build_color_envelopes as builder
     from dynamic_color_cut_common import canonical_event_id, interpolate_band
 
-    source = builder.SyntheticPopulationSource(root)
+    source = SyntheticPopulationSource(root)
     if source.kind == "missing":
         raise FileNotFoundError("Aucune courbe synthétique : attendre parquet/synthetic_part_*.parquet ou csv/lightcurve_*.csv sous le dossier du run")
     ids = metadata.event_id.astype(str).tolist()
