@@ -28,6 +28,9 @@ in the code and methodology documents referenced below.
 | File | Ownership |
 |---|---|
 | `kne_pipeline_common.py` | General run formats, interpolation, OpSim m5 products, posterior loading |
+| `kne_opsim_cli.py` | OpSim command-line parser and terminal menu |
+| `kne_generation_cli.py` | Generation parser, terminal menu, and option validation |
+| `kne_envelope_cli.py` | Envelope parser and terminal menu |
 | `dynamic_color_cut_common.py` | Colour matching, event splits, rule evaluation, bootstrap helpers |
 | `kne_m5.py` | Shared discovery and parsing of m5 percentile tables and raw OpSim depth files |
 | `kne_model_backends.py` | FIESTA surrogate and semi-analytical backend selection |
@@ -70,9 +73,11 @@ small, documented, and stored under `tests/` only when a test requires them.
 
 ## Refactoring priorities
 
-1. Split the remaining `build_color_envelopes.main()` orchestration by output
+1. Add a small golden-output envelope fixture before moving population I/O.
+2. Split the remaining `build_color_envelopes.main()` orchestration by output
    family without changing tables.
-2. Add a small golden-output envelope fixture before moving population I/O.
+3. Compare the legacy and fast convergence commands, then remove the legacy
+   command if it has no unique scientific output.
 3. Compare the legacy and fast convergence commands end to end.
 4. Keep performance-critical population loading vectorized and benchmarked.
 

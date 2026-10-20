@@ -20,10 +20,24 @@ flowchart TD
 
 ### Public command
 
-`generate_kne_lightcurves.py` owns the terminal interface and orchestrates one
-generation run. Running it as a script preserves the interactive workflow.
+`generate_kne_lightcurves.py` orchestrates one generation run and reexports
+its terminal functions from `kne_generation_cli.py`. Running it as a script
+preserves the interactive workflow.
 Importing it only defines functions and does not prompt, initialize Rubin
 bandpasses, create directories, or generate events.
+
+The three main commands have dedicated interface modules:
+
+| Public command | Terminal-only module |
+|---|---|
+| `get_opsim_baseline.py` | `kne_opsim_cli.py` |
+| `generate_kne_lightcurves.py` | `kne_generation_cli.py` |
+| `build_color_envelopes.py` | `kne_envelope_cli.py` |
+
+These modules contain parsers, menus, and validation of option combinations.
+They do not import Rubin, FIESTA, JAX, Astropy, or plotting libraries. Public
+commands reexport the historical function names so existing commands and
+external imports continue to work.
 
 ### Scientific backends
 
@@ -70,7 +84,8 @@ create export products.
 ### Envelope construction
 
 `build_color_envelopes.py` remains the user-facing command and orchestration
-layer. `kne_envelope_core.py` owns the numerical conventions shared with the
+layer; its parser and menus live in `kne_envelope_cli.py`.
+`kne_envelope_core.py` owns the numerical conventions shared with the
 convergence and parameter-space analyses: MW extinction, reproducible nested
 subsets, bootstrap percentile validity, tail support, and selection of the
 widest valid symmetric envelope.
@@ -87,15 +102,15 @@ identical pixel by pixel.
 | Envelope construction | `build_color_envelopes.py` | `kne_envelope_core.py`, `kne_envelope_plots.py`, `dynamic_color_cut_common.py`, `kne_m5.py` |
 | Convergence | `analyze_envelope_population_convergence_fast.py` | `kne_convergence_common.py`, `kne_envelope_core.py`, `envelope_colour_convergence.py`, `envelope_multiquantile_convergence.py` |
 | Saved-result replot | `replot_envelope_population_convergence.py` | `envelope_multiquantile_convergence.py` |
+| Realization comparison | `plot_colour_envelope_realizations.py` | `dynamic_color_cut_common.py`, `kne_m5.py` |
+| Parameter-space maps | `plot_kne_colour_parameter_space.py` | shared population loaders |
+| Iso-colour maps | `plot_kne_colour_isocontours.py` | `plot_kne_colour_parameter_space.py`, `kne_m5.py` |
+| Latitude experiment | `run_latitude_experiment.py` | generator, latitude analyzer, comparator |
 
 Named m5 scenarios (`worst_p25`, `median_p50`, and `best_p75`) are owned by
 `kne_m5.py`. Commands may choose different defaults, but they must not carry a
 private copy of the allowed names or percentile values. Likewise, the four
 photometric envelope stages are owned by `kne_envelope_core.py`.
-| Realization comparison | `plot_colour_envelope_realizations.py` | `dynamic_color_cut_common.py`, `kne_m5.py` |
-| Parameter-space maps | `plot_kne_colour_parameter_space.py` | shared population loaders |
-| Iso-colour maps | `plot_kne_colour_isocontours.py` | `plot_kne_colour_parameter_space.py`, `kne_m5.py` |
-| Latitude experiment | `run_latitude_experiment.py` | generator, latitude analyzer, comparator |
 
 The recommended fast convergence command no longer imports the legacy entry
 point. Shared parsing, aggregation, and plotting definitions live in
