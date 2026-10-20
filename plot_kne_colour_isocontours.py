@@ -37,6 +37,7 @@ import pandas as pd
 from scipy.ndimage import gaussian_filter
 from scipy.stats import binned_statistic_2d
 
+from kne_m5 import load_m5_percentile
 import plot_kne_colour_parameter_space as base
 
 
@@ -47,7 +48,6 @@ M5_SCENARIO_PERCENTILES = {
     "median_p50": 50.0,
     "best_p75": 75.0,
 }
-_M5_SOURCE_CACHE = {}
 MASS_AXIS_LABELS = {
     "log10_mej_dyn": r"$M_{\mathrm{ej}}^{\mathrm{dyn}}\ [M_\odot]$",
     "log10_mej_wind": r"$M_{\mathrm{ej}}^{\mathrm{wind}}\ [M_\odot]$",
@@ -281,196 +281,6 @@ def stage_plan(stage: str):
         ),
     }
     return plans[stage]
-
-
-def recorded_paths(run_dir: Path) -> list[Path]:
-    path = run_dir / "run_info.txt"
-    if not path.is_file():
-        return []
-    found = []
-    for line in path.read_text(errors="replace").splitlines():
-        if ":" not in line:
-            continue
-        value = line.split(":", 1)[1].strip().strip("'\"")
-        if value and ("/" in value or value.endswith(".csv")):
-            found.append(Path(value).expanduser())
-    return found
-
-
-def m5_source_candidates(run_dir: Path, explicit: Path | None) -> list[Path]:
-    candidates = []
-    if explicit is not None:
-        explicit = explicit.expanduser()
-        if explicit.is_dir():
-            candidates.extend([
-                explicit / "m5_depth_quantiles_by_band.csv",
-                explicit / "opsim_m5_medians_by_band.csv",
-                explicit,
-            ])
-        else:
-            candidates.append(explicit)
-    for base_dir in (run_dir, run_dir / "products", run_dir.parent, Path.cwd()):
-        candidates.extend([
-            base_dir / "m5_depth_quantiles_by_band.csv",
-            base_dir / "analysis" / "latitude_depth_comparison"
-            / "m5_depth_quantiles_by_band.csv",
-            base_dir / "opsim_m5_medians_by_band.csv",
-        ])
-    for recorded in recorded_paths(run_dir):
-        base_dir = recorded if recorded.is_dir() else recorded.parent
-        candidates.extend([
-            base_dir / "m5_depth_quantiles_by_band.csv",
-            base_dir / "opsim_m5_medians_by_band.csv",
-            recorded,
-        ])
-    unique = []
-    seen = set()
-    for candidate in candidates:
-        candidate = candidate.resolve()
-        if candidate not in seen:
-            seen.add(candidate)
-            unique.append(candidate)
-    return unique
-
-
-def normalised_quantiles(series: pd.Series) -> np.ndarray:
-    values = pd.to_numeric(series, errors="coerce").to_numpy(float)
-    return np.where(values <= 1.0, 100.0 * values, values)
-
-
-def depths_from_table(
-    path: Path,
-    percentile: float,
-    bands: tuple[str, str],
-    threshold_scope: str,
-) -> dict[str, float] | None:
-    """Read an exact percentile from long- or wide-form m5 tables."""
-    try:
-        table = pd.read_csv(path)
-    except Exception:
-        return None
-    if "band" not in table:
-        return None
-    use = table.copy()
-    use["band"] = use["band"].astype(str).str.strip().str.lower()
-    if "threshold_scope" in use:
-        use = use.loc[use["threshold_scope"].astype(str).eq(threshold_scope)]
-    if "threshold_latitude_group" in use:
-        group = "both" if threshold_scope == "common_global" else "high"
-        use = use.loc[
-            use["threshold_latitude_group"].astype(str).eq(group)
-        ]
-    if {"quantile", "m5"}.issubset(use.columns):
-        quantiles = normalised_quantiles(use["quantile"])
-        use = use.loc[np.isclose(quantiles, percentile, atol=1e-9)]
-        value_column = "m5"
-    else:
-        labels = [
-            f"m5_p{percentile:g}", f"p{percentile:g}",
-            f"m5_q{percentile:g}",
-        ]
-        if np.isclose(percentile, 50.0):
-            labels.extend(["m5_median", "median_m5"])
-        value_column = next((label for label in labels if label in use), None)
-        if value_column is None:
-            return None
-    lookup = {}
-    for band in bands:
-        rows = use.loc[use["band"].eq(band)]
-        values = pd.to_numeric(rows[value_column], errors="coerce")
-        values = values[np.isfinite(values)]
-        if len(values) != 1:
-            return None
-        lookup[band] = float(values.iloc[0])
-    return lookup
-
-
-def depths_from_raw_opsim(
-    source: Path,
-    percentile: float,
-    bands: tuple[str, str],
-) -> dict[str, float] | None:
-    """Compute an arbitrary visit-weighted percentile from raw OpSim CSVs."""
-    root = source if source.is_dir() else source.parent
-    files = sorted(root.rglob("opsim_visits_field*.csv"))
-    if not files:
-        return None
-    values = {band: [] for band in bands}
-    accepted = {"band", "filter", "m5", "fiveSigmaDepth"}
-    print(
-        f"Calcul de m5 p{percentile:g} depuis {len(files):,} fichiers OpSim "
-        f"dans {root}"
-    )
-    for path in files:
-        frame = pd.read_csv(path, usecols=lambda name: name in accepted)
-        band_column = (
-            "band" if "band" in frame
-            else "filter" if "filter" in frame else None
-        )
-        depth_column = (
-            "m5" if "m5" in frame
-            else "fiveSigmaDepth" if "fiveSigmaDepth" in frame else None
-        )
-        if band_column is None or depth_column is None:
-            continue
-        normalised_bands = (
-            frame[band_column].astype(str).str.strip().str.lower()
-            .str.replace(r"^lsst", "", regex=True).str[-1:]
-        )
-        depths = pd.to_numeric(frame[depth_column], errors="coerce")
-        for band in bands:
-            selected = depths.loc[normalised_bands.eq(band)].to_numpy(float)
-            selected = selected[np.isfinite(selected)]
-            if selected.size:
-                values[band].append(selected)
-    if any(not values[band] for band in bands):
-        return None
-    return {
-        band: float(np.percentile(np.concatenate(values[band]), percentile))
-        for band in bands
-    }
-
-
-def load_m5_percentile(
-    run_dir: Path,
-    explicit: Path | None,
-    percentile: float,
-    bands: tuple[str, str],
-    threshold_scope: str,
-) -> tuple[dict[str, float], str]:
-    """Load an exact table percentile or calculate it from raw OpSim visits."""
-    for candidate in m5_source_candidates(run_dir, explicit):
-        if not candidate.exists():
-            continue
-        key = (
-            str(candidate), float(percentile), tuple(bands), threshold_scope,
-        )
-        if key in _M5_SOURCE_CACHE:
-            return _M5_SOURCE_CACHE[key]
-        if candidate.is_file():
-            depths = depths_from_table(
-                candidate, percentile, bands, threshold_scope
-            )
-            if depths is not None:
-                result = (depths, f"p{percentile:g} table: {candidate}")
-                _M5_SOURCE_CACHE[key] = result
-                return result
-        if threshold_scope == "common_global":
-            depths = depths_from_raw_opsim(candidate, percentile, bands)
-            if depths is not None:
-                root = candidate if candidate.is_dir() else candidate.parent
-                result = (depths, f"p{percentile:g} raw OpSim visits: {root}")
-                _M5_SOURCE_CACHE[key] = result
-                return result
-    detail = (
-        "Pour latitude_conditioned, le percentile exact doit déjà être présent "
-        "dans la table. " if threshold_scope == "latitude_conditioned" else ""
-    )
-    raise FileNotFoundError(
-        f"Impossible de déterminer m5 p{percentile:g} pour {bands}. {detail}"
-        "Fournir --m5-quantile-table avec une table contenant ce percentile, "
-        "ou un dossier OpSim brut contenant opsim_visits_field*.csv."
-    )
 
 
 def load_depths(args, root: Path, bands: tuple[str, str]):

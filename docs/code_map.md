@@ -29,6 +29,7 @@ in the code and methodology documents referenced below.
 |---|---|
 | `kne_pipeline_common.py` | General run formats, interpolation, OpSim m5 products, posterior loading |
 | `dynamic_color_cut_common.py` | Colour matching, event splits, rule evaluation, bootstrap helpers |
+| `kne_m5.py` | Shared discovery and parsing of m5 percentile tables and raw OpSim depth files |
 | `kne_model_backends.py` | FIESTA surrogate and semi-analytical backend selection |
 | `envelope_colour_convergence.py` | Detailed colour-value convergence calculations |
 | `envelope_multiquantile_convergence.py` | Multi-percentile value and temporal-extent convergence |
