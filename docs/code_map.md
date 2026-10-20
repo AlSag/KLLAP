@@ -36,8 +36,10 @@ in the code and methodology documents referenced below.
 | `kne_model_backends.py` | FIESTA surrogate and semi-analytical backend selection |
 | `kne_generation_core.py` | Deterministic generation table transformations |
 | `kne_generation_plots.py` | Generation-only diagnostic figures |
+| `kne_opsim_plots.py` | OpSim depth and revisit-cadence figures |
 | `kne_envelope_core.py` | Extinction, nested subsets, percentile validity, and envelope selection |
 | `kne_envelope_plots.py` | Plotting primitives for envelope products |
+| `kne_envelope_product_plots.py` | Complete envelope, AT2017gfo, SN Ia, and comparison figures |
 | `kne_convergence_common.py` | Parsing, aggregation, and plotting conventions shared by convergence commands |
 | `envelope_colour_convergence.py` | Detailed colour-value convergence calculations |
 | `envelope_multiquantile_convergence.py` | Multi-percentile value and temporal-extent convergence |

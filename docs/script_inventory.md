@@ -39,6 +39,8 @@ required for every run, but they produce distinct scientific products.
 - `kne_envelope_core.py`: extinction, nested subsets, percentile validity,
   tail support, and envelope selection;
 - `kne_envelope_plots.py`: envelope plotting primitives only;
+- `kne_envelope_product_plots.py`: completed envelope-product figures only;
+- `kne_opsim_plots.py`: OpSim depth and revisit-cadence figures only;
 - `kne_convergence_common.py`: definitions shared by the legacy and fast
   convergence commands;
 - `dynamic_color_cut_common.py`: colour, event-split, and bootstrap helpers;
