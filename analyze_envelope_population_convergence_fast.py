@@ -21,7 +21,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-import analyze_envelope_population_convergence as convergence
+import kne_convergence_common as convergence
 import build_color_envelopes as builder
 from dynamic_color_cut_common import (
     assign_event_splits,
