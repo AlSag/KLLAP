@@ -26,6 +26,8 @@ import numpy as np
 import pandas as pd
 from scipy.ndimage import gaussian_filter, gaussian_filter1d, map_coordinates
 
+import kne_envelope_core as envelope_core
+
 
 STAGES = (
     "intrinsic_no_m5_no_mw", "no_m5_with_mw", "m5_no_mw", "m5_with_mw",
@@ -330,7 +332,7 @@ def load_metadata(root, maximum, seed):
 
 
 def load_depths(args, root, bands, builder):
-    if args.stage not in builder.M5_STAGES:
+    if args.stage not in envelope_core.M5_STAGES:
         return {}, None
     if args.photometric_system == "ztf":
         values = {band: getattr(args, f"ztf_m5_{band}") for band in bands}
@@ -353,7 +355,12 @@ def load_event_colours(args, root, metadata, bands, times, depths):
     color = np.full((len(ids), len(times)), np.nan, dtype=float)
     supported = np.zeros(color.shape, dtype=bool)
     depth_pass = np.zeros(color.shape, dtype=bool)
-    selection_system = "lsst" if args.photometric_system == "ps1" and args.stage in builder.M5_STAGES else args.photometric_system
+    selection_system = (
+        "lsst"
+        if args.photometric_system == "ps1"
+        and args.stage in envelope_core.M5_STAGES
+        else args.photometric_system
+    )
     systems = tuple(dict.fromkeys((args.photometric_system, selection_system)))
     read_ids = ids
     if source.kind == "legacy_csv_files":
@@ -385,15 +392,27 @@ def load_event_colours(args, root, metadata, bands, times, depths):
         selection = frame.loc[frame.photometric_system.eq(selection_system)]
         magnitudes = [interpolate_band(target, band, evaluation_times) for band in bands]
         selection_magnitudes = [interpolate_band(selection, band, evaluation_times) for band in bands]
-        if args.stage not in builder.MW_EXTINCTED_STAGES:
-            magnitudes = [values - builder.event_extinction_mag(row, args.photometric_system, band) for values, band in zip(magnitudes, bands)]
-            if args.stage in builder.M5_STAGES:
-                selection_magnitudes = [values - builder.event_extinction_mag(row, selection_system, band) for values, band in zip(selection_magnitudes, bands)]
+        if args.stage not in envelope_core.MW_EXTINCTED_STAGES:
+            magnitudes = [
+                values
+                - envelope_core.event_extinction_mag(
+                    row, args.photometric_system, band
+                )
+                for values, band in zip(magnitudes, bands)
+            ]
+            if args.stage in envelope_core.M5_STAGES:
+                selection_magnitudes = [
+                    values
+                    - envelope_core.event_extinction_mag(
+                        row, selection_system, band
+                    )
+                    for values, band in zip(selection_magnitudes, bands)
+                ]
         finite = np.isfinite(magnitudes[0]) & np.isfinite(magnitudes[1])
         supported[index] = finite
         color[index] = magnitudes[0] - magnitudes[1]
         passed = finite.copy()
-        if args.stage in builder.M5_STAGES:
+        if args.stage in envelope_core.M5_STAGES:
             for values, band in zip(selection_magnitudes, bands):
                 passed &= np.isfinite(values) & (values <= depths[band])
         depth_pass[index] = passed

@@ -27,6 +27,7 @@ import numpy as np
 import pandas as pd
 
 from envelope_colour_convergence import colour_errors, safe_quantile
+import kne_envelope_core as envelope_core
 
 
 PROFILE_VERSION = 3
@@ -99,8 +100,6 @@ def _empty_estimator_row(base: dict, name: str, kind: str, q=np.nan,
 def multiquantile_profile(a, sample, arrays, indices, depths, bands, edges,
                           centres) -> pd.DataFrame:
     """Calculate the seven fixed percentiles using every selected event."""
-    import build_color_envelopes as builder
-
     # No train/validation/test split: all events in the selected subset enter
     # the percentile estimators.
     if len(sample) != len(indices):
@@ -108,7 +107,7 @@ def multiquantile_profile(a, sample, arrays, indices, depths, bands, edges,
     analysis_indices = indices
     colour_key = (
         "colour_extincted"
-        if a.stage in builder.MW_EXTINCTED_STAGES
+        if a.stage in envelope_core.MW_EXTINCTED_STAGES
         else "colour_intrinsic"
     )
     colours = arrays[colour_key][analysis_indices]
@@ -116,7 +115,7 @@ def multiquantile_profile(a, sample, arrays, indices, depths, bands, edges,
         np.isfinite(arrays["colour_intrinsic"][analysis_indices])
         & np.isfinite(arrays["colour_extincted"][analysis_indices])
     )
-    if a.stage in builder.M5_STAGES:
+    if a.stage in envelope_core.M5_STAGES:
         magnitude_keys = (
             ("mag_sel_int_1", "mag_sel_int_2")
             if a.stage == "m5_no_mw"
@@ -130,7 +129,7 @@ def multiquantile_profile(a, sample, arrays, indices, depths, bands, edges,
     # their symmetric upper bounds plus p50.
     diagnostic_lower = [5.0, 16.0, 25.0, 50.0]
     rng = np.random.default_rng(
-        a.builder_seed + 1000 * builder.STAGE_BOOTSTRAP_SEED_OFFSETS[a.stage]
+        a.builder_seed + 1000 * envelope_core.STAGE_BOOTSTRAP_SEED_OFFSETS[a.stage]
     )
     rows: list[dict] = []
     for bin_index, centre in enumerate(centres):
@@ -147,7 +146,7 @@ def multiquantile_profile(a, sample, arrays, indices, depths, bands, edges,
                 rows.append(_empty_estimator_row(base, name, "fixed", q))
             continue
 
-        diagnostics, _ = builder.percentile_diagnostics(
+        diagnostics, _ = envelope_core.percentile_diagnostics(
             values,
             diagnostic_lower,
             a.n_boot,
@@ -694,6 +693,7 @@ def _configuration(a, root, sizes, depths, fast, builder, common) -> dict:
     })
     source_files = (
         Path(__file__), Path(fast.__file__), Path(builder.__file__),
+        Path(envelope_core.__file__),
         Path(common.__file__), root / "summary.csv",
     )
     conf["source_hashes"] = {
@@ -736,7 +736,7 @@ def run_multi_percentile_convergence(a, root, sizes, bands, edges, centres):
     bargs = fast.make_builder_args(a, root)
     depths = (
         fast.get_depths(a, bargs, root, bands)
-        if a.stage in builder.M5_STAGES else {}
+        if a.stage in envelope_core.M5_STAGES else {}
     )
     conf = _configuration(a, root, sizes, depths, fast, builder, common)
     conf_path = output / "multi_percentile_configuration.json"

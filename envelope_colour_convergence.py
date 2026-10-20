@@ -16,6 +16,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+import kne_envelope_core as envelope_core
+
 COMPONENTS = ("color_min", "color_median", "color_max")
 PROFILE_VERSION = 2
 
@@ -60,27 +62,33 @@ def colour_errors(
 def envelope_profile(a, sample, arrays, indices, depths, bands, edges, centres,
                      reference=None):
     """Compute one full profile, delegating percentile validity to the builder."""
-    import build_color_envelopes as builder
     from dynamic_color_cut_common import assign_event_splits, parse_floats
 
     split = assign_event_splits(sample.event_id.astype(str).tolist(),
                                 a.train_fraction, a.validation_fraction, a.builder_seed)
     train_indices = indices[split.split.to_numpy() == "train"]
-    key = "colour_extincted" if a.stage in builder.MW_EXTINCTED_STAGES else "colour_intrinsic"
+    key = (
+        "colour_extincted"
+        if a.stage in envelope_core.MW_EXTINCTED_STAGES
+        else "colour_intrinsic"
+    )
     colours = arrays[key][train_indices]
     available = (np.isfinite(arrays["colour_intrinsic"][train_indices])
                  & np.isfinite(arrays["colour_extincted"][train_indices]))
-    if a.stage in builder.M5_STAGES:
+    if a.stage in envelope_core.M5_STAGES:
         keys = ("mag_sel_int_1", "mag_sel_int_2") if a.stage == "m5_no_mw" else (
             "mag_sel_ext_1", "mag_sel_ext_2")
         for name, band in zip(keys, bands):
             mags = arrays[name][train_indices]
             available &= np.isfinite(mags) & (mags <= depths[band])
-    tails = parse_floats(a.tail_percentiles or builder.DEFAULT_TAIL_GRID)
+    tails = parse_floats(a.tail_percentiles or envelope_core.DEFAULT_TAIL_GRID)
     tails = sorted(set(tails + [25., 30., 35., 40., 42., 44., 45., 46., 47., 48., 49., 50.]))
     if reference is not None and a.bound_mode == "reference-percentiles":
         tails = sorted(set(tails + reference.loc[reference.valid, "low_percentile"].tolist()))
-    rng = np.random.default_rng(a.builder_seed + 1000 * builder.STAGE_BOOTSTRAP_SEED_OFFSETS[a.stage])
+    rng = np.random.default_rng(
+        a.builder_seed
+        + 1000 * envelope_core.STAGE_BOOTSTRAP_SEED_OFFSETS[a.stage]
+    )
     rows = []
     active = True
     reference_lookup = reference.set_index("bin_index") if reference is not None else None
@@ -100,7 +108,7 @@ def envelope_profile(a, sample, arrays, indices, depths, bands, edges, centres,
             active = False
             rows.append(row)
             continue
-        diagnostics, selected = builder.percentile_diagnostics(
+        diagnostics, selected = envelope_core.percentile_diagnostics(
             values, tails, a.n_boot, a.bootstrap_threshold_mag, a.minimum_tail_events, rng)
         if (reference_lookup is not None and a.bound_mode == "reference-percentiles"
                 and bool(reference_lookup.loc[b, "valid"])):
@@ -320,7 +328,11 @@ def run_colour_convergence(a, root, sizes, bands, edges, centres):
         root / "analysis" / f"convergence_colours_{a.color_pair.replace('-', '_')}_{a.photometric_system}_{a.stage}")
     output.mkdir(parents=True, exist_ok=True)
     bargs = fast.make_builder_args(a, root)
-    depths = fast.get_depths(a, bargs, root, bands) if a.stage in builder.M5_STAGES else {}
+    depths = (
+        fast.get_depths(a, bargs, root, bands)
+        if a.stage in envelope_core.M5_STAGES
+        else {}
+    )
     conf = {k: str(v) if isinstance(v, Path) else v for k, v in vars(a).items()
             if k not in {"resume", "output_dir", "fit_exponential", "tolerance_days"}}
     conf.update(method="per_bin_colour_convergence", profile_version=PROFILE_VERSION,
@@ -336,7 +348,7 @@ def run_colour_convergence(a, root, sizes, bands, edges, centres):
     # potentially enormous photometry products.
     conf["source_hashes"] = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in (
         Path(__file__), Path(fast.__file__), Path(builder.__file__),
-        Path(common.__file__), root / "summary.csv")}
+        Path(envelope_core.__file__), Path(common.__file__), root / "summary.csv")}
     files = sorted((root / "parquet").glob("synthetic_part_*.parquet"))
     if not files:
         files = sorted((root / "csv").glob("lightcurve_*.csv"))

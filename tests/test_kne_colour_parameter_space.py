@@ -136,7 +136,7 @@ class ColourParameterSpaceTest(unittest.TestCase):
             metadata = self.make_population(root, n_events=2)
             args = build_parser().parse_args(["--run-dir", str(root), "--stage", "m5_no_mw"])
             colour, supported, available = load_event_colours(args, root, metadata, ("g", "r"), np.array([1., 13.]), {"g": 20.3, "r": 21.})
-            from build_color_envelopes import RUBIN_MW_R
+            from kne_envelope_core import RUBIN_MW_R
             expected = np.array([0., .5]) - .1 * (RUBIN_MW_R["g"] - RUBIN_MW_R["r"])
             np.testing.assert_allclose(colour[:, 0], expected)
             np.testing.assert_array_equal(available[:, 0], [True, True])
