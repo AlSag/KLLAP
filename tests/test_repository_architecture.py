@@ -21,6 +21,14 @@ PUBLIC_COMMANDS = (
     "analyze_kne_latitude.py",
 )
 
+SHARED_MODULES = (
+    "dynamic_color_cut_common.py",
+    "kne_envelope_core.py",
+    "kne_m5.py",
+    "kne_pipeline_common.py",
+    "kne_population_io.py",
+)
+
 RETIRED_COMMANDS = (
     "analyze_envelope_population_convergence.py",
     "replot_envelope_population_convergence.py",
@@ -30,6 +38,9 @@ RETIRED_COMMANDS = (
     "analyze_kne_latitude_losses.py",
     "compare_kne_latitude_bins.py",
     "plot_kne_low_high_plateau.py",
+    "kne_latitude_population.py",
+    "kne_latitude_comparison.py",
+    "kne_latitude_plateau.py",
 )
 
 
@@ -68,6 +79,20 @@ class RepositoryArchitectureTest(unittest.TestCase):
                     for node in tree.body
                 )
                 self.assertTrue(guarded_main)
+
+    def test_root_contains_only_public_commands_and_shared_modules(self):
+        actual = {path.name for path in ROOT.glob("*.py")}
+        self.assertEqual(actual, set(PUBLIC_COMMANDS) | set(SHARED_MODULES))
+
+    def test_latitude_orchestrator_uses_no_subprocess_commands(self):
+        tree = ast.parse((ROOT / "run_latitude_experiment.py").read_text())
+        imported = {
+            alias.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Import)
+            for alias in node.names
+        }
+        self.assertNotIn("subprocess", imported)
 
     def test_retired_redundant_commands_do_not_return(self):
         for relative in RETIRED_COMMANDS:

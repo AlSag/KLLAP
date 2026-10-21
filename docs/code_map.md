@@ -1,89 +1,43 @@
-# Code map and maintenance status
+# Code map
 
-This map separates public entry points from shared implementation, tests, and
-local study products. It is a maintenance guide; scientific definitions remain
-in the code and methodology documents referenced below.
+This map identifies the eight product-producing scripts and the five genuinely
+shared implementation modules in the reviewable pipeline.
 
-## Public entry points
+## Public product-producing scripts
 
-| File | Responsibility | Status |
-|---|---|---|
-| `get_opsim_baseline.py` | Sample OpSim fields and visits; compute dust and m5 products | Core |
-| `generate_kne_lightcurves.py` | Generate physical populations and saved photometric products | Core |
-| `build_color_envelopes.py` | Construct colour populations and statistically valid envelopes | Core |
-| `analyze_envelope_population_convergence_fast.py` | Recommended nested-subsample convergence workflow | Core |
-| `plot_colour_envelope_realizations.py` | Compare nested population sizes across independent realizations and inspect bootstrap distributions | Core analysis |
-| `plot_kne_colour_isocontours.py` | Map median colour and iso-colour contours in physical-parameter planes | Core analysis |
-| `run_latitude_experiment.py` | Orchestrate paired latitude-bin populations | Core analysis |
-| `analyze_kne_latitude.py` | Unified population, paired-bin, and plateau latitude analysis | Core analysis |
+| Script | Interface block | Scientific block | Figure/output block |
+|---|---|---|---|
+| `get_opsim_baseline.py` | survey and sampling questions | OpSim selection, coordinates, dust and depth statistics | visit, depth and sky diagnostics |
+| `generate_kne_lightcurves.py` | model, population, storage and seed questions | physical draws, model evaluation, interpolation, extinction and selection | tables, metadata and diagnostic light curves |
+| `build_color_envelopes.py` | population, colour, m5 and support questions | colour interpolation, stage masks, bootstrap and percentiles | envelopes and comparison products |
+| `analyze_envelope_population_convergence_fast.py` | nested sizes, tolerances and bootstrap questions | value and temporal-extent convergence | summary tables and convergence figures |
+| `plot_colour_envelope_realizations.py` | realization, time and validity questions | nested prefixes, percentiles, tails and bootstrap | realization and bootstrap-distribution figures |
+| `plot_kne_colour_isocontours.py` | plane, time, m5 and contour questions | population loading, cell medians and supported-cell smoothing | individual and overview iso-colour maps |
+| `analyze_kne_latitude.py` | analysis-mode and method-specific questions | population losses, paired-bin bootstrap and moving-cut plateau | latitude tables and figures |
+| `run_latitude_experiment.py` | experiment and resume questions | paired generation/analysis configuration | complete latitude experiment outputs |
 
-## Shared implementation
+## Shared modules
 
-| File | Ownership |
+| Module | Why it remains shared |
 |---|---|
-| `kne_pipeline_common.py` | General run formats, interpolation, OpSim m5 products, posterior loading |
-| `kne_opsim_cli.py` | OpSim command-line parser and terminal menu |
-| `kne_generation_cli.py` | Generation parser, terminal menu, and option validation |
-| `kne_envelope_cli.py` | Envelope parser and terminal menu |
-| `dynamic_color_cut_common.py` | Colour matching, event splits, rule evaluation, bootstrap helpers |
-| `kne_m5.py` | Shared discovery and parsing of m5 percentile tables and raw OpSim depth files |
-| `kne_model_backends.py` | FIESTA surrogate and semi-analytical backend selection |
-| `kne_generation_core.py` | Deterministic generation table transformations |
-| `kne_generation_plots.py` | Generation-only diagnostic figures |
-| `kne_opsim_plots.py` | OpSim depth and revisit-cadence figures |
-| `kne_envelope_core.py` | Extinction, nested subsets, percentile validity, and envelope selection |
-| `kne_population_io.py` | Parquet/CSV discovery and scientific metadata selection shared by analyses |
-| `kne_envelope_population.py` | No-extrapolation interpolation and native colour tracks for envelope construction |
-| `kne_envelope_plots.py` | Plotting primitives for envelope products |
-| `kne_envelope_product_plots.py` | Complete envelope, AT2017gfo, SN Ia, and comparison figures |
-| `kne_convergence_common.py` | Parsing, aggregation, and plotting conventions shared by convergence commands |
-| `envelope_colour_convergence.py` | Detailed colour-value convergence calculations |
-| `envelope_multiquantile_convergence.py` | Multi-percentile value and temporal-extent convergence |
-| `kne_colour_population.py` | Metadata loading, parameter transforms, and colour interpolation for iso-colour maps |
-| `kne_latitude_population.py` | Per-population latitude-loss calculations and products |
-| `kne_latitude_comparison.py` | Paired disjoint-bin bootstrap comparison and products |
-| `kne_latitude_plateau.py` | Low/high latitude-cut stability calculations and products |
-The single-load convergence command replaces the former subprocess workflow.
-Its `--stability-metric last-edge` mode preserves the original last-bin
-analysis, while avoiding repeated reads and intermediate envelope builds.
+| `kne_pipeline_common.py` | stable data formats and OpSim/posterior functions used by several stages |
+| `kne_population_io.py` | identical population discovery and metadata rules across analyses |
+| `kne_m5.py` | one canonical interpretation of named depth scenarios |
+| `kne_envelope_core.py` | one canonical set of stages and statistical-support definitions |
+| `dynamic_color_cut_common.py` | identical colour matching and bootstrap helpers across workflows |
 
-## Utilities
+A shared module is retained only when copying it would create competing
+scientific definitions. It has no terminal entry point and produces no output
+on import.
 
-Files under `tools/` inspect depth distributions, SN Ia distances, or individual
-Parquet events. They are useful diagnostics but are not pipeline stages.
+## Review rules
 
-## Tests
+1. Start from the public script that owns the output.
+2. Read its labelled interface, calculation, and figure sections separately.
+3. Follow an import only when the definition is shared in the table above.
+4. Add a deterministic test for every changed numerical convention.
+5. Run `python -m compileall -q .` and the complete unit-test suite.
+6. Compare scientific tables before and after any numerical refactor.
 
-Every scientific analysis added to the public workflow must have at least one
-test covering its numerical convention or failure mode. The default suite is
-deliberately independent of surrogate weights and large data. Tests requiring
-real FIESTA models or downloads remain opt-in.
-
-The realization comparison tests distinguish median validity from envelope-tail
-validity and preserve the inclusive 20-event p16/p84 boundary.  The isocontour
-tests preserve cell medians, logarithmic mass-axis conversion, and the rule
-that smoothing must never populate an unsupported parameter-space cell.
-
-## Files that should remain local
-
-Do not commit run directories, generated PNG/CSV products, `.bak` files,
-repository-audit snapshots, OpSim databases, surrogate weights, posterior
-archives, or external SN Ia populations. Representative fixtures should be
-small, documented, and stored under `tests/` only when a test requires them.
-
-## Refactoring priorities
-
-1. Add a small golden-output envelope fixture before moving population I/O.
-2. Split the remaining `build_color_envelopes.main()` orchestration by output
-   family without changing tables.
-3. Compare the legacy and fast convergence commands, then remove the legacy
-   command if it has no unique scientific output.
-3. Compare the legacy and fast convergence commands end to end.
-4. Keep performance-critical population loading vectorized and benchmarked.
-
-Retention decisions are recorded in
-[`script_inventory.md`](script_inventory.md).
-
-Reducing total line count is not itself an acceptance criterion. A refactor is
-accepted only when the public commands remain understandable and deterministic
-tests demonstrate unchanged scientific results within explicit tolerances.
+Line count alone is not an acceptance criterion. The scientific conventions,
+random seeds, support rules, and absence of extrapolation must remain explicit.

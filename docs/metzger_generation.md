@@ -90,42 +90,20 @@ apply depth cuts later with `build_color_envelopes.py`.
 
 ## Reproducible example
 
-Start with a small run to inspect the curves:
+Start with the interactive generator:
 
 ```bash
-python generate_kne_lightcurves.py \
-  --model MetzgerModel \
-  --run-name metzger_100_40p7Mpc \
-  --parameter-source broad \
-  --filter-system lsst+ps1 \
-  --output-mode synthetic-mjd \
-  --synthetic-depth-cut none \
-  --synthetic-cadence-days 0.2 \
-  --surrogate-batch-size 16 \
-  --storage-format parquet \
-  --n-samples 100 \
-  --distance-mode fixed \
-  --fixed-distance-mpc 40.7 \
-  --galactic-latitude-mode all \
-  --opsim-dir opsim_exports_all_survey \
-  --plot-mode saved --max-plot-events 10 \
-  --seed 12345 --sky-seed 67890
+python generate_kne_lightcurves.py
 ```
 
-Replace `--model MetzgerModel` with `--model MetzgerFullModel` and use a
-different run name for the other variant. `--no-metzger-neutron-precursor`
-disables its precursor; `--metzger-vmax 0.8` changes its maximum shell speed.
-Use `--filter-system lsst+ztf` for paired LSST/ZTF output or `ztf` for ZTF only.
+Choose `MetzgerModel`, a run name such as `metzger_100_40p7Mpc`, broad
+parameters, LSST+PS1, synthetic OpSim times, a 0.2-day saved cadence, Parquet,
+100 events, a fixed distance of 40.7 Mpc, and explicit intrinsic/sky seeds.
+The terminal also asks for the mass, velocity, beta and opacity ranges, the
+neutron precursor, the maximum shell velocity, and the integration grid.
+
+Repeat with `MetzgerFullModel` and a different run name for the second variant.
 ZTF depths remain a later envelope-builder selection, not a model parameter.
-
-For example, changing the mass prior is done with:
-
-```bash
---metzger-log10-mej-range -3 -1.3
-```
-
-The other controls are `--metzger-log10-vej-range`, `--metzger-beta-range`,
-and `--metzger-log10-kappa-range` (two numbers per option).
 
 ## Time and numerical conventions
 
@@ -136,7 +114,7 @@ and `--metzger-log10-kappa-range` (two numbers per option).
 * FIESTA analytical predictions already include distance and spectral
   redshift effects, but return **source-frame times**. The generator converts
   those times exactly once: `t_observer = (1+z) * t_source`.
-* `--synthetic-cadence-days 0.2` only resamples saved observer-frame data.
+* A saved synthetic cadence of 0.2 day only resamples observer-frame data.
   It is independent of the integration grid and the later 0.4-day colour bins.
 * The first integration point reflects the upstream initial conditions.
   Do not use it as an established early-time prediction without checking
@@ -147,7 +125,7 @@ and `--metzger-log10-kappa-range` (two numbers per option).
 
 Check numerical convergence separately from convergence in the number of
 simulated events: repeat a small **identical** population with 2,000 source
-points using `--analytical-n-times 2000`, and compare the relevant bands and
+points selected in the terminal, and compare the relevant bands and
 times. On one reference event (0.01 solar masses, v_min=0.1c, beta=3,
 kappa=10 cm²/g, z=0.009), the maximum g-r difference from refining 1,000 to
 2,000 points was approximately 0.017 mag for `MetzgerModel` and 0.010 mag
@@ -168,21 +146,21 @@ SHA-256 and prediction-time convention. The source commit in the metadata is
 the **audited reference**, not a claim that every user's installation matches
 that commit.
 
-Create a **new** shared intrinsic catalogue for each model with
-`--pairing-mode create --intrinsic-catalog paired_metzger.csv`. Reuse it for
-different sky cuts or distances with `--pairing-mode reuse`, the same
-intrinsic seed and event count. Catalogues cannot cross model names; Metzger
+Create a **new** shared intrinsic catalogue for each model by choosing the
+catalogue-creation mode and a filename such as `paired_metzger.csv`. Reuse it
+for different sky cuts or distances with the reuse mode, the same intrinsic
+seed and event count. Catalogues cannot cross model names; Metzger
 catalogues must retain the same integration grid, constructor options and
 population-prior bounds.
-To change the distance while retaining the ejecta parameters use
-`--distance-mode fixed --fixed-distance-mpc 600 --catalog-distance-policy current-fixed`.
+To change the distance while retaining the ejecta parameters, select fixed
+distance, enter 600 Mpc, and choose the current fixed-distance catalogue policy.
 The identical sky seed can retain sky pairing when the eligible fields and
 other sky-generation settings are identical.
 
 ## Tests
 
 ```bash
-python -m py_compile generate_kne_lightcurves.py kne_model_backends.py build_color_envelopes.py
+python -m py_compile generate_kne_lightcurves.py build_color_envelopes.py
 PYTHONPATH=. python -m unittest discover -s tests -v
 ```
 

@@ -2,59 +2,58 @@
 
 This repository simulates kilonova (KNe) populations, projects them through
 Rubin/LSST observing conditions, constructs time-dependent colour envelopes,
-and studies their statistical convergence and astrophysical selection effects.
-The current workflow also supports paired LSST–PS1 or LSST–ZTF products,
-Galactic-latitude studies, parameter-space projections, and semi-analytical
-Metzger light-curve backends exposed by FIESTA.
+and studies statistical convergence, parameter-space structure, and Galactic-
+latitude selection effects. It supports FIESTA `Bu2026_MLP`, `Bu2019_MLP`,
+`MetzgerModel`, and `MetzgerFullModel` light-curve backends.
 
-The repository contains source code, tests, and documentation. Generated runs,
-OpSim exports, figures, large tables, model weights, and external data products
-are intentionally excluded from version control.
+Generated runs, OpSim exports, figures, model weights, and large data products
+are intentionally excluded from Git. The repository contains the source,
+documentation, tests, and metadata required to review the pipeline.
 
-## Scientific scope
+## Public workflows
 
-The pipeline is designed to answer questions such as:
+Exactly eight root-level scripts create scientific products. Every one is
+started with a short command and then configured through terminal questions;
+there is no second command-line interface based on long option lists.
 
-- how many simulated KNe are needed for stable colour-percentile envelopes;
-- how Rubin depth and Milky Way extinction change the available population;
-- which physical parameters are represented by colour-selected KNe;
-- how colour availability and losses vary with Galactic latitude;
+| Step | Script | Main products |
+|---:|---|---|
+| 1 | `get_opsim_baseline.py` | sampled OpSim fields and visits, dust values, m5 tables and diagnostics |
+| 2 | `generate_kne_lightcurves.py` | physical KNe populations, synthetic or LSST-like light curves, run metadata |
+| 3 | `build_color_envelopes.py` | colour populations, percentile envelopes and stage comparisons |
+| 4 | `analyze_envelope_population_convergence_fast.py` | percentile-value and temporal-extent convergence tables and figures |
+| 5 | `plot_colour_envelope_realizations.py` | comparisons across independent realizations and bootstrap distributions |
+| 6 | `plot_kne_colour_isocontours.py` | median-colour maps and iso-colour contours in physical-parameter space |
+| 7 | `analyze_kne_latitude.py` | population losses, paired-bin comparisons, or low/high plateau diagnostics |
+| 8 | `run_latitude_experiment.py` | complete paired latitude-bin generation and analysis workflow |
 
-Unless explicitly stated otherwise, the depth analyses use global band
-thresholds derived from an OpSim sample. They do not reproduce the full Rubin
-cadence, image-by-image noise, alert production, or broker selection function.
+Run a workflow with, for example:
 
-## Workflow at a glance
+```bash
+python generate_kne_lightcurves.py
+```
 
-| Stage | Main entry point | Purpose |
-|---|---|---|
-| OpSim preparation | `get_opsim_baseline.py` | Sample survey fields, visits, dust, and m5 distributions |
-| Population generation | `generate_kne_lightcurves.py` | Generate physical populations and synthetic/LSST-like light curves |
-| Colour envelopes | `build_color_envelopes.py` | Build percentile envelopes for four MW/m5 stages |
-| Population convergence | `analyze_envelope_population_convergence_fast.py` | Measure percentile-value and temporal-extent convergence |
-| Iso-colour maps | `plot_kne_colour_isocontours.py` | Map median colour and iso-colour contours in physical-parameter planes |
-| Latitude experiment | `run_latitude_experiment.py` | Generate paired latitude-bin populations and run the comparison |
-| Latitude analysis | `analyze_kne_latitude.py` | Run population, paired-bin, or low/high plateau analyses |
+The same form applies to each script in the table. Defaults are displayed in
+brackets and pressing Enter accepts them.
 
-`kne_pipeline_common.py`, `dynamic_color_cut_common.py`,
-`kne_generation_core.py`, `kne_envelope_core.py`, and
-`kne_convergence_common.py` contain shared implementation. Plotting-only code
-is separated into dedicated modules. The terminal interfaces of the three
-main commands live in `kne_opsim_cli.py`, `kne_generation_cli.py`, and
-`kne_envelope_cli.py`; the public scripts reexport them for compatibility.
-Generation, envelope-product, and OpSim plots live respectively in
-`kne_generation_plots.py`, `kne_envelope_product_plots.py`, and
-`kne_opsim_plots.py`. Small inspection tools live in `tools/`.
-A more detailed ownership map is available in
-[`docs/code_map.md`](docs/code_map.md). The separation between command-line
-entry points, numerical modules, and plotting modules is described in
-[`docs/refactoring_architecture.md`](docs/refactoring_architecture.md).
-The keep/support/archive assessment is recorded in
+The public scripts are intentionally reviewable as individual files. Each
+contains labelled blocks for its terminal interface, scientific calculations,
+and figures. Five smaller modules remain because their definitions are truly
+shared by several workflows:
+
+- `kne_pipeline_common.py`: stable run formats, OpSim quantities, and posterior loading;
+- `kne_population_io.py`: shared Parquet/CSV discovery and metadata loading;
+- `kne_m5.py`: canonical m5 scenarios and depth-table discovery;
+- `kne_envelope_core.py`: shared envelope stages and statistical support rules;
+- `dynamic_color_cut_common.py`: shared colour matching and bootstrap helpers.
+
+These modules do not create products when executed. The detailed ownership map
+is in [`docs/code_map.md`](docs/code_map.md), and the keep/remove decision is in
 [`docs/script_inventory.md`](docs/script_inventory.md).
 
 ## Installation
 
-The recorded reference environment uses Python 3.12.12, FIESTA 0.2.0,
+The reference environment uses Python 3.12.12, FIESTA 0.2.0,
 `rubin_sim` 2.6.1, and `rubin_scheduler` 3.22.0:
 
 ```bash
@@ -63,188 +62,157 @@ conda activate kne_lsst_analysis
 python -m unittest discover -s tests -v
 ```
 
-A shorter pip installation is also available:
+A pip-based environment can instead be created from `requirements-lock.txt`.
+FIESTA surrogate weights are not stored here. Record the model source,
+immutable revision, and checksums for every production run.
 
-```bash
-python -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -r requirements-lock.txt
-python -m unittest discover -s tests -v
-```
+## Scientific workflow
 
-FIESTA surrogate weights are not stored in this repository. Record the model
-source, immutable revision, and checksums for every production analysis. The
-semi-analytical Metzger backends require the FIESTA implementation described in
-[`docs/metzger_generation.md`](docs/metzger_generation.md).
-
-## 1. Prepare the OpSim sample
-
-Interactive use:
+### 1. Prepare OpSim products
 
 ```bash
 python get_opsim_baseline.py
 ```
 
-Example non-interactive run:
+The script samples positions and visits, associates dust information, and
+writes the canonical `m5_depth_quantiles_by_band.csv`. Depth statistics belong
+to the OpSim sample and are not recomputed by the light-curve generator.
 
-```bash
-python get_opsim_baseline.py \
-  --selection-mode ALL_SURVEY \
-  --n-fields 10000 \
-  --sampling-mode UNIFORM \
-  --seed 12345 \
-  --m5-latitude-threshold-deg 20 \
-  --outdir opsim_exports_all_survey
-```
-
-The output contains sampled positions, visit tables, dust information, and the
-canonical `m5_depth_quantiles_by_band.csv` table. m5 statistics are properties
-of the OpSim sample and are not recomputed by the light-curve generator.
-
-## 2. Generate a KNe population
+### 2. Generate KNe light curves
 
 ```bash
 python generate_kne_lightcurves.py
 ```
 
-Available backends are `Bu2026_MLP`, `Bu2019_MLP`, `MetzgerModel`, and
-`MetzgerFullModel`.
+The terminal interface selects the model, parameter population, filter system,
+scientific products, storage format, distance distribution, Galactic-latitude
+selection, sample size, and random seeds. Large populations should use sharded
+Parquet output. Every run records its physical choices and reproducibility
+metadata.
 
-The generator supports broad priors or, for `Bu2026_MLP`, posterior samples;
-fixed distance or uniform-in-comoving-volume sampling; paired filter systems;
-shared intrinsic catalogues; and CSV or sharded Parquet storage. Large runs
-should use Parquet. Physical choices, seeds, model metadata, sky assignment,
-distance conventions, and storage settings are recorded with every run.
+For controlled sky or latitude comparisons, create a reusable intrinsic
+catalogue in the first run and reuse it in later runs. This preserves the
+physical parameters event by event.
 
-For controlled comparisons, create a shared intrinsic catalogue in the first
-run and reuse it in later runs. This preserves event-by-event ejecta parameters
-and inclination. Distance replacement is explicit through the catalogue
-distance policy; it must not be inferred from filenames.
-
-## 3. Build colour envelopes
+### 3. Build colour envelopes
 
 ```bash
-python build_color_envelopes.py --interactive
+python build_color_envelopes.py
 ```
 
-The builder distinguishes four stages:
+The four scientific stages are:
 
-| Stage | m5 cut | MW extinction included in the magnitude |
+| Stage | m5 cut | MW extinction retained in magnitudes |
 |---|---:|---:|
 | `intrinsic_no_m5_no_mw` | no | no |
 | `no_m5_with_mw` | no | yes |
 | `m5_no_mw` | yes | no |
 | `m5_with_mw` | yes | yes |
 
-The default interpolation is performed in logarithmic time without
-extrapolation. The exact statistical support, bootstrap rules, depth scenario,
-and population split are saved with the output. Optional SN Ia inputs and
-paired LSST–ZTF depth comparisons are documented in
-[`docs/snia_input.md`](docs/snia_input.md) and
-[`docs/methodology.md`](docs/methodology.md).
+Interpolation is linear in logarithmic positive time and never extrapolates.
+The saved configuration records bootstrap, tail-support, depth, and population-
+split conventions.
 
-## 4. Measure population convergence
-
-The recommended entry point reads the parent population once and reuses it for
-all nested sample sizes:
+### 4. Measure convergence
 
 ```bash
-python analyze_envelope_population_convergence_fast.py \
-  --run-dir runs/YOUR_PARENT_RUN \
-  --photometric-system lsst \
-  --color-pair g-r \
-  --stage m5_no_mw \
-  --sample-sizes 1000,3000,10000,30000,50000,75000,100000,200000,300000,400000,500000,1000000 \
-  --repetitions 10 \
-  --n-boot 200 \
-  --resume
+python analyze_envelope_population_convergence_fast.py
 ```
 
-The largest sample remains the reference population. Two questions are kept
-separate:
+The parent population is loaded once. Smaller populations are reproducible
+nested subsets, the largest selected size is the reference, and independent
+repetitions test sensitivity to the sampled events. The analysis keeps two
+questions separate:
 
-1. Are the percentile values stable within the requested magnitude tolerance?
-2. Does the statistically valid envelope extend to the same time as the
-   reference, within the requested temporal tolerance?
+1. Are percentile values stable within the selected magnitude tolerance?
+2. Does the statistically supported envelope reach the reference temporal
+   extent within the selected time tolerance?
 
-The default multi-percentile analysis evaluates `p5–p95`, `p16–p84`, and
-`p25–p75`. See [`MULTI_PERCENTILE_CONVERGENCE.md`](MULTI_PERCENTILE_CONVERGENCE.md).
+The default families are p5–p95, p16–p84, and p25–p75. See
+[`MULTI_PERCENTILE_CONVERGENCE.md`](MULTI_PERCENTILE_CONVERGENCE.md).
 
-## 5. Map iso-colours in physical-parameter space
+### 5. Compare independent realizations and bootstrap distributions
+
+```bash
+python plot_colour_envelope_realizations.py
+```
+
+Each realization is an independent physical draw. Nested prefixes inside a
+realization isolate the effect of population size. Optional event bootstraps
+measure uncertainty in p16, p50, and p84 and can produce the focused bootstrap-
+distribution figures.
+
+### 6. Map iso-colours
 
 ```bash
 python plot_kne_colour_isocontours.py
 ```
 
-Population loading and colour interpolation are isolated in
-`kne_colour_population.py`; the public command owns the terminal interface and
-figures.
+The script reads saved populations, computes colours without temporal
+extrapolation, bins physical-parameter planes, and plots cell medians plus
+requested iso-colour contours. Unsupported cells remain masked. Smoothing can
+be applied to supported cells for contour presentation but never fills a cell
+without statistical support.
 
-## 6. Study Galactic latitude
+### 7. Analyse Galactic latitude
+
+```bash
+python analyze_kne_latitude.py
+```
+
+The first terminal menu selects one of three distinct products:
+
+- losses and availability inside one population;
+- paired comparison of disjoint latitude bins;
+- stability of a moving low/high latitude cut.
+
+The plateau is an operational stability criterion, not a physical Galactic
+boundary. See [`docs/low_high_plateau.md`](docs/low_high_plateau.md).
+
+### 8. Run the complete paired-latitude experiment
 
 ```bash
 python run_latitude_experiment.py
 ```
 
-The orchestrator reuses one intrinsic catalogue across latitude bins, runs the
-per-bin analysis, and compares paired event outcomes. `--dry-run` prints the
-commands before a long calculation. The low/high plateau diagnostic can also
-be run directly with:
-
-```bash
-python analyze_kne_latitude.py plateau --interactive
-```
-
-The plateau is an operational stability criterion, not a physical Galactic
-boundary. Read [`docs/low_high_plateau.md`](docs/low_high_plateau.md) before
-interpreting it.
+This is workflow orchestration: it reuses one intrinsic catalogue, generates
+or resumes every disjoint latitude population, runs the event-level analysis,
+and finally compares all bins with the lowest-latitude bin. It calls the Python
+functions from the generator and latitude analyser directly; it does not build
+or execute hidden shell commands. A terminal choice provides a plan-only mode
+before long calculations.
 
 ## Testing and reproducibility
 
-Run the default test suite before every commit that changes scientific code:
+Before committing a scientific change, run:
 
 ```bash
 python -m compileall -q .
 python -m unittest discover -s tests -v
 ```
 
-The optional real-FIESTA integration test is enabled explicitly:
-
-```bash
-KNE_RUN_FIESTA_INTEGRATION_TESTS=1 \
-  python -m unittest discover -s tests -p 'test_metzger_fiesta_integration.py' -v
-```
-
-The reproducibility checklist is in
-[`docs/reproducibility.md`](docs/reproducibility.md). Numerical equivalence,
-not line count, is the acceptance criterion for refactoring scientific code.
+The real-FIESTA integration test is optional because it requires local model
+assets. Numerical equivalence, not line count, is the acceptance criterion for
+refactoring. See [`docs/reproducibility.md`](docs/reproducibility.md).
 
 ## Repository policy
 
-Do not commit:
-
-- `runs/`, OpSim exports, generated figures, or analysis tables;
-- external SN Ia populations or posterior archives;
-- FIESTA model weights or NMMA joblib inputs;
-- local backup files, credentials, private keys, or machine-specific paths.
-
-Keep immutable source revisions and checksums in run metadata or an external
-data manifest. Publish large scientific products in a DOI-backed archive when
-they are needed to reproduce a paper.
+Do not commit generated runs, OpSim databases, figures, Parquet shards,
+posterior archives, FIESTA weights, external SN Ia populations, backup files,
+credentials, or machine-specific paths. Publish large scientific products in
+a DOI-backed archive when needed for a paper.
 
 ## Attribution, AI use, and citation
 
 `generate_kne_lightcurves.py` was developed from FIESTA's MIT-licensed
-`examples/generate_lightcurves.py` and substantially extended. The immutable
-upstream reference, scientific citations, model provenance, and external-data
-notices are recorded in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
+`examples/generate_lightcurves.py` and substantially extended. Upstream
+references, scientific citations, model provenance, and external-data notices
+are recorded in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
 
-The use of generative AI for code development, debugging, repository
-organisation, and supporting documentation is described transparently in
-[`AI_USAGE.md`](AI_USAGE.md). Scientific responsibility and validation remain
-with the repository author.
+Generative-AI use for code development, bug checking, repository organisation,
+and supporting documentation is declared in [`AI_USAGE.md`](AI_USAGE.md).
+Scientific responsibility and validation remain with the repository author.
 
-To cite this software, use [`CITATION.cff`](CITATION.cff). The repository's own
-source code is released under the [`MIT License`](LICENSE); third-party
-software and data retain their respective terms.
+Use [`CITATION.cff`](CITATION.cff) to cite the software. Repository-owned source
+is released under the [`MIT License`](LICENSE); third-party software and data
+retain their respective terms.

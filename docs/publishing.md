@@ -46,23 +46,19 @@ git grep -nE '/home/|BEGIN (RSA|OPENSSH|EC) PRIVATE KEY|ssh_key' -- . ':!docs/pu
 
 ## Commit in reviewable units
 
-A clear history would use two commits:
+Stage only the files shown by the reviewed diff. For an architecture update:
 
 ```bash
-git add README.md CITATION.cff LICENSE THIRD_PARTY_NOTICES.md AI_USAGE.md \
-  REPOSITORY_AUDIT.md docs .gitignore .github tests/test_repository_metadata.py
-git commit -m "Document current KNe analysis workflow and provenance"
-
-git add \
-  generate_kne_lightcurves.py build_color_envelopes.py kne_model_backends.py \
-  analyze_envelope_population_convergence_fast.py \
-  envelope_colour_convergence.py envelope_multiquantile_convergence.py \
-  plot_kne_colour_isocontours.py analyze_kne_latitude.py tests
-git commit -m "Add multiquantile convergence and parameter-space analyses"
+git diff --check
+python -m compileall -q .
+python -m unittest discover -s tests -v
+git add -A
+git diff --cached --stat
+git commit -m "Describe the reviewed change"
 ```
 
-Adjust the second list after inspecting `git status`; never use it as a reason
-to stage generated products.
+Always inspect `git status` before staging; generated products must remain
+excluded.
 
 ## Push and review
 

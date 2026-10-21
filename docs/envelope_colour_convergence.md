@@ -1,8 +1,7 @@
 # Convergence des valeurs de l'enveloppe couleur
 
-Le script rapide propose deux modes : `--stability-metric colour` (nouveau
-mode par défaut) et `--stability-metric last-edge` (ancienne analyse du dernier
-bin, inchangée). Les courbes sauvegardées sont lues une fois. Le code ne génère
+Le script rapide propose dans son menu les modes « valeurs de couleur »
+(par défaut) et « dernier bin valide ». Les courbes sauvegardées sont lues une fois. Le code ne génère
 pas de nouvelles KNe. Il utilise des sous-échantillons sans remise, emboîtés
 dans une même répétition, et les splits train/validation du builder.
 
@@ -18,13 +17,14 @@ Le plancher absolu vaut **0 mag par défaut** : le critère est donc strictement
 relatif. Une référence nulle exige une différence nulle, à l'arrondi machine
 près. Les couleurs négatives sont traitées avec la valeur absolue de la
 référence. Près de zéro, le critère peut être extrêmement strict. Un plancher
-optionnel `--absolute-tolerance-mag 0.02`, par exemple, change le critère en
+Un plancher absolu optionnel de 0,02 mag, par exemple, change le critère en
 un critère mixte et doit être explicitement annoncé dans les résultats.
 
 Une répétition passe si **les trois valeurs passent dans tous les bins**.
 Un bin de référence absent ou invalide chez le candidat fait échouer la
 répétition. On n'utilise pas seulement l'intersection des bins disponibles.
-N requis est la première taille testée où au moins `--required-fraction 0.9`
+N requis est la première taille testée où au moins la fraction demandée
+(0,9 par défaut)
 des répétitions passent, **et où toutes les tailles testées plus grandes
 passent aussi**. Aucun N intermédiaire n'est interpolé.
 
@@ -34,15 +34,15 @@ reste celle de `build_color_envelopes.py` (bootstrap et effectif dans les
 queues). Le bootstrap interne et les répétitions de sous-échantillonnage ont
 des fonctions différentes.
 
-`--bound-mode adaptive` compare les bornes effectivement sélectionnées pour
+Le mode adaptatif compare les bornes effectivement sélectionnées pour
 chaque taille, comme dans les enveloppes usuelles. Les percentiles peuvent
-donc différer entre N et la référence. `--bound-mode reference-percentiles`
+donc différer entre N et la référence. Le mode « percentiles de référence »
 impose, dans chaque bin, la même paire percentile que la référence ; si
 cette paire n'est pas statistiquement valide pour N, ce bin échoue.
 
 p50-p50 est exclu par défaut puisqu'il n'a pas de largeur percentile. Pour
-reproduire le comportement de l'ancien critère adaptatif, fournir
-`--allow-degenerate-envelope`. Il faut alors préciser qu'une médiane seule
+reproduire le comportement de l'ancien critère adaptatif, autoriser
+explicitement une enveloppe dégénérée dans le terminal. Il faut alors préciser qu'une médiane seule
 peut compter comme bin valide. Un intervalle percentile non nul peut aussi
 avoir une largeur numérique nulle si les couleurs sont identiques : il reste
 valide, car le critère d'exclusion porte sur les percentiles.
@@ -53,17 +53,14 @@ La commande publique est `analyze_envelope_population_convergence_fast.py`,
 à la racine du dépôt. Le générateur et le builder n'ont pas à être remplacés.
 
 ```bash
-python analyze_envelope_population_convergence_fast.py \
-  --run-dir runs/500000_40.7Mpc_intrinsic_seed_12345_sky_seed_67890 \
-  --color-pair g-r --photometric-system lsst --stage m5_with_mw \
-  --sample-sizes 1000,10000,50000,75000,100000,200000,300000,400000,450000,500000 \
-  --repetitions 10 --subsample-seed 20261002 --builder-seed 12345 \
-  --t-min 0.4 --t-max 16.0 --bin-width 0.4 --n-boot 200 \
-  --m5-scenario best_p75 --threshold-scope common_global \
-  --stability-metric colour --relative-tolerance 0.10 \
-  --bound-mode adaptive --required-fraction 0.9 \
-  --output-dir runs/500000_40.7Mpc_intrinsic_seed_12345_sky_seed_67890/analysis/convergence_colours_g_r
+python analyze_envelope_population_convergence_fast.py
 ```
+
+Le terminal demande successivement le run parent, la couleur, le stade, les
+tailles emboîtées, les répétitions, le bootstrap, la fenêtre temporelle, le
+scénario m5, les tolérances et le dossier de sortie. Pour une référence à
+500 000, saisir par exemple
+`1000,10000,50000,75000,100000,200000,300000,400000,450000,500000`.
 
 Pour une référence à 100 000, remplacer la grille par
 `1000,10000,50000,75000,100000`. Si le run sauvegardé en contient davantage,
@@ -89,7 +86,8 @@ la référence est alors un sous-échantillon de 100 000 par répétition.
 Relancer la même commande reprend les profils complets déjà calculés. Les
 anciens checkpoints de temps seul ne contiennent pas les couleurs et ne sont
 pas réutilisés. Utiliser un **nouveau dossier de sortie**. Une configuration
-différente est refusée en reprise ; choisir un autre dossier ou `--no-resume`.
+différente est refusée en reprise ; choisir un autre dossier ou désactiver la
+reprise dans le terminal.
 
 Au plus grand N, les profils sont comparés à eux-mêmes. Ce point passe donc
 par construction : un seuil égal au N maximal n'établit pas de plateau. La
@@ -102,6 +100,6 @@ figurer dans toute présentation du critère.
 ## Vérification
 
 ```bash
-python -m py_compile analyze_envelope_population_convergence_fast.py envelope_colour_convergence.py
+python -m py_compile analyze_envelope_population_convergence_fast.py
 PYTHONPATH=. python -m unittest discover -s tests -p 'test_envelope_colour_convergence.py' -v
 ```

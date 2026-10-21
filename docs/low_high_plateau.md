@@ -2,7 +2,8 @@
 
 ## Question et définition
 
-La commande `analyze_kne_latitude.py plateau` calcule à chaque seuil b :
+Le mode « stabilité d'une coupure low/high » de
+`analyze_kne_latitude.py` calcule à chaque seuil b :
 
     low : |latitude galactique| < b
     high : |latitude galactique| >= b
@@ -30,7 +31,7 @@ nul n'est remplacé par 1 ; il reste indéfini.
 Depuis le dépôt, dans l'environnement habituel :
 
 ```bash
-python analyze_kne_latitude.py plateau
+python analyze_kne_latitude.py
 ```
 
 Deux modes d'entrée sont proposés :
@@ -50,18 +51,10 @@ pas de courbes de lumière et ne relit pas les shards Parquet.
 
 ## Une population all-sky existante
 
-```bash
-python analyze_kne_latitude.py plateau \
-  --event-table /chemin/du/run/analysis/latitude_losses/event_window_availability.csv \
-  --thresholds 5,10,15,20,25,30,40,50 \
-  --bootstrap-repetitions 2000 \
-  --confidence 0.95 \
-  --tolerance 0.10 \
-  --minimum-plateau-points 3 \
-  --minimum-plateau-span 10 \
-  --proposed-cut 20 \
-  --output-dir analysis/low_high_plateau
-```
+Lancer le script, choisir « stabilité d'une coupure low/high », puis « une
+table all-sky ». Le terminal demande le chemin de
+`event_window_availability.csv`, les seuils, le nombre de bootstraps, la
+tolérance et le dossier de sortie.
 
 Adapter le chemin du CSV. Pour reprendre une autre analyse couleur, distance,
 fenêtre temporelle ou profondeur, produire le CSV correspondant avec l'analyseur
@@ -69,17 +62,9 @@ de pertes, puis relancer ce script sur ce CSV.
 
 ## Runs appariés low/high existants
 
-```bash
-python analyze_kne_latitude.py plateau \
-  --pair 5 /chemin/b05_low /chemin/b05_high \
-  --pair 10 /chemin/b10_low /chemin/b10_high \
-  --pair 15 /chemin/b15_low /chemin/b15_high \
-  --pair 20 /chemin/b20_low /chemin/b20_high \
-  --pair 25 /chemin/b25_low /chemin/b25_high \
-  --pair 30 /chemin/b30_low /chemin/b30_high \
-  --bootstrap-mode paired \
-  --output-dir analysis/low_high_plateau
-```
+Dans le même menu, choisir « runs low/high séparés ». Le terminal demande les
+deux tables pour chaque seuil et si les mêmes KNe et `event_id` ont été
+réutilisés. Cette réponse détermine le bootstrap apparié ou indépendant.
 
 Un dossier est accepté seulement s'il contient exactement un CSV de
 disponibilité ; sinon préciser le CSV. Les configurations scientifiques sont
@@ -133,9 +118,9 @@ justifier l'optimisation complète des cuts.
 ## Vérification
 
 ```bash
-python -m py_compile analyze_kne_latitude.py kne_latitude_plateau.py
-PYTHONPATH=. python -m unittest discover -s tests -p 'test_low_high_plateau.py' -v
+python -m py_compile analyze_kne_latitude.py
+python -m unittest discover -s tests -p 'test_latitude_plateau.py' -v
 ```
 
-Ajouter `--overwrite` pour remplacer les deux PNG existants. Changer le dossier
-de sortie permet de conserver plusieurs analyses.
+Le terminal demande explicitement si les deux PNG existants doivent être
+remplacés. Changer le dossier de sortie permet de conserver plusieurs analyses.

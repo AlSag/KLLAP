@@ -1,50 +1,59 @@
 # Script inventory
 
-The repository exposes only commands that create a distinct scientific
-product. Shared calculations, data loading, plotting helpers, and terminal
-interfaces use descriptive module names and are not separate workflows.
+The repository exposes exactly eight public workflows. Each creates a distinct
+scientific product, owns an interactive terminal interface, and can be imported
+without starting a calculation.
 
-## Public commands
+## Public workflows
 
-| Command | Scientific output |
+| Script | Scientific products |
 |---|---|
-| `get_opsim_baseline.py` | OpSim fields, visits, dust, and m5 summaries |
-| `generate_kne_lightcurves.py` | Physical populations and saved light curves |
-| `build_color_envelopes.py` | Colour populations and percentile envelopes |
-| `analyze_envelope_population_convergence_fast.py` | Nested-sample convergence tables and figures |
-| `plot_colour_envelope_realizations.py` | Independent-realization and bootstrap comparisons |
-| `plot_kne_colour_isocontours.py` | Median-colour maps and iso-colour contours |
-| `run_latitude_experiment.py` | Paired latitude-bin generation and full analysis |
-| `analyze_kne_latitude.py` | Population, paired-bin, or low/high plateau products |
+| `get_opsim_baseline.py` | OpSim field/visit exports, dust, m5 tables and diagnostics |
+| `generate_kne_lightcurves.py` | KNe populations, synthetic or observed-like light curves and metadata |
+| `build_color_envelopes.py` | colour tracks, percentile envelopes and stage comparisons |
+| `analyze_envelope_population_convergence_fast.py` | nested-sample convergence tables and figures |
+| `plot_colour_envelope_realizations.py` | realization comparisons and bootstrap distributions |
+| `plot_kne_colour_isocontours.py` | parameter-space median-colour maps and iso-colour contours |
+| `analyze_kne_latitude.py` | population, paired-bin and low/high-cut latitude products |
+| `run_latitude_experiment.py` | complete paired latitude-bin generation and comparison |
 
-## Internal modules
+Every public workflow is launched as `python SCRIPT.py`. Scientific automation
+imports an explicit default-configuration function and a run function rather
+than invoking an undocumented command-line surface.
 
-- `kne_*_cli.py`: parsers, interactive menus, and validation;
-- `kne_*_core.py`, `envelope_*_convergence.py`: numerical definitions;
-- `kne_*_plots.py`: plotting implementations;
-- `kne_population_io.py`, `kne_envelope_population.py`, and
-  `kne_colour_population.py`: saved-population loading and interpolation;
-- `kne_latitude_population.py`, `kne_latitude_comparison.py`, and
-  `kne_latitude_plateau.py`: the three explicit latitude analyses dispatched
-  by `analyze_kne_latitude.py`.
+## Shared implementation
 
-The latitude modules remain separate because they answer different questions:
-one population's losses, paired disjoint-bin ratios, and stability under a
-moving low/high cut. They are implementation modules, not competing public
-commands.
+Only definitions used by more than one public workflow remain separate:
+
+- `kne_pipeline_common.py`: run formats, OpSim products, interpolation and posterior loading;
+- `kne_population_io.py`: Parquet/CSV discovery and population metadata;
+- `kne_m5.py`: m5 scenarios and depth-table discovery;
+- `kne_envelope_core.py`: envelope stages and statistical-support rules;
+- `dynamic_color_cut_common.py`: colour matching and bootstrap helpers.
+
+These files do not create standalone products and are not public commands.
+
+## Consolidated implementation
+
+The following former one-purpose modules are now explicit sections of their
+owning public scripts:
+
+- generation and OpSim interface, calculations, and figures;
+- envelope construction, convergence calculations, and figures;
+- realization and iso-colour population calculations;
+- the three Galactic-latitude analyses.
+
+In particular, `kne_latitude_population.py`, `kne_latitude_comparison.py`, and
+`kne_latitude_plateau.py` were consolidated into `analyze_kne_latitude.py`.
 
 ## Removed workflows
 
-The following optional or redundant commands and their dedicated documents
-were deliberately removed:
+Redundant or optional commands removed from the maintained pipeline include:
 
 - distance-reach estimation;
 - convergence-only replot and support-diagnostic commands;
-- colour-selected HDR parameter-space projections.
+- colour-selected HDR parameter-space projections;
+- the legacy repeated-subprocess convergence workflow.
 
-Iso-colour maps retain the required population loading and interpolation in
-`kne_colour_population.py`; no retained command imports a deleted script.
-
-Generated runs, local audit reports, numbered copies, and backup sources must
-remain untracked. A deletion is committed separately enough to remain fully
-recoverable from Git history.
+Generated runs, figures, audit snapshots, numbered copies, and backup sources
+remain untracked. Deleted source remains recoverable from Git history.

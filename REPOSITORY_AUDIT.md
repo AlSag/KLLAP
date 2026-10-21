@@ -1,5 +1,12 @@
 # Repository audit — 2026-10-14
 
+> Historical baseline: the architecture listed below describes the initial
+> audit, not the current file layout. The completed review now exposes eight
+> interactive public workflows and five shared modules, as documented in
+> [`docs/code_map.md`](docs/code_map.md). Former convergence, iso-colour, plot,
+> interface, and latitude implementation modules were consolidated into their
+> owning public scripts and removed from the current tree.
+
 ## Baseline
 
 - Git branch in the supplied snapshot: `main` at `f893c2e`.

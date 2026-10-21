@@ -1,167 +1,99 @@
 # Reviewable pipeline architecture
 
-This document separates user-facing commands, scientific calculations,
-storage transformations, and plotting code. It is intended as a review guide:
-the command-line scripts remain convenient entry points, while reusable
-modules contain operations that can be tested without launching a simulation.
+The refactoring deliberately favors eight understandable product-producing
+scripts over a large collection of thin wrappers. A reviewer can open the
+script named in a figure or table and find three labelled concerns in the same
+file:
 
-## Generation path
+1. user-friendly terminal configuration;
+2. scientific calculations and validation;
+3. figure and table generation.
+
+## Data flow
 
 ```mermaid
 flowchart TD
-    O[get_opsim_baseline.py] --> E[OpSim exports and m5 tables]
-    E --> G[generate_kne_lightcurves.py]
-    B[kne_model_backends.py] --> G
-    C[kne_pipeline_common.py] --> G
-    G --> P[Saved light curves and summary]
-    K[kne_generation_core.py] --> G
-    G --> V[kne_generation_plots.py]
+    O[get_opsim_baseline.py] --> G[generate_kne_lightcurves.py]
+    G --> E[build_color_envelopes.py]
+    G --> C[convergence and realization analyses]
+    G --> I[iso-colour maps]
+    G --> L[latitude analyses]
 ```
 
-### Public command
+The convergence branch contains
+`analyze_envelope_population_convergence_fast.py` and
+`plot_colour_envelope_realizations.py`. The parameter-space branch is
+`plot_kne_colour_isocontours.py`. Latitude products are owned by
+`analyze_kne_latitude.py`; `run_latitude_experiment.py` coordinates a complete
+paired generation-and-analysis study.
 
-`generate_kne_lightcurves.py` orchestrates one generation run and reexports
-its terminal functions from `kne_generation_cli.py`. Running it as a script
-preserves the interactive workflow.
-Importing it only defines functions and does not prompt, initialize Rubin
-bandpasses, create directories, or generate events.
+## Terminal and programmatic use
 
-The three main commands have dedicated interface modules:
+Public use is intentionally simple:
 
-| Public command | Terminal-only module |
+```bash
+python SCRIPT.py
+```
+
+There is no parallel interface made of long terminal options. For controlled
+workflow composition, each script exposes a default configuration and a run
+function receiving an `argparse.Namespace`. This is how the latitude
+orchestrator calls generation and analysis: directly in Python, without
+constructing subprocess commands.
+
+Importing a public script must not prompt, load a FIESTA model, create a run,
+or write a figure. Tests enforce this boundary.
+
+## Shared definitions
+
+Five small modules prevent duplication of scientific conventions:
+
+| Module | Shared definition |
 |---|---|
-| `get_opsim_baseline.py` | `kne_opsim_cli.py` |
-| `generate_kne_lightcurves.py` | `kne_generation_cli.py` |
-| `build_color_envelopes.py` | `kne_envelope_cli.py` |
+| `kne_pipeline_common.py` | data formats, OpSim quantities and posterior loading |
+| `kne_population_io.py` | population storage discovery and metadata selection |
+| `kne_m5.py` | depth scenarios and m5 table lookup |
+| `kne_envelope_core.py` | envelope stages, tails and bootstrap-support rules |
+| `dynamic_color_cut_common.py` | colour matching and bootstrap utilities |
 
-These modules contain parsers, menus, and validation of option combinations.
-They do not import Rubin, FIESTA, JAX, Astropy, or plotting libraries. Public
-commands reexport the historical function names so existing commands and
-external imports continue to work.
+They are libraries, not commands. Calculations used by only one workflow were
+moved back into that public script, including model backends, plots,
+convergence variants, iso-colour population transforms, and latitude methods.
 
-### Scientific backends
+## Latitude ownership
 
-`kne_model_backends.py` selects and validates the FIESTA surrogate or
-semi-analytical model. Changes here can alter the physical prediction and
-therefore require model-level numerical tests.
+`analyze_kne_latitude.py` contains three explicit scientific sections:
 
-### Deterministic generation operations
+- availability and losses inside one population;
+- paired bootstrap comparison of disjoint bins;
+- stability of a moving low/high cut.
 
-`kne_generation_core.py` contains small transformations of existing arrays or
-tables:
+`run_latitude_experiment.py` is orchestration rather than a fourth latitude
+statistic. It creates/resumes paired populations, supplies explicit Python
+configurations, validates intermediate products, and requests the paired-bin
+comparison. Its plan-only menu choice performs no writes.
 
-- construction of Milky-Way extinction columns and summaries;
-- trimming after the last LSST-like detection;
-- the inclusive synthetic m5 cut;
-- selection of the stored MW-extincted magnitude;
-- deterministic derivation of latitude-specific sky seeds.
+## Scientific invariants
 
-It deliberately does not import FIESTA, JAX, Astropy, or Rubin. Its functions
-receive their inputs explicitly and are covered by small deterministic tests.
+The refactoring preserves these review-critical rules:
 
-### Diagnostic presentation
+- interpolation uses supported positive times and never extrapolates;
+- the largest convergence sample is the reference;
+- nested samples remain reproducible;
+- m5 cuts require both colour bands;
+- bootstrap uncertainty and tail support remain distinct criteria;
+- unsupported iso-colour cells remain masked after smoothing;
+- latitude-bin populations reuse one intrinsic catalogue and event identifiers.
 
-`kne_generation_plots.py` contains only the figures produced during
-generation. It receives already calculated arrays and tables. It does not
-draw physical parameters, modify magnitudes, apply depth cuts, classify
-detections, or write scientific CSV/Parquet tables.
+## Validation
 
-The extraction was checked on representative synthetic, LSST-like, overlay,
-and numerical-floor figures; the before/after PNG arrays were identical pixel
-by pixel.
+Run:
 
-### General shared utilities
+```bash
+python -m compileall -q .
+python -m unittest discover -s tests -v
+```
 
-`kne_pipeline_common.py` contains format and discovery utilities shared by
-several pipeline stages. `kne_m5.py` owns m5-table discovery and percentile
-selection. These shared modules avoid maintaining subtly different copies of
-the same convention in multiple scripts.
-
-`get_opsim_baseline.py` follows the same import-safety rule as the generator:
-importing it does not parse terminal input, locate the Rubin database, or
-create export products. Its completed depth and revisit tables are presented
-by `kne_opsim_plots.py`; database and sky-selection code does not call
-Matplotlib directly.
-
-### Envelope construction
-
-`build_color_envelopes.py` remains the user-facing command and orchestration
-layer; its parser and menus live in `kne_envelope_cli.py`.
-`kne_envelope_core.py` owns the numerical conventions shared with the
-convergence and parameter-space analyses: MW extinction, reproducible nested
-subsets, bootstrap percentile validity, tail support, and selection of the
-widest valid symmetric envelope.
-
-`kne_population_io.py` owns discovery of Parquet shards or legacy CSV files
-and the metadata/latitude selection. It deliberately performs no colour,
-depth, bootstrap, or plotting calculation. Analysis commands can therefore
-read the saved population without importing the envelope command as their
-storage backend.
-
-`kne_envelope_population.py` owns the next scientific step: interpolation at
-fixed bin centres and construction of native colour tracks. It uses only the
-saved temporal support, never extrapolates, and does not decide m5 or
-statistical validity. Those decisions remain visible in
-`build_stage_matrix()` and `build_stage_rules()` respectively.
-
-`kne_envelope_plots.py` receives already computed tracks and envelope tables.
-It cannot select events, calculate percentiles, apply extinction, or impose an
-m5 cut. `kne_envelope_product_plots.py` assembles the complete stage,
-AT2017gfo, SN Ia, permanent-exit, and two-survey figures from those primitives.
-Neither plotting module owns interpolation or statistical validity.
-Representative figures produced before and after extraction were identical
-pixel by pixel.
-
-The builder's orchestration exposes explicit functions for argument and time-
-grid validation, paired-system dispatch, the four scientific stage masks, and
-per-bin bootstrap rule construction. A deterministic 12-event golden test
-protects the emitted rules, support diagnostics, event split, and stage
-summary while the remaining I/O orchestration is reviewed.
-
-## Analysis path
-
-| Layer | Public entry point | Internal dependencies |
-|---|---|---|
-| Envelope construction | `build_color_envelopes.py` | `kne_population_io.py`, `kne_envelope_population.py`, `kne_envelope_core.py`, `kne_envelope_product_plots.py`, `dynamic_color_cut_common.py`, `kne_m5.py` |
-| Convergence | `analyze_envelope_population_convergence_fast.py` | `kne_convergence_common.py`, `kne_envelope_core.py`, `envelope_colour_convergence.py`, `envelope_multiquantile_convergence.py` |
-| Realization comparison | `plot_colour_envelope_realizations.py` | `dynamic_color_cut_common.py`, `kne_m5.py` |
-| Iso-colour maps | `plot_kne_colour_isocontours.py` | `kne_colour_population.py`, `kne_m5.py` |
-| Latitude experiment | `run_latitude_experiment.py` | generator, unified latitude analyzer |
-| Latitude analysis | `analyze_kne_latitude.py` | `kne_latitude_population.py`, `kne_latitude_comparison.py`, `kne_latitude_plateau.py` |
-
-Named m5 scenarios (`worst_p25`, `median_p50`, and `best_p75`) are owned by
-`kne_m5.py`. Commands may choose different defaults, but they must not carry a
-private copy of the allowed names or percentile values. Likewise, the four
-photometric envelope stages are owned by `kne_envelope_core.py`.
-
-The single-load convergence command is the only convergence entry point.
-Its `last-edge` mode was compared end to end with the removed subprocess
-workflow on the deterministic fixture: all common raw and summary columns
-were identical. Shared aggregation and plotting definitions live in
-`kne_convergence_common.py`.
-
-## How to review a scientific change
-
-1. Identify the owning module in the tables above.
-2. Check whether the change affects physical draws, interpolation, extinction,
-   depth selection, statistical validity, or presentation only.
-3. Add or update a deterministic test for every changed numerical convention.
-4. Run `python -m compileall -q .` and
-   `python -m unittest discover -s tests -v`.
-5. Compare representative scientific tables before and after the change.
-6. For plotting-only changes, compare the underlying plotted values; use
-   pixel comparison when exact visual preservation is expected.
-
-## Remaining refactoring order
-
-1. Keep the golden-output fixture whenever population I/O or stage-product
-   orchestration changes.
-2. Move additional output families only when doing so gives a clear review
-   boundary and preserves the reference tables.
-3. Remove another script only after the inventory documents its replacement
-   and no command, import, test, or documentation page depends on it.
-
-Reducing line count is not an acceptance criterion by itself. A refactor is
-accepted when the public commands remain understandable and deterministic
-tests demonstrate that the scientific outputs retain the declared numerical
-conventions.
+Optional tests that require local FIESTA assets remain opt-in. Generated data
+are not test fixtures unless a small deterministic fixture is explicitly
+versioned under `tests/`.
