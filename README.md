@@ -109,9 +109,16 @@ The four scientific stages are:
 | `m5_no_mw` | yes | no |
 | `m5_with_mw` | yes | yes |
 
-Interpolation is linear in logarithmic positive time and never extrapolates.
-The saved configuration records bootstrap, tail-support, depth, and population-
-split conventions.
+The terminal interface can retain time since merger or align every KNe and
+SN Ia to a measured peak in either band of the requested colour. Peak-relative
+interpolation is linear in phase (including negative phase) and never
+extrapolates. A peak must be an interior local magnitude minimum with the
+requested prominence; endpoints are rejected, so a bright first Bu2026 sample
+is not silently treated as a resolved peak. Unresolved events are excluded and
+listed in dedicated peak-diagnostic CSV files. Merger-relative interpolation
+retains the historical logarithmic-positive-time convention. The saved
+configuration records the temporal reference, peak rule, bootstrap,
+tail-support, depth, and population-split conventions.
 
 ### 4. Measure convergence
 

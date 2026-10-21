@@ -72,6 +72,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from scipy.signal import find_peaks
 
 from dynamic_color_cut_common import (
     assign_event_splits,
@@ -171,8 +172,21 @@ def draw_envelope(ax: plt.Axes, rules: pd.DataFrame) -> None:
         ax.plot(x, [row.color_median] * 2, color="#d55e00", lw=1.25)
 
 
-def format_axes(ax: plt.Axes, pair: str, t_min: float, t_max: float) -> None:
-    ax.set_xlabel(r"$t-t_{\rm merger}$ [days]")
+def time_axis_label(time_reference_mode: str, peak_reference_band: str | None) -> str:
+    if time_reference_mode == "band_peak":
+        return rf"$t-t_{{\rm peak,{peak_reference_band}}}$ [days]"
+    return r"$t-t_{\rm merger}$ [days]"
+
+
+def format_axes(
+    ax: plt.Axes,
+    pair: str,
+    t_min: float,
+    t_max: float,
+    time_reference_mode: str = "merger",
+    peak_reference_band: str | None = None,
+) -> None:
+    ax.set_xlabel(time_axis_label(time_reference_mode, peak_reference_band))
     ax.set_ylabel(f"{pair} [mag]")
     ax.set_xlim(t_min, t_max)
     ax.grid(alpha=0.18)
@@ -185,7 +199,15 @@ def format_snia_axes(
     t_max: float,
     comparison: bool,
     time_reference: str,
+    time_reference_mode: str = "merger",
+    peak_reference_band: str | None = None,
 ) -> None:
+    if time_reference_mode == "band_peak":
+        ax.set_xlabel(time_axis_label(time_reference_mode, peak_reference_band))
+        ax.set_ylabel(f"{pair} [mag]")
+        ax.set_xlim(t_min, t_max)
+        ax.grid(alpha=0.18)
+        return
     snia_reference = (
         r"$t-t_{\rm first\ observation}$"
         if time_reference == "first_observation"
@@ -311,12 +333,16 @@ def save_snia_population_plots(
     rules_all: pd.DataFrame,
     rules_consecutive: pd.DataFrame,
     time_reference: str,
+    time_reference_mode: str = "merger",
+    peak_reference_band: str | None = None,
 ) -> None:
     fig, ax = plt.subplots(figsize=(9.2, 5.7), constrained_layout=True)
     draw_population_style(ax, times, colours, "#d97706", 0.025, 0.20)
     format_snia_axes(
         ax, pair, t_min, t_max, comparison=False,
         time_reference=time_reference,
+        time_reference_mode=time_reference_mode,
+        peak_reference_band=peak_reference_band,
     )
     limits = comparison_ylim(colours)
     if limits is not None:
@@ -340,6 +366,8 @@ def save_snia_population_plots(
         format_snia_axes(
             ax, pair, t_min, t_max, comparison=False,
             time_reference=time_reference,
+            time_reference_mode=time_reference_mode,
+            peak_reference_band=peak_reference_band,
         )
         limits = comparison_ylim(colours, rules)
         if limits is not None:
@@ -368,6 +396,8 @@ def save_kne_snia_overlay_plots(
     overlap: pd.DataFrame,
     envelope_name: str,
     time_reference: str,
+    time_reference_mode: str = "merger",
+    peak_reference_band: str | None = None,
 ) -> None:
     for show_population, stem in (
         (False, "KNe_SNIa_envelopes"),
@@ -391,6 +421,8 @@ def save_kne_snia_overlay_plots(
         format_snia_axes(
             ax, pair, t_min, t_max, comparison=True,
             time_reference=time_reference,
+            time_reference_mode=time_reference_mode,
+            peak_reference_band=peak_reference_band,
         )
         limits = comparison_ylim(
             kne_colours if show_population else [],
@@ -650,6 +682,8 @@ def save_stage_plots(
     coloured_samples: dict[int, np.ndarray],
     colour_by_event_index: dict[int, str],
     event_ids: list[str],
+    time_reference_mode: str = "merger",
+    peak_reference_band: str | None = None,
 ) -> None:
     specifications = [
         ("complete_population_unbinned.png", True, None),
@@ -678,7 +712,10 @@ def save_stage_plots(
             draw_population(ax, population_times, population_colors)
         if rules is not None and not rules.empty:
             draw_envelope(ax, rules)
-        format_axes(ax, pair, t_min, t_max)
+        format_axes(
+            ax, pair, t_min, t_max,
+            time_reference_mode, peak_reference_band,
+        )
         if len(flattened_colors):
             low, high = np.nanpercentile(flattened_colors, [0.05, 99.95])
             if finite_rule_colors.size:
@@ -732,7 +769,10 @@ def save_stage_plots(
             )
             if rules is not None and not rules.empty:
                 draw_envelope(ax, rules)
-            format_axes(ax, pair, t_min, t_max)
+            format_axes(
+                ax, pair, t_min, t_max,
+                time_reference_mode, peak_reference_band,
+            )
             if len(flattened_colors):
                 low, high = np.nanpercentile(flattened_colors, [0.05, 99.95])
                 if finite_rule_colors.size:
@@ -767,6 +807,8 @@ def save_dual_system_comparison_plots(
     t_max: float,
     at2017gfo_enabled: bool,
     systems: tuple[str, str] = ("lsst", "ps1"),
+    time_reference_mode: str = "merger",
+    peak_reference_band: str | None = None,
 ) -> None:
     """Overlay two survey envelopes built from identical physical events.
 
@@ -847,7 +889,10 @@ def save_dual_system_comparison_plots(
                         ))
                         color_arrays.append(at_points["color"].to_numpy(float))
 
-            format_axes(ax, pair, t_min, t_max)
+            format_axes(
+                ax, pair, t_min, t_max,
+                time_reference_mode, peak_reference_band,
+            )
             if color_arrays:
                 values = np.concatenate(color_arrays)
                 values = values[np.isfinite(values)]
@@ -893,6 +938,122 @@ class InterpolatedPopulation:
     native_colours: dict[str, list[np.ndarray]]
     selection_system: str
     missing_event_ids: list[str]
+    peak_diagnostics: pd.DataFrame
+
+
+@dataclass(frozen=True)
+class PeakEstimate:
+    """Result of an interior, prominence-tested light-curve peak search."""
+
+    status: str
+    time_days: float = np.nan
+    discrete_time_days: float = np.nan
+    magnitude: float = np.nan
+    prominence_mag: float = np.nan
+    first_point_is_brightest: bool = False
+
+    @property
+    def valid(self) -> bool:
+        return self.status.startswith("valid_")
+
+
+def estimate_interior_peak_time(
+    times: np.ndarray,
+    magnitudes: np.ndarray,
+    minimum_prominence_mag: float,
+) -> PeakEstimate:
+    """Locate the most prominent interior flux maximum.
+
+    Magnitude minima are flux maxima. End points are deliberately never peak
+    candidates, which prevents the first Bu2026 sample from being mistaken for
+    a measured maximum. The selected discrete minimum is refined with a local
+    three-point quadratic fit when that fit is convex and remains bracketed by
+    its two neighbours.
+    """
+    samples = pd.DataFrame({"time": times, "magnitude": magnitudes})
+    samples = samples.loc[
+        np.isfinite(samples["time"]) & np.isfinite(samples["magnitude"])
+    ]
+    samples = (
+        samples.groupby("time", as_index=False)["magnitude"]
+        .median().sort_values("time")
+    )
+    if len(samples) < 3:
+        return PeakEstimate(status="insufficient_points")
+    x = samples["time"].to_numpy(float)
+    y = samples["magnitude"].to_numpy(float)
+    first_is_brightest = bool(np.isclose(y[0], np.min(y), atol=1e-12))
+    candidates, properties = find_peaks(
+        -y, prominence=float(minimum_prominence_mag)
+    )
+    if candidates.size == 0:
+        any_interior, _ = find_peaks(-y)
+        status = "below_minimum_prominence" if any_interior.size else "no_interior_peak"
+        return PeakEstimate(
+            status=status,
+            first_point_is_brightest=first_is_brightest,
+        )
+
+    prominences = properties["prominences"]
+    # Greatest prominence first, then brightest magnitude, then earliest time.
+    order = np.lexsort((x[candidates], y[candidates], -prominences))
+    chosen_position = int(order[0])
+    index = int(candidates[chosen_position])
+    discrete_time = float(x[index])
+    peak_time = discrete_time
+    status = "valid_discrete"
+    local_x = x[index - 1:index + 2]
+    local_y = y[index - 1:index + 2]
+    try:
+        local_phase = local_x - discrete_time
+        a, b, _ = np.polyfit(local_phase, local_y, 2)
+        vertex = (
+            float(discrete_time - b / (2.0 * a)) if a > 0 else np.nan
+        )
+        if np.isfinite(vertex) and local_x[0] <= vertex <= local_x[-1]:
+            peak_time = vertex
+            status = "valid_quadratic"
+    except (FloatingPointError, np.linalg.LinAlgError, ValueError):
+        pass
+    return PeakEstimate(
+        status=status,
+        time_days=peak_time,
+        discrete_time_days=discrete_time,
+        magnitude=float(y[index]),
+        prominence_mag=float(prominences[chosen_position]),
+        first_point_is_brightest=first_is_brightest,
+    )
+
+
+def interpolate_band_linear(
+    curve: pd.DataFrame,
+    band: str,
+    centres: np.ndarray,
+    magnitude_column: str = "magnitude",
+) -> np.ndarray:
+    """Interpolate a band in linear phase, including negative phases."""
+    subset = curve.loc[curve["band"] == band, ["t_days", magnitude_column]].copy()
+    subset["t_days"] = pd.to_numeric(subset["t_days"], errors="coerce")
+    subset[magnitude_column] = pd.to_numeric(subset[magnitude_column], errors="coerce")
+    subset = subset.loc[
+        np.isfinite(subset["t_days"]) & np.isfinite(subset[magnitude_column])
+    ]
+    subset = (
+        subset.groupby("t_days", as_index=False)[magnitude_column]
+        .median().sort_values("t_days")
+    )
+    result = np.full(len(centres), np.nan, dtype=float)
+    if subset.empty:
+        return result
+    x = subset["t_days"].to_numpy(float)
+    y = subset[magnitude_column].to_numpy(float)
+    supported = (centres >= x.min()) & (centres <= x.max())
+    if len(x) == 1:
+        supported &= np.isclose(centres, x[0], atol=1e-10)
+        result[supported] = y[0]
+    else:
+        result[supported] = np.interp(centres[supported], x, y)
+    return result
 
 
 def _normalise_lightcurve(lightcurve: pd.DataFrame) -> pd.DataFrame:
@@ -920,6 +1081,9 @@ def interpolate_saved_population(
     t_min: float,
     t_max: float,
     photometric_system: str,
+    time_reference_mode: str = "merger",
+    peak_reference_band: str | None = None,
+    peak_min_prominence_mag: float = 0.05,
 ) -> InterpolatedPopulation:
     """Read each selected event once and construct fixed-centre matrices."""
     event_ids = metadata["event_id"].tolist()
@@ -932,8 +1096,15 @@ def interpolate_saved_population(
     selection_intrinsic_band2 = np.full_like(intrinsic_band1, np.nan)
     selection_extincted_band1 = np.full_like(intrinsic_band1, np.nan)
     selection_extincted_band2 = np.full_like(intrinsic_band1, np.nan)
-    native_times = {stage: [None] * n_events for stage in STAGES}
-    native_colours = {stage: [None] * n_events for stage in STAGES}
+    native_times = {
+        stage: [np.array([], dtype=np.float32) for _ in range(n_events)]
+        for stage in STAGES
+    }
+    native_colours = {
+        stage: [np.array([], dtype=np.float32) for _ in range(n_events)]
+        for stage in STAGES
+    }
+    peak_rows: list[dict[str, object]] = []
 
     selection_system = "lsst" if photometric_system == "ps1" else photometric_system
     requested_systems = tuple(dict.fromkeys((photometric_system, selection_system)))
@@ -975,19 +1146,49 @@ def interpolate_saved_population(
             lightcurve["photometric_system"] == selection_system
         ].copy()
 
+        if time_reference_mode == "band_peak":
+            peak_curve = target_curve.loc[
+                target_curve["band"] == peak_reference_band
+            ]
+            peak = estimate_interior_peak_time(
+                peak_curve["t_days"].to_numpy(float),
+                peak_curve["magnitude"].to_numpy(float),
+                peak_min_prominence_mag,
+            )
+            peak_rows.append({
+                "event_id": event_id,
+                "reference_band": peak_reference_band,
+                "status": peak.status,
+                "peak_time_days_since_merger": peak.time_days,
+                "discrete_peak_time_days_since_merger": peak.discrete_time_days,
+                "peak_magnitude_saved": peak.magnitude,
+                "prominence_mag": peak.prominence_mag,
+                "minimum_prominence_mag": peak_min_prominence_mag,
+                "first_saved_point_is_brightest": peak.first_point_is_brightest,
+                "used_in_peak_relative_envelope": peak.valid,
+            })
+            if not peak.valid:
+                continue
+            target_curve["t_days"] -= peak.time_days
+            selection_curve["t_days"] -= peak.time_days
+
         mw1 = event_extinction_mag(metadata_row, photometric_system, band1)
         mw2 = event_extinction_mag(metadata_row, photometric_system, band2)
         selection_mw1 = event_extinction_mag(metadata_row, selection_system, band1)
         selection_mw2 = event_extinction_mag(metadata_row, selection_system, band2)
 
-        centre_ext1 = interpolate_band(target_curve, band1, centres)
-        centre_ext2 = interpolate_band(target_curve, band2, centres)
+        interpolate = (
+            interpolate_band_linear
+            if time_reference_mode == "band_peak" else interpolate_band
+        )
+        centre_ext1 = interpolate(target_curve, band1, centres)
+        centre_ext2 = interpolate(target_curve, band2, centres)
         extincted_band1[matrix_index] = centre_ext1
         extincted_band2[matrix_index] = centre_ext2
         intrinsic_band1[matrix_index] = centre_ext1 - mw1
         intrinsic_band2[matrix_index] = centre_ext2 - mw2
-        centre_selection_ext1 = interpolate_band(selection_curve, band1, centres)
-        centre_selection_ext2 = interpolate_band(selection_curve, band2, centres)
+        centre_selection_ext1 = interpolate(selection_curve, band1, centres)
+        centre_selection_ext2 = interpolate(selection_curve, band2, centres)
         selection_extincted_band1[matrix_index] = centre_selection_ext1
         selection_extincted_band2[matrix_index] = centre_selection_ext2
         selection_intrinsic_band1[matrix_index] = centre_selection_ext1 - selection_mw1
@@ -1031,6 +1232,19 @@ def interpolate_saved_population(
             for stage in STAGES:
                 native_times[stage][matrix_index] = empty.copy()
                 native_colours[stage][matrix_index] = empty.copy()
+        if time_reference_mode == "band_peak":
+            peak_rows.extend({
+                "event_id": event_id,
+                "reference_band": peak_reference_band,
+                "status": "missing_requested_band_rows",
+                "peak_time_days_since_merger": np.nan,
+                "discrete_peak_time_days_since_merger": np.nan,
+                "peak_magnitude_saved": np.nan,
+                "prominence_mag": np.nan,
+                "minimum_prominence_mag": peak_min_prominence_mag,
+                "first_saved_point_is_brightest": False,
+                "used_in_peak_relative_envelope": False,
+            } for event_id in missing_event_ids)
     print(
         f"Finished reading: {len(processed):,} events with saved {band1}-{band2} "
         f"rows; {len(missing_event_ids):,} colour-unavailable events."
@@ -1040,6 +1254,7 @@ def interpolate_saved_population(
         selection_intrinsic_band1, selection_intrinsic_band2,
         selection_extincted_band1, selection_extincted_band2,
         native_times, native_colours, selection_system, missing_event_ids,
+        pd.DataFrame(peak_rows),
     )
 
 # ============================================================================
@@ -1066,6 +1281,8 @@ def default_configuration() -> argparse.Namespace:
     return argparse.Namespace(
         run_dir=Path("."), color_pair="g-r", photometric_system="both",
         t_min=0.4, t_max=26.0, bin_width=0.4,
+        time_reference_mode="merger", peak_reference_band=None,
+        peak_min_prominence_mag=0.05,
         tail_percentiles="0.02,0.05,0.1,0.25,0.5,0.53,1,2.5,5,10,16,20,25,30,35,40,42,44,45,46,47,48,49,50",
         n_boot=1000, bootstrap_threshold_mag=0.1, minimum_events=30,
         minimum_tail_events=20.0, train_fraction=0.70,
@@ -1108,6 +1325,35 @@ def interactive(args: argparse.Namespace) -> argparse.Namespace:
         ],
         args.photometric_system,
     )
+    args.time_reference_mode = prompt_choice(
+        "Temporal reference for the colour envelopes",
+        [
+            ("merger", "Time since merger (current KNe convention)"),
+            (
+                "band_peak",
+                "Time relative to an interior peak measured in one colour band",
+            ),
+        ],
+        args.time_reference_mode,
+    )
+    if args.time_reference_mode == "band_peak":
+        peak_bands = [
+            piece.strip().lower()
+            for piece in args.color_pair.replace("_", "-").split("-")
+            if piece.strip()
+        ]
+        if len(peak_bands) != 2:
+            raise ValueError("Define a valid colour pair before choosing its peak band")
+        default_peak_band = args.peak_reference_band or peak_bands[0]
+        args.peak_reference_band = prompt_choice(
+            "Band defining t_peak for both KNe and SNe Ia",
+            [(band, f"Use the {band}-band light-curve peak") for band in peak_bands],
+            default_peak_band,
+        )
+        args.peak_min_prominence_mag = float(prompt_text(
+            "Minimum interior-peak prominence [mag]",
+            str(args.peak_min_prominence_mag),
+        ))
     args.population_latitude_selection = prompt_choice(
         "Galactic-latitude selection for the KNe population",
         [
@@ -1122,8 +1368,18 @@ def interactive(args: argparse.Namespace) -> argparse.Namespace:
             "Absolute Galactic-latitude threshold |b| [deg]",
             str(args.latitude_threshold_deg),
         ))
-    args.t_min = float(prompt_text("First temporal-bin lower edge [days]", str(args.t_min)))
-    args.t_max = float(prompt_text("Last temporal-bin upper edge [days]", str(args.t_max)))
+    first_edge_label = (
+        "First peak-relative bin lower edge [days; negative allowed]"
+        if args.time_reference_mode == "band_peak"
+        else "First temporal-bin lower edge [days]"
+    )
+    last_edge_label = (
+        "Last peak-relative bin upper edge [days]"
+        if args.time_reference_mode == "band_peak"
+        else "Last temporal-bin upper edge [days]"
+    )
+    args.t_min = float(prompt_text(first_edge_label, str(args.t_min)))
+    args.t_max = float(prompt_text(last_edge_label, str(args.t_max)))
     args.bin_width = float(prompt_text("Fixed bin width [days]", str(args.bin_width)))
     args.n_boot = int(prompt_text("Bootstrap repetitions", str(args.n_boot)))
     args.minimum_tail_events = float(prompt_text(
@@ -1322,14 +1578,20 @@ def interactive(args: argparse.Namespace) -> argparse.Namespace:
             ],
             args.snia_input_mw_mode,
         )
-        args.snia_time_reference = prompt_choice(
-            "SN Ia time reference",
-            [
-                ("first_observation", "First available time of each SN Ia"),
-                ("peak", "SALT2 t0 (time of maximum light)"),
-            ],
-            args.snia_time_reference,
-        )
+        if args.time_reference_mode == "merger":
+            args.snia_time_reference = prompt_choice(
+                "SN Ia time reference",
+                [
+                    ("first_observation", "First available time of each SN Ia"),
+                    ("peak", "SALT2 t0 (time of maximum light)"),
+                ],
+                args.snia_time_reference,
+            )
+        else:
+            print(
+                f"SNe Ia will use their measured interior {args.peak_reference_band}-band "
+                "peak, with the same rule as the KNe."
+            )
         args.snia_position_seed = int(prompt_text(
             "SN Ia to KNe sky-position assignment seed",
             str(args.snia_position_seed),
@@ -1390,6 +1652,13 @@ def population_latitude_tag(args: argparse.Namespace) -> str:
     threshold = f"{args.latitude_threshold_deg:g}".replace(".", "p")
     relation = "ge" if mode == "high" else "lt"
     return f"absb_{relation}_{threshold}deg"
+
+
+def time_reference_tag(args: argparse.Namespace) -> str:
+    """Filesystem-safe temporal-reference tag."""
+    if args.time_reference_mode == "band_peak":
+        return f"_peak_{args.peak_reference_band}"
+    return ""
 
 
 def load_m5(
@@ -1684,20 +1953,20 @@ def interpolate_snia_band(
 ) -> np.ndarray:
     """Interpolate one SN Ia band without extrapolation.
 
-    Peak-relative phases retain the historical log10-time interpolation on
-    strictly positive phases. First-observation phases include t=0 and use
-    linear time, since log10(0) is undefined.
+    Measured band-peak and first-observation phases use linear time. The legacy
+    SALT2-t0 mode retains log10 interpolation on strictly positive phases.
     """
     subset = curve.loc[curve["band"] == band, ["t_days", magnitude_column]].copy()
     subset["t_days"] = pd.to_numeric(subset["t_days"], errors="coerce")
     subset[magnitude_column] = pd.to_numeric(
         subset[magnitude_column], errors="coerce"
     )
-    valid_time = (
-        subset["t_days"] >= 0
-        if time_reference == "first_observation"
-        else subset["t_days"] > 0
-    )
+    if time_reference == "first_observation":
+        valid_time = subset["t_days"] >= 0
+    elif time_reference == "band_peak":
+        valid_time = np.ones(len(subset), dtype=bool)
+    else:
+        valid_time = subset["t_days"] > 0
     subset = subset.loc[
         np.isfinite(subset["t_days"])
         & valid_time
@@ -1717,7 +1986,7 @@ def interpolate_snia_band(
     if len(times) == 1:
         supported &= np.isclose(centres, times[0], atol=1e-10)
         result[supported] = values[0]
-    elif time_reference == "first_observation":
+    elif time_reference in {"first_observation", "band_peak"}:
         result[supported] = np.interp(centres[supported], times, values)
     else:
         result[supported] = np.interp(
@@ -1742,10 +2011,11 @@ def prepare_snia_population(
     if not path.exists():
         raise FileNotFoundError(f"SN Ia parquet not found: {path}")
 
-    requested_columns = [
+    peak_magnitude_column = "mag_perfect"
+    requested_columns = list(dict.fromkeys([
         "sn_id", "mjd", "band", args.snia_magnitude_column, "magerr",
-        "redshift", "t0", "ra", "dec",
-    ]
+        peak_magnitude_column, "redshift", "t0", "ra", "dec",
+    ]))
     try:
         measurements = pd.read_parquet(
             path,
@@ -1765,13 +2035,13 @@ def prepare_snia_population(
 
     measurements["band"] = measurements["band"].astype(str).str.strip().str.lower()
     measurements = measurements.loc[measurements["band"].isin((band1, band2))].copy()
-    for column in (
+    for column in dict.fromkeys((
         "sn_id", "mjd", args.snia_magnitude_column, "magerr", "redshift",
-        "t0", "ra", "dec",
-    ):
+        peak_magnitude_column, "t0", "ra", "dec",
+    )):
         measurements[column] = pd.to_numeric(measurements[column], errors="coerce")
     required_columns = ["sn_id", "mjd", "band", args.snia_magnitude_column]
-    if args.snia_time_reference == "peak":
+    if args.time_reference_mode == "merger" and args.snia_time_reference == "peak":
         required_columns.append("t0")
     measurements = measurements.dropna(subset=required_columns)
     measurements["sn_id"] = measurements["sn_id"].astype(np.int64)
@@ -1792,13 +2062,45 @@ def prepare_snia_population(
     measurements = measurements.merge(
         mapping[mapping_columns], on="sn_id", how="left", validate="many_to_one"
     )
-    if args.snia_time_reference == "first_observation":
+    peak_diagnostics = pd.DataFrame()
+    effective_time_reference = args.snia_time_reference
+    if args.time_reference_mode == "band_peak":
+        effective_time_reference = "band_peak"
+        peak_rows = []
+        reference_by_sn: dict[int, float] = {}
+        for sn_id, curve in measurements.groupby("sn_id", sort=False):
+            reference_curve = curve.loc[curve["band"] == args.peak_reference_band]
+            peak = estimate_interior_peak_time(
+                reference_curve["mjd"].to_numpy(float),
+                reference_curve[peak_magnitude_column].to_numpy(float),
+                args.peak_min_prominence_mag,
+            )
+            reference_by_sn[int(sn_id)] = peak.time_days if peak.valid else np.nan
+            peak_rows.append({
+                "event_id": f"snia_{int(sn_id):06d}",
+                "sn_id": int(sn_id),
+                "reference_band": args.peak_reference_band,
+                "status": peak.status,
+                "peak_mjd": peak.time_days,
+                "discrete_peak_mjd": peak.discrete_time_days,
+                "peak_magnitude_mag_perfect": peak.magnitude,
+                "prominence_mag": peak.prominence_mag,
+                "minimum_prominence_mag": args.peak_min_prominence_mag,
+                "first_saved_point_is_brightest": peak.first_point_is_brightest,
+                "used_in_peak_relative_envelope": peak.valid,
+            })
+        peak_diagnostics = pd.DataFrame(peak_rows)
+        peak_diagnostics.to_csv(output / "snia_peak_time_diagnostics.csv", index=False)
+        measurements["snia_time_reference_mjd"] = measurements["sn_id"].map(
+            reference_by_sn
+        )
+    elif args.snia_time_reference == "first_observation":
         measurements["snia_time_reference_mjd"] = measurements.groupby(
             "sn_id"
         )["mjd"].transform("min")
     else:
         measurements["snia_time_reference_mjd"] = measurements["t0"]
-    measurements["snia_time_reference"] = args.snia_time_reference
+    measurements["snia_time_reference"] = effective_time_reference
     measurements["t_days"] = (
         measurements["mjd"] - measurements["snia_time_reference_mjd"]
     )
@@ -1859,11 +2161,11 @@ def prepare_snia_population(
         index = event_position[event_id]
         corrected1 = interpolate_snia_band(
             curve, band1, centres, "mag_mw_corrected",
-            args.snia_time_reference,
+            effective_time_reference,
         )
         corrected2 = interpolate_snia_band(
             curve, band2, centres, "mag_mw_corrected",
-            args.snia_time_reference,
+            effective_time_reference,
         )
         corrected_colour = corrected1 - corrected2
         extinction1 = float(curve[f"A_lsst_{band1}_mw"].iloc[0])
@@ -1943,8 +2245,16 @@ def prepare_snia_population(
     print(
         f"SN Ia: {n_events:,} objects projected onto KNe sky positions; "
         f"magnitude={args.snia_magnitude_column}; input MW mode="
-        f"{args.snia_input_mw_mode}; time reference={args.snia_time_reference}"
+        f"{args.snia_input_mw_mode}; time reference={effective_time_reference}"
     )
+    if args.time_reference_mode == "band_peak":
+        n_resolved = int(
+            peak_diagnostics["used_in_peak_relative_envelope"].sum()
+        ) if not peak_diagnostics.empty else 0
+        print(
+            f"SN Ia peak alignment: {n_resolved:,}/{n_events:,} objects have a "
+            f"resolved interior {args.peak_reference_band}-band peak."
+        )
     return {
         "input_path": path,
         "adapted_path": adapted_path,
@@ -1960,7 +2270,8 @@ def prepare_snia_population(
         "population_colors": population_colors,
         "mapping": mapping,
         "m5_thresholds": {band1: float(m5[band1]), band2: float(m5[band2])},
-        "time_reference": args.snia_time_reference,
+        "time_reference": effective_time_reference,
+        "peak_diagnostics": peak_diagnostics,
     }
 
 
@@ -2213,7 +2524,9 @@ def save_snia_comparison_outputs(
             np.random.default_rng(args.seed + 1000 * seed_offset),
             f"snia_{convention}",
             (
-                "linear_in_time_since_first_observation"
+                "linear_in_phase_relative_to_measured_band_peak"
+                if args.time_reference_mode == "band_peak"
+                else "linear_in_time_since_first_observation"
                 if args.snia_time_reference == "first_observation"
                 else "linear_in_log10_positive_phase_since_salt2_t0"
             ),
@@ -2227,7 +2540,9 @@ def save_snia_comparison_outputs(
     save_snia_population_plots(
         output, pair, args.t_min, args.t_max,
         snia_times, snia_colours, rules_all, rules_consecutive,
-        args.snia_time_reference,
+        snia_population["time_reference"],
+        args.time_reference_mode,
+        args.peak_reference_band,
     )
 
     summaries = []
@@ -2245,7 +2560,9 @@ def save_snia_comparison_outputs(
             output, pair, args.t_min, args.t_max,
             kne_times, kne_colours, snia_times, snia_colours,
             kne_rules, snia_rules, overlap, envelope_name,
-            args.snia_time_reference,
+            snia_population["time_reference"],
+            args.time_reference_mode,
+            args.peak_reference_band,
         )
         summaries.append(summarize_overlap(overlap, convention, envelope_name))
     last_edge = (
@@ -2813,6 +3130,21 @@ def validate_analysis_arguments(
 
     if args.bin_width <= 0 or args.t_max <= args.t_min:
         raise ValueError("Require bin-width > 0 and t-max > t-min")
+    if args.time_reference_mode not in {"merger", "band_peak"}:
+        raise ValueError("time-reference-mode must be merger or band_peak")
+    if args.time_reference_mode == "band_peak":
+        if args.peak_reference_band not in {band1, band2}:
+            raise ValueError(
+                "The peak-reference band must be one of the two colour bands "
+                f"({band1} or {band2})"
+            )
+        if args.peak_min_prominence_mag < 0:
+            raise ValueError("peak-min-prominence-mag must be non-negative")
+        if args.at2017gfo_file is not None:
+            raise ValueError(
+                "AT2017gfo comparison is currently defined relative to merger. "
+                "Disable it when using the measured band-peak reference."
+            )
     if args.minimum_final_outside_bins < 1:
         raise ValueError("minimum-final-outside-bins must be at least 1")
     if args.max_outlier_table_events < 1:
@@ -2869,6 +3201,7 @@ def dispatch_dual_system_analysis(
         / (
             f"four_stage_{band1}_{band2}_envelopes_"
             f"{args.m5_scenario}_{comparison_slug}_{population_latitude_tag(args)}"
+            f"{time_reference_tag(args)}"
         )
     )
     output.mkdir(parents=True, exist_ok=True)
@@ -2891,6 +3224,8 @@ def dispatch_dual_system_analysis(
         args.t_max,
         args.at2017gfo_file is not None and "ps1" in systems,
         systems=systems,
+        time_reference_mode=args.time_reference_mode,
+        peak_reference_band=args.peak_reference_band,
     )
     (output / f"{comparison_label.replace('+', '_')}_comparison_configuration.json").write_text(
         json.dumps(
@@ -3030,7 +3365,11 @@ def build_stage_rules(
                 "bootstrap_threshold_mag": args.bootstrap_threshold_mag,
                 "minimum_tail_events": args.minimum_tail_events,
                 "target_interpolation_time_days": centre,
-                "interpolation_method": "linear_in_log10_time at fixed bin centre",
+                "interpolation_method": (
+                    "linear_in_phase_relative_to_measured_band_peak"
+                    if args.time_reference_mode == "band_peak"
+                    else "linear_in_log10_time at fixed bin centre"
+                ),
             })
     rules_all = pd.DataFrame(rules)
     if rules_all.empty:
@@ -3108,7 +3447,7 @@ def _run_single_system(
         / (
             f"four_stage_{band1}_{band2}_envelopes_"
             f"{args.m5_scenario}_{args.photometric_system}_"
-            f"{population_latitude_tag(args)}"
+            f"{population_latitude_tag(args)}{time_reference_tag(args)}"
         )
     )
     output.mkdir(parents=True, exist_ok=True)
@@ -3199,6 +3538,8 @@ def _run_single_system(
     population = interpolate_saved_population(
         synthetic_source, metadata, band1, band2, centres,
         args.t_min, args.t_max, args.photometric_system,
+        args.time_reference_mode, args.peak_reference_band,
+        args.peak_min_prominence_mag,
     )
     int1 = population.intrinsic_band1
     int2 = population.intrinsic_band2
@@ -3212,6 +3553,17 @@ def _run_single_system(
     population_colors = population.native_colours
     selection_system = population.selection_system
     missing_event_ids = population.missing_event_ids
+    if args.time_reference_mode == "band_peak":
+        population.peak_diagnostics.to_csv(
+            output / "kne_peak_time_diagnostics.csv", index=False
+        )
+        n_valid_peaks = int(
+            population.peak_diagnostics["used_in_peak_relative_envelope"].sum()
+        ) if not population.peak_diagnostics.empty else 0
+        print(
+            f"KNe peak alignment: {n_valid_peaks:,}/{n_events:,} events have a "
+            f"resolved interior {args.peak_reference_band}-band peak."
+        )
     if missing_event_ids:
         missing_table = metadata.loc[
             metadata["event_id"].isin(missing_event_ids)
@@ -3379,6 +3731,8 @@ def _run_single_system(
             coloured_samples,
             colour_by_event_index,
             event_ids,
+            args.time_reference_mode,
+            args.peak_reference_band,
         )
         snia_convention = next(
             (
@@ -3456,6 +3810,25 @@ def _run_single_system(
         ),
         "numerical_support": "inherited exactly from generate_kne_lightcurves.py",
         "color_pair": pair,
+        "time_reference_mode": args.time_reference_mode,
+        "peak_reference_band": (
+            args.peak_reference_band
+            if args.time_reference_mode == "band_peak" else None
+        ),
+        "peak_minimum_prominence_mag": (
+            args.peak_min_prominence_mag
+            if args.time_reference_mode == "band_peak" else None
+        ),
+        "peak_definition": (
+            "most prominent interior local magnitude minimum; endpoints are "
+            "excluded; a bracketed convex three-point quadratic refines time"
+            if args.time_reference_mode == "band_peak" else None
+        ),
+        "unresolved_peak_policy": (
+            "exclude event from every peak-relative envelope and record it in "
+            "kne_peak_time_diagnostics.csv"
+            if args.time_reference_mode == "band_peak" else None
+        ),
         "population_latitude_selection_mode": (
             args.population_latitude_selection
         ),
@@ -3588,11 +3961,16 @@ def _run_single_system(
             "magnitude_column": args.snia_magnitude_column,
             "input_mw_mode": args.snia_input_mw_mode,
             "time_reference": (
-                "first available MJD per SN Ia in either requested colour band"
+                f"measured interior {args.peak_reference_band}-band peak"
+                if args.time_reference_mode == "band_peak"
+                else "first available MJD per SN Ia in either requested colour band"
                 if args.snia_time_reference == "first_observation"
                 else "SALT2 t0 (time of maximum light)"
             ),
-            "KNe_time_reference": "merger",
+            "KNe_time_reference": (
+                f"measured interior {args.peak_reference_band}-band peak"
+                if args.time_reference_mode == "band_peak" else "merger"
+            ),
             "position_projection": (
                 "one deterministic KNe position per SN Ia; without replacement "
                 "when enough KNe positions are available"
@@ -3605,6 +3983,15 @@ def _run_single_system(
             "n_objects_with_both_requested_bands": (
                 int(snia_population["n_objects_with_both_requested_bands"])
                 if snia_population else 0
+            ),
+            "n_objects_with_resolved_peak": (
+                int(
+                    snia_population["peak_diagnostics"]
+                    ["used_in_peak_relative_envelope"].sum()
+                )
+                if snia_population
+                and not snia_population["peak_diagnostics"].empty
+                else None
             ),
             "adapted_parquet": (
                 str(snia_population.get("adapted_path"))
