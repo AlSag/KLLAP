@@ -6,7 +6,7 @@ sample sizes are deterministic prefixes of the same realization
 (``event_id < N``), so changes with N cannot be caused by a second draw.
 
 The script reads the realization manifest written by
-``generate_kne_lightcurves.py --n-realizations ...`` and produces, for every
+the interactive multi-realization mode of ``generate_kne_lightcurves.py`` and produces, for every
 requested colour pair, one panel per sample size. At each realization and
 target time the marker is p50 and the asymmetric error bar spans p16--p84.
 
@@ -16,14 +16,9 @@ of events in the p16/p84 tails.
 An optional event bootstrap also checks that the 68% half-width of each
 percentile estimator (p16, p50 and p84) is below a requested threshold.
 
-Example
--------
-python plot_colour_envelope_realizations.py \
-  --manifest runs/remi_run_realizations_master_seed_1234/realizations.csv \
-  --sample-sizes 1000,10000 \
-  --times 0.5,1.0,1.5,2.0 \
-  --colour-pairs g-r \
-  --photometric-system lsst
+Usage
+-----
+Run ``python plot_colour_envelope_realizations.py`` and answer the terminal questions.
 """
 
 from __future__ import annotations
@@ -45,6 +40,11 @@ from kne_m5 import load_m5_percentile
 DEFAULT_TIME_COLOURS = ["#d62728", "#ff7f0e", "#1f77b4", "#111111"]
 
 
+# -----------------------------------------------------------------------------
+# USER-FRIENDLY TERMINAL INTERFACE AND INPUT VALIDATION
+# -----------------------------------------------------------------------------
+
+
 def comma_separated_values(text: str, cast):
     values = [cast(token.strip()) for token in text.split(",") if token.strip()]
     if not values:
@@ -61,149 +61,23 @@ def colour_pair(text: str) -> tuple[str, str]:
     return match.group(1), match.group(2)
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description=(
-            "Plot p50 with p16--p84 for nested population sizes across "
-            "independent KNe realizations."
-        ),
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+def default_configuration() -> argparse.Namespace:
+    """Return documented defaults before the terminal questions."""
+    return argparse.Namespace(
+        manifest=None, run_dir=None, sample_sizes="1000,10000",
+        times="0.5,1.0,1.5,2.0", colour_pairs="g-r",
+        photometric_system="lsst", mw_treatment="corrected",
+        minimum_valid_events=30, minimum_tail_events=20.0,
+        m5_cut=True, m5_file=None, m5_percentile=50.0,
+        bootstrap=True, n_bootstrap=200, bootstrap_threshold_mag=0.10,
+        bootstrap_seed=12345, plot_bootstrap_distributions=True,
+        bootstrap_plot_realization=1,
+        bootstrap_plot_sample_sizes="100,1000",
+        bootstrap_plot_times="0.5,2.0", output_dir=None,
+        no_connect=False,
     )
-    source = parser.add_mutually_exclusive_group()
-    source.add_argument(
-        "--manifest",
-        type=Path,
-        help="realizations.csv written by generate_kne_lightcurves.py",
-    )
-    source.add_argument(
-        "--run-dir",
-        type=Path,
-        action="append",
-        help="Run directory; repeat this option once per realization",
-    )
-    parser.add_argument(
-        "--sample-sizes",
-        default="1000,10000",
-        help="Comma-separated nested prefix sizes",
-    )
-    parser.add_argument(
-        "--times",
-        default="0.5,1.0,1.5,2.0",
-        help="Comma-separated observer-frame post-merger times in days",
-    )
-    parser.add_argument(
-        "--colour-pairs",
-        default="g-r",
-        help="Comma-separated band pairs, for example g-r,r-i,i-z",
-    )
-    parser.add_argument(
-        "--photometric-system",
-        default="lsst",
-        help="Value selected from the photometric_system column",
-    )
-    parser.add_argument(
-        "--mw-treatment",
-        choices=["corrected", "present"],
-        default="corrected",
-        help=(
-            "Subtract each event's A_band values from saved magnitudes, or "
-            "retain Milky-Way extinction"
-        ),
-    )
-    parser.add_argument(
-        "--minimum-valid-events",
-        type=int,
-        default=30,
-        help="Minimum finite event colours required for statistical validity",
-    )
-    parser.add_argument(
-        "--minimum-tail-events",
-        type=float,
-        default=20.0,
-        help="Minimum expected number of events in the nearest percentile tail",
-    )
-    parser.add_argument(
-        "--m5-cut",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Require both interpolated band magnitudes to pass the selected m5 percentile",
-    )
-    parser.add_argument(
-        "--m5-file",
-        type=Path,
-        help=(
-            "Optional m5 quantile table, legacy median table, or raw OpSim "
-            "export directory; otherwise search automatically"
-        ),
-    )
-    parser.add_argument(
-        "--m5-percentile",
-        type=float,
-        default=50.0,
-        help="Visit-weighted OpSim m5 percentile used as the two-band threshold",
-    )
-    parser.add_argument(
-        "--bootstrap",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Validate p16, p50 and p84 with an ordinary event bootstrap",
-    )
-    parser.add_argument(
-        "--n-bootstrap",
-        type=int,
-        default=200,
-        help="Number of event-bootstrap repetitions",
-    )
-    parser.add_argument(
-        "--bootstrap-threshold-mag",
-        type=float,
-        default=0.10,
-        help="Maximum 68%% bootstrap half-width for every percentile [mag]",
-    )
-    parser.add_argument(
-        "--bootstrap-seed",
-        type=int,
-        default=12345,
-        help="Master seed for reproducible bootstrap streams",
-    )
-    parser.add_argument(
-        "--plot-bootstrap-distributions",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Save selected bootstrap draws and plot their distributions",
-    )
-    parser.add_argument(
-        "--bootstrap-plot-realization",
-        type=int,
-        default=1,
-        help="Population realization shown in the bootstrap diagnostic",
-    )
-    parser.add_argument(
-        "--bootstrap-plot-sample-sizes",
-        default="100,1000",
-        help="Two or more sample sizes shown in the bootstrap diagnostic",
-    )
-    parser.add_argument(
-        "--bootstrap-plot-times",
-        default="0.5,2.0",
-        help="Two or more times shown in the bootstrap diagnostic",
-    )
-    parser.add_argument(
-        "--output-dir",
-        type=Path,
-        help="Output directory; defaults beside the realization manifest",
-    )
-    parser.add_argument(
-        "--no-connect",
-        action="store_true",
-        help="Do not connect equal-time markers across realizations",
-    )
-    parser.add_argument(
-        "--interactive",
-        action="store_true",
-        help="Show the terminal menu even when command-line options are supplied",
-    )
-    return parser
+
+
 
 
 def prompt_text(label: str, default: str) -> str:
@@ -244,10 +118,9 @@ def newest_manifest_default() -> str:
 
 
 def configure_runtime() -> argparse.Namespace:
-    parser = build_parser()
-    args = parser.parse_args()
-    interactive = bool(args.interactive or len(sys.argv) == 1)
-    if interactive:
+    args = default_configuration()
+    # This public workflow is intentionally terminal-driven.
+    if True:
         print("Colour-envelope comparison across population realizations")
         args.manifest = Path(
             prompt_text("Realization manifest", newest_manifest_default())
@@ -376,8 +249,13 @@ def configure_runtime() -> argparse.Namespace:
         )
         args.output_dir = None if output == "automatic" else Path(output)
     if args.manifest is None and not args.run_dir:
-        parser.error("provide --manifest or at least one --run-dir")
+        raise ValueError("Select a realization manifest or at least one run directory")
     return args
+
+
+# -----------------------------------------------------------------------------
+# DATA LOADING AND SCIENTIFIC CALCULATIONS
+# -----------------------------------------------------------------------------
 
 
 def read_realizations(args: argparse.Namespace) -> pd.DataFrame:
@@ -794,6 +672,11 @@ def summarize_nested_prefixes(
                 }
             )
     return pd.DataFrame(rows), pd.DataFrame(draw_rows)
+
+
+# -----------------------------------------------------------------------------
+# FIGURE GENERATION AND OUTPUT TABLES
+# -----------------------------------------------------------------------------
 
 
 def time_palette(n_times: int) -> list[object]:

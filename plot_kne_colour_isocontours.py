@@ -2,7 +2,7 @@
 """Map median KNe colour and iso-colour contours in parameter planes.
 
 The program reuses the population loading, log-time interpolation, Milky-Way
-convention, and m5 cuts from ``kne_colour_population.py``.  For each
+convention, and m5 cuts from ``kne_colour_py``.  For each
 time bin and each requested physical-parameter plane, it computes p16, p50,
 and p84 of the colour in rectangular parameter cells.  The heatmap shows p50;
 iso-colour contours are drawn from a support-aware smoothed p50 field.
@@ -11,7 +11,7 @@ beyond the measured population support.
 
 The map is a conditional population summary, not a deterministic relation:
 all physical parameters not shown on the axes remain distributed according to
-the simulated population.  Cells with too few available colours are masked.
+the simulated   Cells with too few available colours are masked.
 Comparison modes produce matched no-m5 and m5 outputs from the same events.
 Any exact OpSim m5 percentile can be read from a table or calculated from raw
 ``opsim_visits_field*.csv`` files.
@@ -38,136 +38,311 @@ from scipy.ndimage import gaussian_filter
 from scipy.stats import binned_statistic_2d
 
 from kne_m5 import M5_SCENARIO_PERCENTILES, load_m5_percentile
-import kne_colour_population as population
 
+
+# ============================================================================
+# POPULATION LOADING, PARAMETER TRANSFORMS AND COLOUR INTERPOLATION
+# ============================================================================
+
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+import kne_envelope_core as envelope_core
+from kne_population_io import SyntheticPopulationSource
+
+
+STAGES = envelope_core.STAGES
+PARAMETER_LABELS = {
+    "log10_mej_dyn": r"$\log_{10}(M_{\rm dyn}/M_\odot)$",
+    "log10_mej_wind": r"$\log_{10}(M_{\rm wind}/M_\odot)$",
+    "mej_dyn": r"$M_{\rm dyn}\ (M_\odot)$",
+    "mej_wind": r"$M_{\rm wind}\ (M_\odot)$",
+    "v_ej_dyn": r"$v_{\rm dyn}/c$",
+    "v_ej_wind": r"$v_{\rm wind}/c$",
+    "Ye_dyn": r"$Y_{e,\rm dyn}$",
+    "Ye_wind": r"$Y_{e,\rm wind}$",
+    "inclination_EM": r"$\iota\ ({\rm rad})$",
+    "inclination_deg": r"$\iota\ ({\rm deg})$",
+    "cos_inclination": r"$\cos\iota$",
+    "phi": r"$\phi\ ({\rm deg})$",
+    "luminosity_distance": r"$D_L\ ({\rm Mpc})$",
+    "redshift": r"$z$",
+    "ebv_mw": r"$E(B-V)_{\rm MW}$",
+    "log10_mej": r"$\log_{10}(M_{\rm ej}/M_\odot)$",
+    "log10_vej": r"$\log_{10}(v_{\rm ej}/c)$",
+    "beta": r"$\beta$",
+    "log10_kappa_r": r"$\log_{10}(\kappa_r/[{\rm cm^2\,g^{-1}}])$",
+}
+
+
+def ask(text: str, default="") -> str:
+    """Small prompt helper retained for the interactive public command."""
+    suffix = f" [{default}]" if default != "" else ""
+    value = input(f"{text}{suffix}: ").strip()
+    return value or str(default)
+
+
+def choose(title, choices, default):
+    print("\n" + title)
+    for index, (key, label) in enumerate(choices, 1):
+        marker = " [défaut]" if key == default else ""
+        print(f"  {index}. {label}{marker}")
+    selected = int(ask("Choix", next(
+        i for i, (key, _) in enumerate(choices, 1) if key == default
+    ))) - 1
+    if not 0 <= selected < len(choices):
+        raise ValueError("Choix invalide")
+    return choices[selected][0]
+
+
+def parse_parameter_pairs(text: str) -> list[tuple[str, str]]:
+    pairs = [tuple(item.strip().split(":")) for item in text.split(",")]
+    if any(len(pair) != 2 or not all(pair) or pair[0] == pair[1] for pair in pairs):
+        raise ValueError("Utiliser des plans x:y avec deux paramètres distincts")
+    return pairs
+
+
+def read_bounds(path, times, stage, percentile_pair=(5.0, 95.0), repetition=0):
+    """Read containing temporal bins without filling or extrapolating them."""
+    table = pd.read_csv(path)
+    if "stage" in table:
+        table = table.loc[table.stage.astype(str).eq(stage)].copy()
+    if "repetition" in table:
+        values = pd.to_numeric(table.repetition, errors="coerce")
+        table = table.loc[values.eq(repetition)].copy()
+    if "N_requested" in table and not table.empty:
+        values = pd.to_numeric(table.N_requested, errors="coerce")
+        table = table.loc[values.eq(values.max())].copy()
+    lower = next((name for name in ("t_min_days", "t_low_days") if name in table), None)
+    upper = next((name for name in ("t_max_days", "t_high_days") if name in table), None)
+    if lower is None or upper is None:
+        raise ValueError("Le CSV nécessite des bornes temporelles min/max")
+    is_profile = {"percentile", "value", "valid"}.issubset(table.columns)
+    if not is_profile and not {"color_min", "color_max"}.issubset(table.columns):
+        raise ValueError("Le CSV nécessite color_min/color_max ou percentile/value/valid")
+    if is_profile and "estimator_kind" in table:
+        table = table.loc[table.estimator_kind.astype(str).eq("fixed")]
+    end = pd.to_numeric(table[upper], errors="coerce").max()
+    rows = []
+    for time in times:
+        lows = pd.to_numeric(table[lower], errors="coerce")
+        highs = pd.to_numeric(table[upper], errors="coerce")
+        mask = lows.le(time) & highs.gt(time)
+        if np.isclose(time, end, rtol=0, atol=1e-10):
+            mask = highs.eq(end) & lows.le(time)
+        selected = table.loc[mask]
+        row = {
+            "time_days": float(time), "color_min": np.nan,
+            "color_max": np.nan, "bounds_status": "missing_or_invalid",
+            "bounds_source": str(path),
+        }
+        if is_profile:
+            values = []
+            for quantile in percentile_pair:
+                numeric = pd.to_numeric(selected.percentile, errors="coerce")
+                subset = selected.loc[np.isclose(numeric, quantile)]
+                if len(subset) > 1:
+                    raise ValueError(f"Bornes ambiguës pour t={time:g}, p{quantile:g}")
+                if len(subset) == 1 and str(subset.valid.iloc[0]).lower() in ("true", "1"):
+                    values.append(float(subset.value.iloc[0]))
+            if len(values) == 2:
+                row.update(color_min=values[0], color_max=values[1])
+        elif len(selected) == 1:
+            row.update(
+                color_min=float(selected.color_min.iloc[0]),
+                color_max=float(selected.color_max.iloc[0]),
+            )
+        elif len(selected) > 1:
+            raise ValueError(f"Plusieurs bins couvrent t={time:g}; CSV ambigu")
+        if (np.isfinite(row["color_min"]) and np.isfinite(row["color_max"])
+                and row["color_min"] <= row["color_max"]):
+            row["bounds_status"] = "valid"
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def parameter_values(metadata: pd.DataFrame, name: str) -> np.ndarray:
+    derived = {
+        "mej_dyn": ("log10_mej_dyn", lambda values: 10.0 ** values),
+        "mej_wind": ("log10_mej_wind", lambda values: 10.0 ** values),
+        "inclination_deg": ("inclination_EM", np.rad2deg),
+        "cos_inclination": ("inclination_EM", np.cos),
+    }
+    if name in metadata:
+        return pd.to_numeric(metadata[name], errors="coerce").to_numpy(float)
+    if name in derived and derived[name][0] in metadata:
+        column, transform = derived[name]
+        values = pd.to_numeric(metadata[column], errors="coerce").to_numpy(float)
+        return transform(values)
+    raise ValueError(f"Paramètre '{name}' absent de summary.csv")
+
+
+def axis_domain(values: np.ndarray) -> tuple[float, float]:
+    finite = values[np.isfinite(values)]
+    if not len(finite):
+        raise ValueError("Aucune valeur de paramètre finie")
+    low, high = float(finite.min()), float(finite.max())
+    if high <= low:
+        raise ValueError("Paramètre constant : pas de densité 2D identifiable")
+    return low, high
+
+
+def resolve_root(path: Path) -> Path:
+    root = path.expanduser().resolve()
+    if root.name in ("parquet", "csv") and (root.parent / "summary.csv").is_file():
+        return root.parent
+    return root
+
+
+def load_metadata(root: Path, maximum: int, seed: int) -> pd.DataFrame:
+    from dynamic_color_cut_common import load_summary
+
+    metadata = load_summary(root)
+    if metadata.empty:
+        raise ValueError(f"summary.csv absent ou vide dans {root}")
+    if metadata.event_id.duplicated().any():
+        raise ValueError("summary.csv contient des event_id dupliqués")
+    if 0 < maximum < len(metadata):
+        positions = np.sort(
+            np.random.default_rng(seed).choice(len(metadata), maximum, replace=False)
+        )
+        metadata = metadata.iloc[positions].copy()
+    return metadata.reset_index(drop=True)
+
+
+def load_event_colours(args, root, metadata, bands, times, depths):
+    """Interpolate saved magnitudes and return colour/support/depth masks."""
+    from dynamic_color_cut_common import canonical_event_id, interpolate_band
+
+    source = SyntheticPopulationSource(root)
+    if source.kind == "missing":
+        raise FileNotFoundError("Aucune courbe synthétique Parquet ou CSV")
+    ids = metadata.event_id.astype(str).tolist()
+    position = {event_id: index for index, event_id in enumerate(ids)}
+    colour = np.full((len(ids), len(times)), np.nan)
+    supported = np.zeros(colour.shape, dtype=bool)
+    depth_pass = np.zeros(colour.shape, dtype=bool)
+    selection_system = (
+        "lsst" if args.photometric_system == "ps1"
+        and args.stage in envelope_core.M5_STAGES else args.photometric_system
+    )
+    systems = tuple(dict.fromkeys((args.photometric_system, selection_system)))
+    read_ids = ids
+    if source.kind == "legacy_csv_files":
+        read_ids = [event_id for event_id in ids if event_id in source.csv_by_event]
+    seen = set()
+    print(f"Lecture unique de {len(ids):,} événements ({source.kind}); aucun split")
+    for event_id, frame in source.iter_events(read_ids, bands, systems):
+        event_id = canonical_event_id(event_id)
+        if event_id in seen:
+            raise ValueError(f"Événement {event_id} présent dans plusieurs shards")
+        seen.add(event_id)
+        index = position[event_id]
+        row = metadata.iloc[index]
+        evaluation_times = times
+        if args.time_frame == "source":
+            redshift = float(row.get("redshift", np.nan))
+            if not np.isfinite(redshift) or redshift < 0:
+                raise ValueError("Le temps source nécessite un redshift fini >= 0")
+            evaluation_times = times * (1.0 + redshift)
+        frame = frame.copy()
+        frame["t_days"] = pd.to_numeric(frame.t_days, errors="coerce")
+        frame["band"] = frame.band.astype(str).str.strip().str.lower()
+        frame["magnitude"] = pd.to_numeric(frame.mag, errors="coerce")
+        if "photometric_system" not in frame:
+            frame["photometric_system"] = "lsst"
+        frame["photometric_system"] = (
+            frame.photometric_system.astype(str).str.strip().str.lower()
+        )
+        frame = frame.loc[
+            np.isfinite(frame.t_days) & (frame.t_days > 0)
+            & np.isfinite(frame.magnitude)
+        ]
+        target = frame.loc[frame.photometric_system.eq(args.photometric_system)]
+        selection = frame.loc[frame.photometric_system.eq(selection_system)]
+        magnitudes = [interpolate_band(target, band, evaluation_times) for band in bands]
+        selection_magnitudes = [
+            interpolate_band(selection, band, evaluation_times) for band in bands
+        ]
+        if args.stage not in envelope_core.MW_EXTINCTED_STAGES:
+            magnitudes = [
+                values - envelope_core.event_extinction_mag(
+                    row, args.photometric_system, band
+                )
+                for values, band in zip(magnitudes, bands)
+            ]
+            if args.stage in envelope_core.M5_STAGES:
+                selection_magnitudes = [
+                    values - envelope_core.event_extinction_mag(
+                        row, selection_system, band
+                    )
+                    for values, band in zip(selection_magnitudes, bands)
+                ]
+        finite = np.isfinite(magnitudes[0]) & np.isfinite(magnitudes[1])
+        supported[index] = finite
+        colour[index] = magnitudes[0] - magnitudes[1]
+        passed = finite.copy()
+        if args.stage in envelope_core.M5_STAGES:
+            for values, band in zip(selection_magnitudes, bands):
+                passed &= np.isfinite(values) & (values <= depths[band])
+        depth_pass[index] = passed
+        if len(seen) % max(1000, len(ids) // 10) == 0:
+            print(f"  {len(seen):,}/{len(ids):,}")
+    if not supported.any():
+        raise ValueError(f"Aucune couleur {args.color_pair} disponible")
+    return colour, supported, depth_pass
 
 COMPARE_STAGES = ("compare_no_mw", "compare_with_mw")
-STAGE_CHOICES = (*population.STAGES, *COMPARE_STAGES)
+STAGE_CHOICES = (*STAGES, *COMPARE_STAGES)
 MASS_AXIS_LABELS = {
     "log10_mej_dyn": r"$M_{\mathrm{ej}}^{\mathrm{dyn}}\ [M_\odot]$",
     "log10_mej_wind": r"$M_{\mathrm{ej}}^{\mathrm{wind}}\ [M_\odot]$",
 }
 
 
-def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(
-        description=__doc__.split("\n\n")[0],
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+# -----------------------------------------------------------------------------
+# USER-FRIENDLY TERMINAL INTERFACE AND INPUT VALIDATION
+# -----------------------------------------------------------------------------
+
+
+def default_configuration() -> argparse.Namespace:
+    """Return documented defaults before the terminal questions."""
+    return argparse.Namespace(
+        run_dir=None, color_pair="g-r", photometric_system="lsst",
+        stage="compare_no_mw", t_min=0.4, t_max=7.2, bin_width=0.4,
+        time_frame="observer",
+        parameter_pairs="log10_mej_dyn:log10_mej_wind",
+        contour_mode="fixed", contour_levels="-3:3:1", contour_step=1.0,
+        bounds_file=None, percentile_pair="5,95", reference_repetition=0,
+        colour_scale=None, m5_percentile=75.0, m5_scenario=None,
+        threshold_scope="common_global", m5_quantile_table=None,
+        ztf_m5_g=None, ztf_m5_r=None, ztf_m5_i=None, max_events=0,
+        grid_size=20, minimum_cell_events=20, smooth_sigma=1.0,
+        panels_per_page=4, seed=20261019, output_dir=None,
+        overwrite=False,
     )
-    p.add_argument("--run-dir", type=Path)
-    p.add_argument("--color-pair", default="g-r")
-    p.add_argument(
-        "--photometric-system", choices=("lsst", "ps1", "ztf"), default="lsst"
-    )
-    p.add_argument(
-        "--stage",
-        choices=STAGE_CHOICES,
-        default="compare_no_mw",
-        help=(
-            "One photometric stage, or compare_no_mw/compare_with_mw to "
-            "produce matched outputs without and with the m5 cut."
-        ),
-    )
-    p.add_argument("--t-min", type=float, default=0.4)
-    p.add_argument("--t-max", type=float, default=7.2)
-    p.add_argument("--bin-width", type=float, default=0.4)
-    p.add_argument(
-        "--time-frame", choices=("observer", "source"), default="observer"
-    )
-    p.add_argument(
-        "--parameter-pairs",
-        default="log10_mej_dyn:log10_mej_wind",
-        help="Comma-separated x:y planes.",
-    )
-    p.add_argument(
-        "--contour-mode",
-        choices=("fixed", "envelope"),
-        default="fixed",
-        help="Use one fixed level grid or adapt integer-spaced levels to an envelope CSV.",
-    )
-    p.add_argument(
-        "--contour-levels",
-        default="-3:3:1",
-        help="Inclusive start:stop:step levels in fixed mode; use --contour-levels=-3:3:1.",
-    )
-    p.add_argument(
-        "--contour-step",
-        type=float,
-        default=1.0,
-        help="Level spacing in envelope mode.",
-    )
-    p.add_argument(
-        "--bounds-file",
-        type=Path,
-        help="Envelope rules or percentile_reference_profiles.csv for envelope mode.",
-    )
-    p.add_argument(
-        "--percentile-pair",
-        default="5,95",
-        help="Envelope percentiles when bounds-file is a fixed-profile CSV.",
-    )
-    p.add_argument("--reference-repetition", type=int, default=0)
-    p.add_argument(
-        "--colour-scale",
-        help="Shared heatmap min:max. Omit for robust automatic bounds.",
-    )
-    p.add_argument(
-        "--m5-percentile",
-        type=float,
-        default=75.0,
-        help="OpSim depth percentile used as the two-band m5 threshold.",
-    )
-    p.add_argument(
-        "--m5-scenario",
-        choices=tuple(M5_SCENARIO_PERCENTILES),
-        help="Legacy alias overriding --m5-percentile (p25, p50 or p75).",
-    )
-    p.add_argument(
-        "--threshold-scope",
-        choices=("common_global", "latitude_conditioned"),
-        default="common_global",
-    )
-    p.add_argument("--m5-quantile-table", type=Path)
-    p.add_argument("--ztf-m5-g", type=float)
-    p.add_argument("--ztf-m5-r", type=float)
-    p.add_argument("--ztf-m5-i", type=float)
-    p.add_argument("--max-events", type=int, default=0, help="0 = all events")
-    p.add_argument("--grid-size", type=int, default=20, help="Cells per parameter axis")
-    p.add_argument(
-        "--minimum-cell-events",
-        type=int,
-        default=20,
-        help="Mask cells containing fewer available colours.",
-    )
-    p.add_argument(
-        "--smooth-sigma",
-        type=float,
-        default=1.0,
-        help="Gaussian smoothing for contour geometry, in cells; heatmap remains unsmoothed.",
-    )
-    p.add_argument("--panels-per-page", type=int, default=4)
-    p.add_argument("--seed", type=int, default=20261019)
-    p.add_argument("--output-dir", type=Path)
-    p.add_argument("--overwrite", action="store_true")
-    return p
+
+
 
 
 def interactive(args: argparse.Namespace) -> argparse.Namespace:
     print("Isocouleurs KNe dans l’espace des paramètres")
-    args.run_dir = Path(population.ask("Dossier du run (contenant summary.csv)", "."))
-    args.color_pair = population.ask("Paire de couleurs", args.color_pair)
-    args.photometric_system = population.choose(
+    args.run_dir = Path(ask("Dossier du run (contenant summary.csv)", "."))
+    args.color_pair = ask("Paire de couleurs", args.color_pair)
+    args.photometric_system = choose(
         "Système photométrique",
         [("lsst", "LSST"), ("ps1", "PS1"), ("ztf", "ZTF")],
         args.photometric_system,
     )
-    args.stage = population.choose(
+    args.stage = choose(
         "Sorties photométriques",
         [
-            (population.STAGES[0], "Sans m5, sans MW"),
-            (population.STAGES[1], "Sans m5, avec MW"),
-            (population.STAGES[2], "Avec m5, sans MW"),
-            (population.STAGES[3], "Avec m5, avec MW"),
+            (STAGES[0], "Sans m5, sans MW"),
+            (STAGES[1], "Sans m5, avec MW"),
+            (STAGES[2], "Avec m5, sans MW"),
+            (STAGES[3], "Avec m5, avec MW"),
             (
                 "compare_no_mw",
                 "Deux sorties comparables : sans m5 et avec m5, sans MW",
@@ -179,18 +354,18 @@ def interactive(args: argparse.Namespace) -> argparse.Namespace:
         ],
         args.stage,
     )
-    args.t_min = float(population.ask("Début des bins temporels [jours]", args.t_min))
-    args.t_max = float(population.ask("Fin des bins temporels [jours]", args.t_max))
-    args.bin_width = float(population.ask("Largeur des bins [jours]", args.bin_width))
-    args.time_frame = population.choose(
+    args.t_min = float(ask("Début des bins temporels [jours]", args.t_min))
+    args.t_max = float(ask("Fin des bins temporels [jours]", args.t_max))
+    args.bin_width = float(ask("Largeur des bins [jours]", args.bin_width))
+    args.time_frame = choose(
         "Référence temporelle",
         [("observer", "Temps observateur"), ("source", "Temps source")],
         args.time_frame,
     )
-    args.parameter_pairs = population.ask(
+    args.parameter_pairs = ask(
         "Plans x:y (séparés par une virgule)", args.parameter_pairs
     )
-    args.contour_mode = population.choose(
+    args.contour_mode = choose(
         "Niveaux des isocouleurs",
         [
             ("fixed", "Grille fixe, par exemple -3,-2,...,3"),
@@ -199,48 +374,53 @@ def interactive(args: argparse.Namespace) -> argparse.Namespace:
         args.contour_mode,
     )
     if args.contour_mode == "fixed":
-        args.contour_levels = population.ask(
+        args.contour_levels = ask(
             "Niveaux start:stop:step [mag]", args.contour_levels
         )
     else:
-        args.bounds_file = Path(population.ask("CSV de l’enveloppe"))
-        args.percentile_pair = population.ask(
+        args.bounds_file = Path(ask("CSV de l’enveloppe"))
+        args.percentile_pair = ask(
             "Percentiles si CSV de profils fixes", args.percentile_pair
         )
-        args.contour_step = float(population.ask("Pas des isocouleurs [mag]", args.contour_step))
+        args.contour_step = float(ask("Pas des isocouleurs [mag]", args.contour_step))
     if stage_uses_m5(args.stage):
         if args.photometric_system == "ztf":
             for band in args.color_pair.split("-"):
                 setattr(
                     args,
                     f"ztf_m5_{band}",
-                    float(population.ask(f"Magnitude limite ZTF {band} (5 sigma)")),
+                    float(ask(f"Magnitude limite ZTF {band} (5 sigma)")),
                 )
         else:
             args.m5_percentile = float(
-                population.ask(
+                ask(
                     "Percentile OpSim utilisé comme seuil m5 (p90 = 90)",
                     args.m5_percentile,
                 )
             )
-            explicit = population.ask(
+            explicit = ask(
                 "Table m5 ou dossier OpSim brut (vide = recherche automatique)"
             )
             args.m5_quantile_table = Path(explicit) if explicit else None
-    args.max_events = int(population.ask("Événements analysés (0 = tous)", args.max_events))
-    args.grid_size = int(population.ask("Cellules par axe", args.grid_size))
+    args.max_events = int(ask("Événements analysés (0 = tous)", args.max_events))
+    args.grid_size = int(ask("Cellules par axe", args.grid_size))
     args.minimum_cell_events = int(
-        population.ask("Couleurs minimales par cellule", args.minimum_cell_events)
+        ask("Couleurs minimales par cellule", args.minimum_cell_events)
     )
     args.smooth_sigma = float(
-        population.ask("Lissage des contours [cellules]", args.smooth_sigma)
+        ask("Lissage des contours [cellules]", args.smooth_sigma)
     )
     args.panels_per_page = int(
-        population.ask("Nombre de panneaux par PNG", args.panels_per_page)
+        ask("Nombre de panneaux par PNG", args.panels_per_page)
     )
-    output = population.ask("Dossier de sortie (vide = automatique)")
+    output = ask("Dossier de sortie (vide = automatique)")
     args.output_dir = Path(output) if output else None
     return args
+
+
+# -----------------------------------------------------------------------------
+# SCIENTIFIC CALCULATIONS AND PARAMETER-SPACE GRIDS
+# -----------------------------------------------------------------------------
 
 
 def stage_uses_m5(stage: str) -> bool:
@@ -356,7 +536,7 @@ def plotting_axis(parameter: str, edges: np.ndarray):
     """Return plotting coordinates, label, and scale for one parameter axis."""
     if parameter in MASS_AXIS_LABELS:
         return np.power(10.0, edges), MASS_AXIS_LABELS[parameter], "log"
-    return edges, population.PARAMETER_LABELS.get(parameter, parameter), "linear"
+    return edges, PARAMETER_LABELS.get(parameter, parameter), "linear"
 
 
 def mass_tick_label(value: float, _position=None) -> str:
@@ -481,6 +661,11 @@ def colour_norm(vmin: float, vmax: float):
         TwoSlopeNorm(vmin=vmin, vcenter=0.0, vmax=vmax)
         if vmin < 0 < vmax else Normalize(vmin=vmin, vmax=vmax)
     )
+
+
+# -----------------------------------------------------------------------------
+# FIGURE GENERATION AND OUTPUT TABLES
+# -----------------------------------------------------------------------------
 
 
 def draw_panel(
@@ -679,17 +864,11 @@ def grid_table(
     return pd.DataFrame(rows)
 
 
-def main(argv=None) -> None:
-    parser = build_parser()
-    args = parser.parse_args(argv)
-    if args.run_dir is None:
-        if not sys.stdin.isatty():
-            parser.error("--run-dir requis hors terminal interactif")
-        args = interactive(args)
-
-    root = population.resolve_root(args.run_dir)
+def run_analysis(args: argparse.Namespace) -> None:
+    """Calculate and save one fully configured iso-colour analysis."""
+    root = resolve_root(args.run_dir)
     time_edges, times = time_grid(args.t_min, args.t_max, args.bin_width)
-    pairs = population.parse_parameter_pairs(args.parameter_pairs)
+    pairs = parse_parameter_pairs(args.parameter_pairs)
     bands = tuple(args.color_pair.strip().lower().split("-"))
     allowed = {"lsst": set("ugrizy"), "ps1": set("grizy"), "ztf": set("gri")}
     if len(bands) != 2 or bands[0] == bands[1] or not set(bands) <= allowed[args.photometric_system]:
@@ -703,18 +882,18 @@ def main(argv=None) -> None:
     if args.panels_per_page < 1:
         raise ValueError("--panels-per-page doit être positif")
 
-    metadata = population.load_metadata(root, args.max_events, args.seed)
+    metadata = load_metadata(root, args.max_events, args.seed)
     parameter_arrays = {}
     for pair in pairs:
         for parameter in pair:
-            parameter_arrays[parameter] = population.parameter_values(metadata, parameter)
-            population.axis_domain(parameter_arrays[parameter])
+            parameter_arrays[parameter] = parameter_values(metadata, parameter)
+            axis_domain(parameter_arrays[parameter])
 
     requested_stage = args.stage
     load_stage, output_stage_masks = stage_plan(requested_stage)
     args.stage = load_stage
     depths, depth_source = load_depths(args, root, bands)
-    colour, model_supported, depth_supported = population.load_event_colours(
+    colour, model_supported, depth_supported = load_event_colours(
         args, root, metadata, bands, times, depths
     )
     args.stage = requested_stage
@@ -740,7 +919,7 @@ def main(argv=None) -> None:
             raise ValueError("Percentiles requis : 0 < q_low < q_high < 100")
         levels_by_stage = {}
         for stage in availability:
-            bounds = population.read_bounds(
+            bounds = read_bounds(
                 bounds_path, times, stage, q, args.reference_repetition
             )
             levels_by_stage[stage] = envelope_levels(bounds, args.contour_step)
@@ -788,8 +967,8 @@ def main(argv=None) -> None:
         for x_name, y_name in pairs:
             x = parameter_arrays[x_name]
             y = parameter_arrays[y_name]
-            x_domain = population.axis_domain(x)
-            y_domain = population.axis_domain(y)
+            x_domain = axis_domain(x)
+            y_domain = axis_domain(y)
             x_edges = np.linspace(*x_domain, args.grid_size + 1)
             y_edges = np.linspace(*y_domain, args.grid_size + 1)
             grids = []
@@ -888,6 +1067,11 @@ def main(argv=None) -> None:
     )
     print(pd.DataFrame(summaries).to_string(index=False))
     print("Sorties :", output)
+
+
+def main() -> None:
+    """Collect terminal choices and run the iso-colour analysis."""
+    run_analysis(interactive(default_configuration()))
 
 
 if __name__ == "__main__":
