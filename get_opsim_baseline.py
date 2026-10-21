@@ -8,6 +8,8 @@ from datetime import datetime
 import argparse
 
 from kne_pipeline_common import (
+    prompt_choice,
+    prompt_text,
     write_m5_depth_quantiles,
 )
 

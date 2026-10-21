@@ -8,6 +8,18 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class CliBoundaryTest(unittest.TestCase):
+    def test_generation_and_opsim_import_shared_prompt_helpers(self):
+        for filename in ("generate_kne_lightcurves.py", "get_opsim_baseline.py"):
+            tree = ast.parse((ROOT / filename).read_text())
+            imported = {
+                alias.name
+                for node in tree.body
+                if isinstance(node, ast.ImportFrom)
+                and node.module == "kne_pipeline_common"
+                for alias in node.names
+            }
+            self.assertTrue({"prompt_choice", "prompt_text"} <= imported)
+
     def test_generation_and_opsim_interfaces_live_in_public_scripts(self):
         for filename, function_name in (
             ("generate_kne_lightcurves.py", "configure_runtime"),
