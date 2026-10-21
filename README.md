@@ -19,7 +19,6 @@ The pipeline is designed to answer questions such as:
 - how Rubin depth and Milky Way extinction change the available population;
 - which physical parameters are represented by colour-selected KNe;
 - how colour availability and losses vary with Galactic latitude;
-- over which luminosity-distance range two-band colours remain measurable.
 
 Unless explicitly stated otherwise, the depth analyses use global band
 thresholds derived from an OpSim sample. They do not reproduce the full Rubin
@@ -33,12 +32,9 @@ cadence, image-by-image noise, alert production, or broker selection function.
 | Population generation | `generate_kne_lightcurves.py` | Generate physical populations and synthetic/LSST-like light curves |
 | Colour envelopes | `build_color_envelopes.py` | Build percentile envelopes for four MW/m5 stages |
 | Population convergence | `analyze_envelope_population_convergence_fast.py` | Measure percentile-value and temporal-extent convergence |
-| Convergence replot | `replot_envelope_population_convergence.py` | Rebuild figures and tables without rerunning bootstraps |
-| Parameter space | `plot_kne_colour_parameter_space.py` | Project colour-selected KNe into 1D/2D physical-parameter spaces |
+| Iso-colour maps | `plot_kne_colour_isocontours.py` | Map median colour and iso-colour contours in physical-parameter planes |
 | Latitude experiment | `run_latitude_experiment.py` | Generate paired latitude-bin populations and run the comparison |
-| Latitude analysis | `analyze_kne_latitude_losses.py` | Measure losses within one population |
-| Latitude comparison | `compare_kne_latitude_bins.py` | Compare paired bins and estimate a plateau |
-| Distance reach | `estimate_kne_lsst_distance_reach.py` | Estimate two-band colour availability versus distance |
+| Latitude analysis | `analyze_kne_latitude.py` | Run population, paired-bin, or low/high plateau analyses |
 
 `kne_pipeline_common.py`, `dynamic_color_cut_common.py`,
 `kne_generation_core.py`, `kne_envelope_core.py`, and
@@ -173,38 +169,17 @@ separate:
    reference, within the requested temporal tolerance?
 
 The default multi-percentile analysis evaluates `p5–p95`, `p16–p84`, and
-`p25–p75`. Existing CSV products can be replotted without loading the parent
-population or rerunning bootstrap calculations:
+`p25–p75`. See [`MULTI_PERCENTILE_CONVERGENCE.md`](MULTI_PERCENTILE_CONVERGENCE.md).
+
+## 5. Map iso-colours in physical-parameter space
 
 ```bash
-python replot_envelope_population_convergence.py \
-  --analysis-dir runs/YOUR_PARENT_RUN/analysis/YOUR_CONVERGENCE_DIRECTORY \
-  --shape-horizon-mode reference-minus-tolerance
+python plot_kne_colour_isocontours.py
 ```
 
-See [`MULTI_PERCENTILE_CONVERGENCE.md`](MULTI_PERCENTILE_CONVERGENCE.md) and
-[`CONVERGENCE_REPLOT_USAGE.md`](CONVERGENCE_REPLOT_USAGE.md).
-
-## 5. Inspect the selected physical-parameter space
-
-```bash
-python plot_kne_colour_parameter_space.py \
-  --run-dir runs/YOUR_PARENT_RUN \
-  --photometric-system lsst \
-  --color-pair g-r \
-  --stage m5_no_mw \
-  --times 1,2,4,6 \
-  --parameter-pairs Ye_wind:log10_mej_dyn \
-  --bounds-file runs/YOUR_PARENT_RUN/analysis/YOUR_CONVERGENCE_DIRECTORY \
-  --envelope-family p16-p84 \
-  --hdr-level 90
-```
-
-`p16–p84` is the colour-selection interval. `HDR90` is the highest-density
-region containing approximately 90% of the selected events in parameter
-space; these are independent quantities. Only statistically valid colour bins
-are used. See
-[`PARAMETER_SPACE_COLOUR_SELECTION.md`](PARAMETER_SPACE_COLOUR_SELECTION.md).
+Population loading and colour interpolation are isolated in
+`kne_colour_population.py`; the public command owns the terminal interface and
+figures.
 
 ## 6. Study Galactic latitude
 
@@ -218,24 +193,12 @@ commands before a long calculation. The low/high plateau diagnostic can also
 be run directly with:
 
 ```bash
-python plot_kne_low_high_plateau.py --interactive
+python analyze_kne_latitude.py plateau --interactive
 ```
 
 The plateau is an operational stability criterion, not a physical Galactic
 boundary. Read [`docs/low_high_plateau.md`](docs/low_high_plateau.md) before
 interpreting it.
-
-## 7. Estimate colour reach with distance
-
-```bash
-python estimate_kne_lsst_distance_reach.py
-```
-
-For each distance bin, the script measures the fraction of injected events
-with at least one temporal bin in which both requested bands are finite and
-above the selected global m5 thresholds. It reports binomial intervals and
-isotonic crossing distances. This remains a synthetic colour-availability
-metric, not a full cadence-dependent survey efficiency.
 
 ## Testing and reproducibility
 

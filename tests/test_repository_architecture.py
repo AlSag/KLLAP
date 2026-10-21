@@ -15,18 +15,21 @@ PUBLIC_COMMANDS = (
     "generate_kne_lightcurves.py",
     "build_color_envelopes.py",
     "analyze_envelope_population_convergence_fast.py",
-    "replot_envelope_population_convergence.py",
     "plot_colour_envelope_realizations.py",
-    "plot_kne_colour_parameter_space.py",
     "plot_kne_colour_isocontours.py",
     "run_latitude_experiment.py",
-    "analyze_kne_latitude_losses.py",
-    "compare_kne_latitude_bins.py",
-    "plot_kne_low_high_plateau.py",
+    "analyze_kne_latitude.py",
 )
 
 RETIRED_COMMANDS = (
     "analyze_envelope_population_convergence.py",
+    "replot_envelope_population_convergence.py",
+    "plot_convergence_support_diagnostics.py",
+    "plot_kne_colour_parameter_space.py",
+    "estimate_kne_lsst_distance_reach.py",
+    "analyze_kne_latitude_losses.py",
+    "compare_kne_latitude_bins.py",
+    "plot_kne_low_high_plateau.py",
 )
 
 

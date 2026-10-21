@@ -124,11 +124,10 @@ summary while the remaining I/O orchestration is reviewed.
 |---|---|---|
 | Envelope construction | `build_color_envelopes.py` | `kne_population_io.py`, `kne_envelope_population.py`, `kne_envelope_core.py`, `kne_envelope_product_plots.py`, `dynamic_color_cut_common.py`, `kne_m5.py` |
 | Convergence | `analyze_envelope_population_convergence_fast.py` | `kne_convergence_common.py`, `kne_envelope_core.py`, `envelope_colour_convergence.py`, `envelope_multiquantile_convergence.py` |
-| Saved-result replot | `replot_envelope_population_convergence.py` | `envelope_multiquantile_convergence.py` |
 | Realization comparison | `plot_colour_envelope_realizations.py` | `dynamic_color_cut_common.py`, `kne_m5.py` |
-| Parameter-space maps | `plot_kne_colour_parameter_space.py` | shared population loaders |
-| Iso-colour maps | `plot_kne_colour_isocontours.py` | `plot_kne_colour_parameter_space.py`, `kne_m5.py` |
-| Latitude experiment | `run_latitude_experiment.py` | generator, latitude analyzer, comparator |
+| Iso-colour maps | `plot_kne_colour_isocontours.py` | `kne_colour_population.py`, `kne_m5.py` |
+| Latitude experiment | `run_latitude_experiment.py` | generator, unified latitude analyzer |
+| Latitude analysis | `analyze_kne_latitude.py` | `kne_latitude_population.py`, `kne_latitude_comparison.py`, `kne_latitude_plateau.py` |
 
 Named m5 scenarios (`worst_p25`, `median_p50`, and `best_p75`) are owned by
 `kne_m5.py`. Commands may choose different defaults, but they must not carry a

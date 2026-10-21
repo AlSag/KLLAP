@@ -26,8 +26,8 @@
 - `analyze_envelope_population_convergence_fast.py`
 - `envelope_colour_convergence.py`
 - `envelope_multiquantile_convergence.py`
-- `replot_envelope_population_convergence.py`
-- `plot_kne_colour_parameter_space.py`
+- `plot_kne_colour_isocontours.py`
+- `kne_colour_population.py`
 
 The original audit found that the fast convergence entry point imported a
 legacy subprocess command. The dependency was first removed and an end-to-end
@@ -39,10 +39,10 @@ shared aggregation and plotting definitions remain in
 ### Latitude and reach analysis
 
 - `run_latitude_experiment.py`
-- `analyze_kne_latitude_losses.py`
-- `compare_kne_latitude_bins.py`
-- `plot_kne_low_high_plateau.py`
-- `estimate_kne_lsst_distance_reach.py`
+- `analyze_kne_latitude.py`
+- `kne_latitude_population.py`
+- `kne_latitude_comparison.py`
+- `kne_latitude_plateau.py`
 
 ### Utilities
 

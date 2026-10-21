@@ -2,7 +2,7 @@
 """Map median KNe colour and iso-colour contours in parameter planes.
 
 The program reuses the population loading, log-time interpolation, Milky-Way
-convention, and m5 cuts from ``plot_kne_colour_parameter_space.py``.  For each
+convention, and m5 cuts from ``kne_colour_population.py``.  For each
 time bin and each requested physical-parameter plane, it computes p16, p50,
 and p84 of the colour in rectangular parameter cells.  The heatmap shows p50;
 iso-colour contours are drawn from a support-aware smoothed p50 field.
@@ -38,11 +38,11 @@ from scipy.ndimage import gaussian_filter
 from scipy.stats import binned_statistic_2d
 
 from kne_m5 import M5_SCENARIO_PERCENTILES, load_m5_percentile
-import plot_kne_colour_parameter_space as base
+import kne_colour_population as population
 
 
 COMPARE_STAGES = ("compare_no_mw", "compare_with_mw")
-STAGE_CHOICES = (*base.STAGES, *COMPARE_STAGES)
+STAGE_CHOICES = (*population.STAGES, *COMPARE_STAGES)
 MASS_AXIS_LABELS = {
     "log10_mej_dyn": r"$M_{\mathrm{ej}}^{\mathrm{dyn}}\ [M_\odot]$",
     "log10_mej_wind": r"$M_{\mathrm{ej}}^{\mathrm{wind}}\ [M_\odot]$",
@@ -154,20 +154,20 @@ def build_parser() -> argparse.ArgumentParser:
 
 def interactive(args: argparse.Namespace) -> argparse.Namespace:
     print("Isocouleurs KNe dans l’espace des paramètres")
-    args.run_dir = Path(base.ask("Dossier du run (contenant summary.csv)", "."))
-    args.color_pair = base.ask("Paire de couleurs", args.color_pair)
-    args.photometric_system = base.choose(
+    args.run_dir = Path(population.ask("Dossier du run (contenant summary.csv)", "."))
+    args.color_pair = population.ask("Paire de couleurs", args.color_pair)
+    args.photometric_system = population.choose(
         "Système photométrique",
         [("lsst", "LSST"), ("ps1", "PS1"), ("ztf", "ZTF")],
         args.photometric_system,
     )
-    args.stage = base.choose(
+    args.stage = population.choose(
         "Sorties photométriques",
         [
-            (base.STAGES[0], "Sans m5, sans MW"),
-            (base.STAGES[1], "Sans m5, avec MW"),
-            (base.STAGES[2], "Avec m5, sans MW"),
-            (base.STAGES[3], "Avec m5, avec MW"),
+            (population.STAGES[0], "Sans m5, sans MW"),
+            (population.STAGES[1], "Sans m5, avec MW"),
+            (population.STAGES[2], "Avec m5, sans MW"),
+            (population.STAGES[3], "Avec m5, avec MW"),
             (
                 "compare_no_mw",
                 "Deux sorties comparables : sans m5 et avec m5, sans MW",
@@ -179,18 +179,18 @@ def interactive(args: argparse.Namespace) -> argparse.Namespace:
         ],
         args.stage,
     )
-    args.t_min = float(base.ask("Début des bins temporels [jours]", args.t_min))
-    args.t_max = float(base.ask("Fin des bins temporels [jours]", args.t_max))
-    args.bin_width = float(base.ask("Largeur des bins [jours]", args.bin_width))
-    args.time_frame = base.choose(
+    args.t_min = float(population.ask("Début des bins temporels [jours]", args.t_min))
+    args.t_max = float(population.ask("Fin des bins temporels [jours]", args.t_max))
+    args.bin_width = float(population.ask("Largeur des bins [jours]", args.bin_width))
+    args.time_frame = population.choose(
         "Référence temporelle",
         [("observer", "Temps observateur"), ("source", "Temps source")],
         args.time_frame,
     )
-    args.parameter_pairs = base.ask(
+    args.parameter_pairs = population.ask(
         "Plans x:y (séparés par une virgule)", args.parameter_pairs
     )
-    args.contour_mode = base.choose(
+    args.contour_mode = population.choose(
         "Niveaux des isocouleurs",
         [
             ("fixed", "Grille fixe, par exemple -3,-2,...,3"),
@@ -199,46 +199,46 @@ def interactive(args: argparse.Namespace) -> argparse.Namespace:
         args.contour_mode,
     )
     if args.contour_mode == "fixed":
-        args.contour_levels = base.ask(
+        args.contour_levels = population.ask(
             "Niveaux start:stop:step [mag]", args.contour_levels
         )
     else:
-        args.bounds_file = Path(base.ask("CSV de l’enveloppe"))
-        args.percentile_pair = base.ask(
+        args.bounds_file = Path(population.ask("CSV de l’enveloppe"))
+        args.percentile_pair = population.ask(
             "Percentiles si CSV de profils fixes", args.percentile_pair
         )
-        args.contour_step = float(base.ask("Pas des isocouleurs [mag]", args.contour_step))
+        args.contour_step = float(population.ask("Pas des isocouleurs [mag]", args.contour_step))
     if stage_uses_m5(args.stage):
         if args.photometric_system == "ztf":
             for band in args.color_pair.split("-"):
                 setattr(
                     args,
                     f"ztf_m5_{band}",
-                    float(base.ask(f"Magnitude limite ZTF {band} (5 sigma)")),
+                    float(population.ask(f"Magnitude limite ZTF {band} (5 sigma)")),
                 )
         else:
             args.m5_percentile = float(
-                base.ask(
+                population.ask(
                     "Percentile OpSim utilisé comme seuil m5 (p90 = 90)",
                     args.m5_percentile,
                 )
             )
-            explicit = base.ask(
+            explicit = population.ask(
                 "Table m5 ou dossier OpSim brut (vide = recherche automatique)"
             )
             args.m5_quantile_table = Path(explicit) if explicit else None
-    args.max_events = int(base.ask("Événements analysés (0 = tous)", args.max_events))
-    args.grid_size = int(base.ask("Cellules par axe", args.grid_size))
+    args.max_events = int(population.ask("Événements analysés (0 = tous)", args.max_events))
+    args.grid_size = int(population.ask("Cellules par axe", args.grid_size))
     args.minimum_cell_events = int(
-        base.ask("Couleurs minimales par cellule", args.minimum_cell_events)
+        population.ask("Couleurs minimales par cellule", args.minimum_cell_events)
     )
     args.smooth_sigma = float(
-        base.ask("Lissage des contours [cellules]", args.smooth_sigma)
+        population.ask("Lissage des contours [cellules]", args.smooth_sigma)
     )
     args.panels_per_page = int(
-        base.ask("Nombre de panneaux par PNG", args.panels_per_page)
+        population.ask("Nombre de panneaux par PNG", args.panels_per_page)
     )
-    output = base.ask("Dossier de sortie (vide = automatique)")
+    output = population.ask("Dossier de sortie (vide = automatique)")
     args.output_dir = Path(output) if output else None
     return args
 
@@ -356,7 +356,7 @@ def plotting_axis(parameter: str, edges: np.ndarray):
     """Return plotting coordinates, label, and scale for one parameter axis."""
     if parameter in MASS_AXIS_LABELS:
         return np.power(10.0, edges), MASS_AXIS_LABELS[parameter], "log"
-    return edges, base.PARAMETER_LABELS.get(parameter, parameter), "linear"
+    return edges, population.PARAMETER_LABELS.get(parameter, parameter), "linear"
 
 
 def mass_tick_label(value: float, _position=None) -> str:
@@ -687,9 +687,9 @@ def main(argv=None) -> None:
             parser.error("--run-dir requis hors terminal interactif")
         args = interactive(args)
 
-    root = base.resolve_root(args.run_dir)
+    root = population.resolve_root(args.run_dir)
     time_edges, times = time_grid(args.t_min, args.t_max, args.bin_width)
-    pairs = base.parse_parameter_pairs(args.parameter_pairs)
+    pairs = population.parse_parameter_pairs(args.parameter_pairs)
     bands = tuple(args.color_pair.strip().lower().split("-"))
     allowed = {"lsst": set("ugrizy"), "ps1": set("grizy"), "ztf": set("gri")}
     if len(bands) != 2 or bands[0] == bands[1] or not set(bands) <= allowed[args.photometric_system]:
@@ -703,18 +703,18 @@ def main(argv=None) -> None:
     if args.panels_per_page < 1:
         raise ValueError("--panels-per-page doit être positif")
 
-    metadata = base.load_metadata(root, args.max_events, args.seed)
+    metadata = population.load_metadata(root, args.max_events, args.seed)
     parameter_arrays = {}
     for pair in pairs:
         for parameter in pair:
-            parameter_arrays[parameter] = base.parameter_values(metadata, parameter)
-            base.axis_domain(parameter_arrays[parameter])
+            parameter_arrays[parameter] = population.parameter_values(metadata, parameter)
+            population.axis_domain(parameter_arrays[parameter])
 
     requested_stage = args.stage
     load_stage, output_stage_masks = stage_plan(requested_stage)
     args.stage = load_stage
     depths, depth_source = load_depths(args, root, bands)
-    colour, model_supported, depth_supported = base.load_event_colours(
+    colour, model_supported, depth_supported = population.load_event_colours(
         args, root, metadata, bands, times, depths
     )
     args.stage = requested_stage
@@ -740,7 +740,7 @@ def main(argv=None) -> None:
             raise ValueError("Percentiles requis : 0 < q_low < q_high < 100")
         levels_by_stage = {}
         for stage in availability:
-            bounds = base.read_bounds(
+            bounds = population.read_bounds(
                 bounds_path, times, stage, q, args.reference_repetition
             )
             levels_by_stage[stage] = envelope_levels(bounds, args.contour_step)
@@ -788,8 +788,8 @@ def main(argv=None) -> None:
         for x_name, y_name in pairs:
             x = parameter_arrays[x_name]
             y = parameter_arrays[y_name]
-            x_domain = base.axis_domain(x)
-            y_domain = base.axis_domain(y)
+            x_domain = population.axis_domain(x)
+            y_domain = population.axis_domain(y)
             x_edges = np.linspace(*x_domain, args.grid_size + 1)
             y_edges = np.linspace(*y_domain, args.grid_size + 1)
             grids = []

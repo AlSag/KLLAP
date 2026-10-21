@@ -70,8 +70,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--project-root", type=Path, default=Path("."))
     parser.add_argument("--generator", type=Path)
-    parser.add_argument("--analyzer", type=Path)
-    parser.add_argument("--comparator", type=Path)
+    parser.add_argument(
+        "--analyzer", type=Path,
+        help="Unified latitude-analysis command",
+    )
     parser.add_argument("--opsim-dir", type=Path)
     parser.add_argument("--runs-root", type=Path)
     parser.add_argument("--intrinsic-catalog", type=Path)
@@ -370,6 +372,7 @@ def analyzer_command(
     return [
         sys.executable,
         str(analyzer),
+        "population",
         "--run-dir", str(spec.run_dir),
         "--output-dir", str(spec.analysis_dir),
         "--color-pair", "g-r",
@@ -397,7 +400,7 @@ def comparator_command(
     output: Path,
     args: argparse.Namespace,
 ) -> list[str]:
-    command = [sys.executable, str(comparator)]
+    command = [sys.executable, str(comparator), "compare-bins"]
     for spec in specs:
         command.extend(
             [
@@ -430,16 +433,14 @@ def resolve_paths(args: argparse.Namespace) -> tuple[argparse.Namespace, dict[st
     paths = {
         "root": root,
         "generator": absolute(args.generator or Path("generate_kne_lightcurves.py"), root),
-        "analyzer": absolute(args.analyzer or Path("analyze_kne_latitude_losses.py"), root),
-        "comparator": absolute(args.comparator or Path("compare_kne_latitude_bins.py"), root),
+        "analyzer": absolute(args.analyzer or Path("analyze_kne_latitude.py"), root),
         "opsim": absolute(args.opsim_dir or Path("opsim_exports_all_survey"), root),
         "runs": absolute(args.runs_root or Path("runs"), root),
         "catalog": absolute(args.intrinsic_catalog or Path("paired_intrinsic_population_uniform.csv"), root),
     }
     for key, label in (
         ("generator", "Générateur avec mode bin"),
-        ("analyzer", "Script d'analyse"),
-        ("comparator", "Comparateur par tranches"),
+        ("analyzer", "Commande unifiée d'analyse"),
     ):
         if interactive and not paths[key].is_file():
             paths[key] = absolute(Path(prompt_text(label, str(paths[key]))), root)
@@ -489,7 +490,6 @@ def validate_configuration(args: argparse.Namespace, paths: dict[str, Path]) -> 
     for key, label in (
         ("generator", "Générateur"),
         ("analyzer", "Analyseur"),
-        ("comparator", "Comparateur"),
     ):
         validate_file(paths[key], label)
     validate_directory(paths["opsim"], "Dossier OpSim")
@@ -590,7 +590,7 @@ def main() -> None:
             raise RuntimeError("Sortie finale partielle; utilisez --overwrite-final après vérification")
         run_command(
             "comparaison globale par tranches",
-            comparator_command(paths["comparator"], specs, paths["output"], args),
+            comparator_command(paths["analyzer"], specs, paths["output"], args),
             args.dry_run,
         )
 

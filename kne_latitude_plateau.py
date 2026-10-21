@@ -363,9 +363,9 @@ def interactive(args):
     return args
 
 
-def main():
-    p = parser(); args = p.parse_args()
-    if args.interactive or (len(sys.argv) == 1 and sys.stdin.isatty()):
+def main(argv=None):
+    p = parser(); args = p.parse_args(argv)
+    if args.interactive or (argv is None and len(sys.argv) == 1 and sys.stdin.isatty()):
         args = interactive(args)
     if args.event_table is None and not args.pair:
         p.error("Donner --event-table ou plusieurs --pair, ou lancer --interactive")

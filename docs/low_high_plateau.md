@@ -2,7 +2,7 @@
 
 ## Question et définition
 
-Le nouveau script `plot_kne_low_high_plateau.py` calcule à chaque seuil b :
+La commande `analyze_kne_latitude.py plateau` calcule à chaque seuil b :
 
     low : |latitude galactique| < b
     high : |latitude galactique| >= b
@@ -30,13 +30,13 @@ nul n'est remplacé par 1 ; il reste indéfini.
 Depuis le dépôt, dans l'environnement habituel :
 
 ```bash
-python plot_kne_low_high_plateau.py
+python analyze_kne_latitude.py plateau
 ```
 
 Deux modes d'entrée sont proposés :
 
 1. Une population all-sky et son `event_window_availability.csv`, déjà produit
-   par `analyze_kne_latitude_losses.py`. Chaque seuil sépare cette population en
+   par `analyze_kne_latitude.py population`. Chaque seuil sépare cette population en
    low et high. Les effectifs ne sont pas forcément égaux.
 2. Des populations low/high réellement simulées à chaque seuil, avec leur CSV
    de disponibilité. Le mode apparié nécessite le même catalogue synthétique
@@ -51,7 +51,7 @@ pas de courbes de lumière et ne relit pas les shards Parquet.
 ## Une population all-sky existante
 
 ```bash
-python plot_kne_low_high_plateau.py \
+python analyze_kne_latitude.py plateau \
   --event-table /chemin/du/run/analysis/latitude_losses/event_window_availability.csv \
   --thresholds 5,10,15,20,25,30,40,50 \
   --bootstrap-repetitions 2000 \
@@ -70,7 +70,7 @@ de pertes, puis relancer ce script sur ce CSV.
 ## Runs appariés low/high existants
 
 ```bash
-python plot_kne_low_high_plateau.py \
+python analyze_kne_latitude.py plateau \
   --pair 5 /chemin/b05_low /chemin/b05_high \
   --pair 10 /chemin/b10_low /chemin/b10_high \
   --pair 15 /chemin/b15_low /chemin/b15_high \
@@ -133,7 +133,7 @@ justifier l'optimisation complète des cuts.
 ## Vérification
 
 ```bash
-python -m py_compile plot_kne_low_high_plateau.py
+python -m py_compile analyze_kne_latitude.py kne_latitude_plateau.py
 PYTHONPATH=. python -m unittest discover -s tests -p 'test_low_high_plateau.py' -v
 ```
 

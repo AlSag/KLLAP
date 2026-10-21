@@ -518,8 +518,8 @@ def save_table(
     plt.close(fig)
 
 
-def main() -> None:
-    args = build_parser().parse_args()
+def main(argv=None) -> None:
+    args = build_parser().parse_args(argv)
     if args.bootstrap_repetitions < 100:
         raise ValueError("Use at least 100 bootstrap repetitions")
     if not 0 < args.plateau_relative_tolerance < 1:

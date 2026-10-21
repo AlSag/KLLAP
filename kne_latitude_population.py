@@ -571,8 +571,8 @@ def save_plots(bins: pd.DataFrame, scan: pd.DataFrame,
         plt.close(fig)
 
 
-def main() -> None:
-    args = parser().parse_args()
+def main(argv=None) -> None:
+    args = parser().parse_args(argv)
     root = args.run_dir.expanduser().resolve()
     bands = tuple(args.color_pair.lower().replace("_", "-").split("-"))
     if len(bands) != 2 or bands[0] == bands[1]:

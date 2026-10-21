@@ -12,16 +12,10 @@ in the code and methodology documents referenced below.
 | `generate_kne_lightcurves.py` | Generate physical populations and saved photometric products | Core |
 | `build_color_envelopes.py` | Construct colour populations and statistically valid envelopes | Core |
 | `analyze_envelope_population_convergence_fast.py` | Recommended nested-subsample convergence workflow | Core |
-| `replot_envelope_population_convergence.py` | Rebuild convergence plots from saved CSV products | Core |
-| `plot_convergence_support_diagnostics.py` | Display per-bin support and percentile errors from convergence CSV products | Diagnostic |
 | `plot_colour_envelope_realizations.py` | Compare nested population sizes across independent realizations and inspect bootstrap distributions | Core analysis |
-| `plot_kne_colour_parameter_space.py` | Map colour selections into physical-parameter space | Core analysis |
 | `plot_kne_colour_isocontours.py` | Map median colour and iso-colour contours in physical-parameter planes | Core analysis |
 | `run_latitude_experiment.py` | Orchestrate paired latitude-bin populations | Core analysis |
-| `analyze_kne_latitude_losses.py` | Compute per-population latitude outcomes | Core analysis |
-| `compare_kne_latitude_bins.py` | Compare paired latitude bins | Core analysis |
-| `plot_kne_low_high_plateau.py` | Diagnose stability of low/high latitude ratios | Core analysis |
-| `estimate_kne_lsst_distance_reach.py` | Estimate synthetic two-band colour reach | Core analysis |
+| `analyze_kne_latitude.py` | Unified population, paired-bin, and plateau latitude analysis | Core analysis |
 
 ## Shared implementation
 
@@ -45,6 +39,10 @@ in the code and methodology documents referenced below.
 | `kne_convergence_common.py` | Parsing, aggregation, and plotting conventions shared by convergence commands |
 | `envelope_colour_convergence.py` | Detailed colour-value convergence calculations |
 | `envelope_multiquantile_convergence.py` | Multi-percentile value and temporal-extent convergence |
+| `kne_colour_population.py` | Metadata loading, parameter transforms, and colour interpolation for iso-colour maps |
+| `kne_latitude_population.py` | Per-population latitude-loss calculations and products |
+| `kne_latitude_comparison.py` | Paired disjoint-bin bootstrap comparison and products |
+| `kne_latitude_plateau.py` | Low/high latitude-cut stability calculations and products |
 The single-load convergence command replaces the former subprocess workflow.
 Its `--stability-metric last-edge` mode preserves the original last-bin
 analysis, while avoiding repeated reads and intermediate envelope builds.
