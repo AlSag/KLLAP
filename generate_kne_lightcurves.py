@@ -130,7 +130,7 @@ import pandas as pd
 RUBIN_BANDS = tuple("ugrizy")
 
 
-def ensure_mw_extinction_columns(
+def _ensure_mw_extinction_columns(
     visits: pd.DataFrame,
     dust_coefficients: dict[str, float],
 ) -> pd.DataFrame:
@@ -161,12 +161,12 @@ def ensure_mw_extinction_columns(
     return v
 
 
-def get_event_mw_extinction_summary(
+def _get_event_mw_extinction_summary(
     visits: pd.DataFrame,
     dust_coefficients: dict[str, float],
 ) -> dict[str, object]:
     """Summarize E(B-V) and Rubin extinction for one selected field/event."""
-    v = ensure_mw_extinction_columns(visits, dust_coefficients)
+    v = _ensure_mw_extinction_columns(visits, dust_coefficients)
     ebv_values = pd.to_numeric(
         v.get("ebv_mw", pd.Series(np.nan, index=v.index)), errors="coerce"
     ).to_numpy(float)
@@ -202,7 +202,7 @@ def get_event_mw_extinction_summary(
     return summary
 
 
-def trim_lsstlike_after_last_detection(
+def _trim_lsstlike_after_last_detection(
     observations: pd.DataFrame,
     days_after_last_detection: float = 10.0,
 ) -> tuple[pd.DataFrame, float, float, bool]:
@@ -226,7 +226,7 @@ def trim_lsstlike_after_last_detection(
     return out, last_detection, window_end, True
 
 
-def apply_synthetic_m5_median_cut(
+def _apply_synthetic_m5_median_cut(
     measurements: pd.DataFrame,
     objectid: str,
     m5_medians: dict[str, float],
@@ -253,7 +253,7 @@ def apply_synthetic_m5_median_cut(
     return out
 
 
-def keep_only_mw_extincted_synthetic_magnitude(
+def _keep_only_mw_extincted_synthetic_magnitude(
     measurements: pd.DataFrame,
 ) -> pd.DataFrame:
     """Replace the saved magnitude by its MW-extincted value."""
@@ -267,7 +267,7 @@ def keep_only_mw_extincted_synthetic_magnitude(
     return out.drop(columns=["mag_mw_extincted"])
 
 
-def derive_sky_seed(
+def _derive_sky_seed(
     intrinsic_seed: int,
     latitude_mode: str,
     threshold_deg: float,
@@ -303,7 +303,7 @@ plt.rcParams["text.usetex"] = False
 plt.rcParams["font.family"] = "DejaVu Sans"
 
 
-def plot_synthetic_only(
+def _plot_synthetic_only(
     times, mag_dict, filters, filter_colors, mag_lim, outfile
 ):
     """Save a diagnostic plot of the dense synthetic light curves."""
@@ -357,7 +357,7 @@ def plot_synthetic_only(
     plt.close(fig)
 
 
-def plot_saved_synthetic_measurements(
+def _plot_saved_synthetic_measurements(
     measurements,
     filter_colors,
     outfile,
@@ -431,7 +431,7 @@ def plot_saved_synthetic_measurements(
     return True
 
 
-def plot_numerical_floor_diagnostic(
+def _plot_numerical_floor_diagnostic(
     times,
     raw_magnitudes_by_filter,
     filters,
@@ -502,7 +502,7 @@ def plot_numerical_floor_diagnostic(
     plt.close(fig)
 
 
-def plot_synthetic_and_lsstlike(
+def _plot_synthetic_and_lsstlike(
     times,
     mag_dict,
     observations,
@@ -633,7 +633,7 @@ def plot_synthetic_and_lsstlike(
     plt.close(fig)
 
 
-def plot_lsstlike_only(
+def _plot_lsstlike_only(
     observations,
     filters,
     filter_colors,
@@ -1394,21 +1394,6 @@ def configure_runtime() -> argparse.Namespace:
         raise ValueError("--posterior-file is required when --parameter-source posterior")
     return args
 
-# Preserve the calculation/plot implementations before the workflow-specific
-# convenience wrappers below bind survey configuration automatically.
-_ensure_mw_extinction_columns = ensure_mw_extinction_columns
-_get_event_mw_extinction_summary = get_event_mw_extinction_summary
-_trim_lsstlike_after_last_detection = trim_lsstlike_after_last_detection
-_apply_synthetic_m5_median_cut = apply_synthetic_m5_median_cut
-_keep_only_mw_extincted_synthetic_magnitude = keep_only_mw_extincted_synthetic_magnitude
-_derive_sky_seed = derive_sky_seed
-_plot_synthetic_only = plot_synthetic_only
-_plot_saved_synthetic_measurements = plot_saved_synthetic_measurements
-_plot_numerical_floor_diagnostic = plot_numerical_floor_diagnostic
-_plot_synthetic_and_lsstlike = plot_synthetic_and_lsstlike
-_plot_lsstlike_only = plot_lsstlike_only
-
-
 # OpSim uses single-letter Rubin bands, whereas FIESTA uses explicit filter
 # names.  This mapping selects the model curve required by each visit.
 BAND_TO_FIESTA = {
@@ -1496,6 +1481,8 @@ def plot_saved_synthetic_measurements(
     filter_colors,
     outfile,
     event_index,
+    filter_systems,
+    filter_by_system,
 ):
     """Plot the final saved synthetic measurements for one event."""
     return _plot_saved_synthetic_measurements(
@@ -1503,8 +1490,8 @@ def plot_saved_synthetic_measurements(
         filter_colors,
         outfile,
         event_index,
-        FILTER_SYSTEMS,
-        FILTER_BY_SYSTEM,
+        filter_systems,
+        filter_by_system,
     )
 
 
@@ -1571,6 +1558,8 @@ def apply_lsst_realism_to_fiesta(
     det_snr=5.0,
     mag_truth_cap=None,
     rng=None,
+    *,
+    apply_mw_extinction_to_lsst_realism,
 ):
 
     """Project a dense FIESTA light curve through an OpSim visit sequence.
@@ -1659,9 +1648,11 @@ def apply_lsst_realism_to_fiesta(
     v["mag_true_no_mw"] = mag_true
     A_mw = pd.to_numeric(v.get("A_mw", np.nan), errors="coerce").to_numpy(float)
     mag_true_mw = mag_true + A_mw
-    v["mw_extinction_applied_to_snr"] = bool(APPLY_MW_EXTINCTION_TO_LSST_REALISM)
+    v["mw_extinction_applied_to_snr"] = bool(
+        apply_mw_extinction_to_lsst_realism
+    )
 
-    if APPLY_MW_EXTINCTION_TO_LSST_REALISM:
+    if apply_mw_extinction_to_lsst_realism:
         v["mag_true_mw_extincted"] = mag_true_mw
         v["mag_true"] = mag_true_mw
     else:
@@ -1823,33 +1814,43 @@ class UniformComovingVolumeSampler:
 def sample_distance_redshift_for_event(
     rng: np.random.Generator,
     sampler: UniformComovingVolumeSampler | None,
+    *,
+    distance_sampling: str,
+    fixed_redshift: float,
+    fixed_luminosity_distance_mpc: float,
 ) -> tuple[float, float]:
     """Return one Planck18-consistent ``(z, D_L[Mpc])`` pair.
 
     Population runs draw independently and uniformly in comoving volume.
     Fixed-distance runs return the single configured diagnostic distance.
     """
-    mode = str(DISTANCE_SAMPLING).lower().strip()
+    mode = str(distance_sampling).lower().strip()
     if mode == "fixed":
-        return float(FIXED_REDSHIFT), float(FIXED_LUMINOSITY_DISTANCE_MPC)
+        return float(fixed_redshift), float(fixed_luminosity_distance_mpc)
     if mode == "comoving_volume":
         if sampler is None:
             raise RuntimeError("Comoving-volume sampler was not initialized")
         return sampler.sample(rng)
-    raise ValueError("DISTANCE_SAMPLING must be 'fixed' or 'comoving_volume'")
+    raise ValueError("distance_sampling must be 'fixed' or 'comoving_volume'")
 
 
-def sample_inclination_for_event(rng: np.random.Generator) -> float:
+def sample_inclination_for_event(
+    rng: np.random.Generator,
+    *,
+    sampling: str,
+    minimum_rad: float,
+    maximum_rad: float,
+) -> float:
     """Return inclination_EM [rad].
 
     For isotropic orientations over [0, pi/2], draw mu=cos(i) uniformly
     in [0, 1] and return i=arccos(mu). This gives p(i) proportional to sin(i).
     """
-    mode = str(INCLINATION_SAMPLING).lower().strip()
-    i_min = float(INCLINATION_MIN_RAD)
-    i_max = float(INCLINATION_MAX_RAD)
+    mode = str(sampling).lower().strip()
+    i_min = float(minimum_rad)
+    i_max = float(maximum_rad)
     if not (0.0 <= i_min < i_max <= np.pi):
-        raise ValueError("Require 0 <= INCLINATION_MIN_RAD < INCLINATION_MAX_RAD <= pi")
+        raise ValueError("Require 0 <= minimum_rad < maximum_rad <= pi")
 
     if mode == "uniform_angle":
         return float(rng.uniform(i_min, i_max))
@@ -1861,7 +1862,7 @@ def sample_inclination_for_event(rng: np.random.Generator) -> float:
         mu = float(np.clip(mu, -1.0, 1.0))
         return float(np.arccos(mu))
 
-    raise ValueError("INCLINATION_SAMPLING must be 'uniform_cos' or 'uniform_angle'")
+    raise ValueError("sampling must be 'uniform_cos' or 'uniform_angle'")
 
 
 # --- PHOTOMETRIC FILTER SYSTEMS ---
@@ -1941,6 +1942,7 @@ DUST_R_X_BY_SYSTEM = {
 
 def add_multisystem_extinction_summary(
     event_summary: dict[str, object],
+    filter_systems,
 ) -> dict[str, object]:
     """Add unambiguous per-system ``R`` and ``A`` values for one event.
 
@@ -1953,7 +1955,7 @@ def add_multisystem_extinction_summary(
     """
     out = dict(event_summary)
     ebv = float(out.get("ebv_mw", np.nan))
-    for system in FILTER_SYSTEMS:
+    for system in filter_systems:
         for band, coefficient in DUST_R_X_BY_SYSTEM[system].items():
             coefficient = float(coefficient)
             out[f"R_{system}_{band}_mw"] = coefficient
@@ -2477,10 +2479,10 @@ def run_generation(RUNTIME: argparse.Namespace) -> None:
     if MODEL_NAME == "Bu2026_MLP":
         KN_prior = [
             # inclination_EM is sampled separately so it is uniform in cos(i).
-            Uniform(xmin=-3.0, xmax=-1.3, naming=["log10_mej_dyn"]),
-            Uniform(xmin=0.12, xmax=0.28, naming=["v_ej_dyn"]),
+            Uniform(xmin=-4.0, xmax=-1.31, naming=["log10_mej_dyn"]),
+            Uniform(xmin=0.12, xmax=0.35, naming=["v_ej_dyn"]),
             Uniform(xmin=0.15, xmax=0.35, naming=["Ye_dyn"]),
-            Uniform(xmin=-2.0, xmax=-0.9, naming=["log10_mej_wind"]),
+            Uniform(xmin=-4.0, xmax=-0.56, naming=["log10_mej_wind"]),
             Uniform(xmin=0.05, xmax=0.15, naming=["v_ej_wind"]),
             Uniform(xmin=0.2, xmax=0.4, naming=["Ye_wind"]),
         ]
@@ -2671,10 +2673,18 @@ def run_generation(RUNTIME: argparse.Namespace) -> None:
             params = {name: float(sample[name][0]) for name in prior.naming}
         params.update(fixed_params)
         if "inclination_EM" not in params:
-            params["inclination_EM"] = sample_inclination_for_event(physical_rng)
+            params["inclination_EM"] = sample_inclination_for_event(
+                physical_rng,
+                sampling=INCLINATION_SAMPLING,
+                minimum_rad=INCLINATION_MIN_RAD,
+                maximum_rad=INCLINATION_MAX_RAD,
+            )
         z, d_l = sample_distance_redshift_for_event(
             rng=physical_rng,
             sampler=COMOVING_VOLUME_SAMPLER,
+            distance_sampling=DISTANCE_SAMPLING,
+            fixed_redshift=FIXED_REDSHIFT,
+            fixed_luminosity_distance_mpc=FIXED_LUMINOSITY_DISTANCE_MPC,
         )
         params["redshift"] = float(z)
         params["luminosity_distance"] = float(d_l)
@@ -3499,7 +3509,8 @@ def run_generation(RUNTIME: argparse.Namespace) -> None:
             event_mw_extinction[f"R_{_band}_mw"] = float(DUST_R_X[_band])
             event_mw_extinction[f"A_{_band}_mw"] = np.nan
         event_mw_extinction = add_multisystem_extinction_summary(
-            event_mw_extinction
+            event_mw_extinction,
+            filter_systems=FILTER_SYSTEMS,
         )
 
         detection_evaluated = False
@@ -3525,7 +3536,8 @@ def run_generation(RUNTIME: argparse.Namespace) -> None:
             field_idx, selected_opsim_file = ELIGIBLE_OPSIM_FILES[selected_position]
             visits = OPSIM_VISIT_CACHE.get(selected_opsim_file)
             event_mw_extinction = add_multisystem_extinction_summary(
-                get_event_mw_extinction_summary(visits)
+                get_event_mw_extinction_summary(visits),
+                filter_systems=FILTER_SYSTEMS,
             )
             ra_event = float(event_mw_extinction.get("fieldRA", np.nan))
             dec_event = float(event_mw_extinction.get("fieldDec", np.nan))
@@ -3593,6 +3605,9 @@ def run_generation(RUNTIME: argparse.Namespace) -> None:
                 det_snr=DET_SNR,
                 mag_truth_cap=event_numerical_support_cut_mag,
                 rng=rng_i,
+                apply_mw_extinction_to_lsst_realism=(
+                    APPLY_MW_EXTINCTION_TO_LSST_REALISM
+                ),
             )
             (
                 obs,
@@ -3790,6 +3805,8 @@ def run_generation(RUNTIME: argparse.Namespace) -> None:
                 filter_colors=FILTER_COLORS,
                 outfile=pngdir / f"lightcurve_synthetic_{i:04d}.png",
                 event_index=i,
+                filter_systems=FILTER_SYSTEMS,
+                filter_by_system=FILTER_BY_SYSTEM,
             )
             if plot_written and APPLY_NUMERICAL_SUPPORT_CUT:
                 plot_numerical_floor_diagnostic(

@@ -38,6 +38,15 @@ class GeneratorStructureTest(unittest.TestCase):
         self.assertIn("configure_runtime", called)
         self.assertIn("run_generation", called)
 
+    def test_top_level_function_names_are_unique(self):
+        names = [
+            node.name
+            for node in self.tree.body
+            if isinstance(node, ast.FunctionDef)
+        ]
+        duplicates = sorted({name for name in names if names.count(name) > 1})
+        self.assertEqual(duplicates, [])
+
     def test_public_file_contains_science_plots_and_terminal_interface(self):
         functions = {
             node.name for node in self.tree.body if isinstance(node, ast.FunctionDef)
@@ -80,6 +89,37 @@ class GeneratorStructureTest(unittest.TestCase):
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
         }
         self.assertTrue(forbidden.isdisjoint(top_level_calls))
+
+    def test_module_helpers_do_not_read_run_generation_locals_as_globals(self):
+        forbidden_by_function = {
+            "plot_saved_synthetic_measurements": {
+                "FILTER_SYSTEMS", "FILTER_BY_SYSTEM",
+            },
+            "apply_lsst_realism_to_fiesta": {
+                "APPLY_MW_EXTINCTION_TO_LSST_REALISM",
+            },
+            "sample_distance_redshift_for_event": {
+                "DISTANCE_SAMPLING", "FIXED_REDSHIFT",
+                "FIXED_LUMINOSITY_DISTANCE_MPC",
+            },
+            "sample_inclination_for_event": {
+                "INCLINATION_SAMPLING", "INCLINATION_MIN_RAD",
+                "INCLINATION_MAX_RAD",
+            },
+            "add_multisystem_extinction_summary": {"FILTER_SYSTEMS"},
+        }
+        functions = {
+            node.name: node
+            for node in self.tree.body
+            if isinstance(node, ast.FunctionDef)
+        }
+        for name, forbidden in forbidden_by_function.items():
+            loaded = {
+                node.id
+                for node in ast.walk(functions[name])
+                if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
+            }
+            self.assertTrue(forbidden.isdisjoint(loaded), name)
 
 
 if __name__ == "__main__":

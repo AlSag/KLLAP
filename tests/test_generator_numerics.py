@@ -13,8 +13,11 @@ from generate_kne_lightcurves import (
     _apply_synthetic_m5_median_cut as apply_synthetic_m5_median_cut,
     _derive_sky_seed as derive_sky_seed,
     _ensure_mw_extinction_columns as ensure_mw_extinction_columns,
+    _get_event_mw_extinction_summary as get_event_mw_extinction_summary,
     _keep_only_mw_extincted_synthetic_magnitude as keep_only_mw_extincted_synthetic_magnitude,
     _trim_lsstlike_after_last_detection as trim_lsstlike_after_last_detection,
+    sample_distance_redshift_for_event,
+    sample_inclination_for_event,
 )
 
 
@@ -48,6 +51,21 @@ class MidpointRng:
 
 
 class GeneratorNumericsTest(unittest.TestCase):
+    def test_extinction_summary_calls_the_parameterized_core_helper(self):
+        visits = pd.DataFrame({
+            "band": ["g", "r"],
+            "ebv_mw": [0.1, 0.1],
+            "fieldRA": [10.0, 10.0],
+            "fieldDec": [-20.0, -20.0],
+        })
+        coefficients = {band: 1.0 for band in "ugrizy"}
+
+        summary = get_event_mw_extinction_summary(visits, coefficients)
+
+        self.assertAlmostEqual(summary["ebv_mw"], 0.1)
+        self.assertAlmostEqual(summary["A_g_mw"], 0.1)
+        self.assertAlmostEqual(summary["A_r_mw"], 0.1)
+
     def test_lazy_rubin_initialization_updates_multisystem_coefficients(self):
         coefficients = {band: float(index) for index, band in enumerate("ugrizy", 1)}
 
@@ -157,21 +175,36 @@ class GeneratorNumericsTest(unittest.TestCase):
 
     def test_inclination_sampling_matches_the_selected_geometry(self):
         rng = MidpointRng()
-        uniform_angle = generator_functions(
-            "sample_inclination_for_event",
-            INCLINATION_SAMPLING="uniform_angle",
-            INCLINATION_MIN_RAD=0.0,
-            INCLINATION_MAX_RAD=np.pi / 2.0,
-        )["sample_inclination_for_event"]
-        isotropic = generator_functions(
-            "sample_inclination_for_event",
-            INCLINATION_SAMPLING="uniform_cos",
-            INCLINATION_MIN_RAD=0.0,
-            INCLINATION_MAX_RAD=np.pi / 2.0,
-        )["sample_inclination_for_event"]
+        self.assertAlmostEqual(
+            sample_inclination_for_event(
+                rng,
+                sampling="uniform_angle",
+                minimum_rad=0.0,
+                maximum_rad=np.pi / 2.0,
+            ),
+            np.pi / 4.0,
+        )
+        self.assertAlmostEqual(
+            sample_inclination_for_event(
+                rng,
+                sampling="uniform_cos",
+                minimum_rad=0.0,
+                maximum_rad=np.pi / 2.0,
+            ),
+            np.pi / 3.0,
+        )
 
-        self.assertAlmostEqual(uniform_angle(rng), np.pi / 4.0)
-        self.assertAlmostEqual(isotropic(rng), np.pi / 3.0)
+    def test_fixed_distance_sampling_uses_explicit_runtime_values(self):
+        redshift, distance = sample_distance_redshift_for_event(
+            rng=np.random.default_rng(1),
+            sampler=None,
+            distance_sampling="fixed",
+            fixed_redshift=0.0123,
+            fixed_luminosity_distance_mpc=52.0,
+        )
+
+        self.assertEqual(redshift, 0.0123)
+        self.assertEqual(distance, 52.0)
 
     def test_sky_seeds_are_reproducible_and_latitude_specific(self):
         values = {
