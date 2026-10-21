@@ -32,7 +32,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm, Normalize
-from matplotlib.ticker import FuncFormatter, LogLocator, NullFormatter
+from matplotlib.ticker import LogFormatterMathtext, LogLocator, NullFormatter
 import numpy as np
 import pandas as pd
 from scipy.ndimage import gaussian_filter
@@ -600,15 +600,6 @@ def plotting_axis(parameter: str, edges: np.ndarray):
     return edges, PARAMETER_LABELS.get(parameter, parameter), "linear"
 
 
-def mass_tick_label(value: float, _position=None) -> str:
-    if not np.isfinite(value) or value <= 0:
-        return ""
-    if value >= 1:
-        return f"{value:g}"
-    decimals = max(2, int(math.ceil(-math.log10(value))) + 1)
-    return f"{value:.{decimals}f}".rstrip("0").rstrip(".")
-
-
 def configure_axis_scale(ax, x_scale: str, y_scale: str) -> None:
     for axis, scale in ((ax.xaxis, x_scale), (ax.yaxis, y_scale)):
         if scale != "log":
@@ -617,9 +608,12 @@ def configure_axis_scale(ax, x_scale: str, y_scale: str) -> None:
             ax.set_xscale("log")
         else:
             ax.set_yscale("log")
-        axis.set_major_locator(LogLocator(base=10, subs=(1.0, 2.0, 5.0)))
-        axis.set_major_formatter(FuncFormatter(mass_tick_label))
-        axis.set_minor_locator(LogLocator(base=10, subs=(3.0, 4.0, 6.0, 7.0, 8.0, 9.0)))
+        # Label only complete decades. Decimal labels at 1, 2 and 5 per
+        # decade overlap badly in multi-panel figures; the unlabeled minor
+        # ticks preserve the intermediate scale information.
+        axis.set_major_locator(LogLocator(base=10, subs=(1.0,)))
+        axis.set_major_formatter(LogFormatterMathtext(base=10))
+        axis.set_minor_locator(LogLocator(base=10, subs=tuple(range(2, 10))))
         axis.set_minor_formatter(NullFormatter())
 
 
@@ -688,6 +682,7 @@ def parameter_colour_grid(
         "supported": supported,
         "smoothed_p50": smoothed,
         "N_available": int(mask.sum()),
+        "minimum_cell_events": int(minimum_cell_events),
     }
 
 
@@ -743,7 +738,8 @@ def draw_panel(
     supported_cells = int(grid["supported"].sum())
     ax.set_title(
         f"{time_low:g}–{time_high:g} j  ·  "
-        f"N={grid['N_available']:,}  ·  cellules contours={supported_cells:,}",
+        f"N={grid['N_available']:,}  ·  "
+        f"cellules N≥{grid.get('minimum_cell_events', '?')}={supported_cells:,}",
         fontsize=9.5,
     )
     ax.set_facecolor("#e4e6e8")
@@ -818,17 +814,17 @@ def save_overview_pages(
         stop = min(start + panels_per_page, len(grids))
         count = stop - start
         rows = math.ceil(count / columns)
-        fig = plt.figure(figsize=(5.1 * columns + .9, 4.0 * rows))
+        fig = plt.figure(figsize=(5.25 * columns + 1.0, 4.05 * rows))
         layout = fig.add_gridspec(
             rows,
             columns + 1,
             width_ratios=[1] * columns + [.045],
-            left=.075,
+            left=.09,
             right=.94,
-            bottom=.075,
+            bottom=.085,
             top=.93,
-            wspace=.20,
-            hspace=.25,
+            wspace=.08,
+            hspace=.18,
         )
         axes = []
         shared = None
@@ -853,8 +849,13 @@ def save_overview_pages(
             row, column = divmod(local, columns)
             if row == rows - 1:
                 ax.set_xlabel(x_label)
+            else:
+                ax.tick_params(axis="x", which="both", labelbottom=False)
             if column == 0:
                 ax.set_ylabel(y_label)
+            else:
+                ax.tick_params(axis="y", which="both", labelleft=False)
+            ax.tick_params(axis="both", which="major", labelsize=8.5)
         for ax in axes[count:]:
             ax.set_visible(False)
         if mesh is not None:
