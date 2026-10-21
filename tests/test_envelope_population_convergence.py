@@ -4,11 +4,11 @@ import unittest
 
 import pandas as pd
 
-from kne_convergence_common import (
+from kllap.convergence.common import (
     aggregate_results,
     parse_sample_sizes,
 )
-from kne_envelope_core import select_metadata_subset
+from kllap.envelope.core import select_metadata_subset
 
 
 class EnvelopePopulationConvergenceTest(unittest.TestCase):

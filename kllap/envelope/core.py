@@ -10,7 +10,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from dynamic_color_cut_common import bootstrap_percentiles_batched
+from kllap.colour.common import bootstrap_percentiles_batched
 
 
 RUBIN_MW_R = {

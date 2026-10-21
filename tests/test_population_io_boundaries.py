@@ -8,7 +8,7 @@ from pathlib import Path
 import pandas as pd
 
 import build_color_envelopes as builder
-import kne_population_io as population_io
+import kllap.population_io as population_io
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,7 +23,7 @@ class PopulationIoBoundaryTest(unittest.TestCase):
         self.assertIs(builder.prepare_metadata, population_io.prepare_metadata)
 
     def test_storage_module_has_no_analysis_or_plot_dependency(self):
-        tree = ast.parse((ROOT / "kne_population_io.py").read_text())
+        tree = ast.parse((ROOT / "kllap/population_io.py").read_text())
         imported_roots = set()
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):

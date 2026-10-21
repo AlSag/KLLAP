@@ -17,8 +17,8 @@ from matplotlib.patches import Patch
 import numpy as np
 import pandas as pd
 
-from kne_envelope_core import M5_STAGES, STAGES
-from kne_envelope_plots import (
+from kllap.envelope.core import M5_STAGES, STAGES
+from kllap.envelope.plots import (
     comparison_ylim,
     draw_comparison_envelope,
     draw_envelope,

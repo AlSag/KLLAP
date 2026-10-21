@@ -19,30 +19,42 @@ in the code and methodology documents referenced below.
 
 ## Shared implementation
 
+Each root entry point delegates to `command.py`, `cli.py`, `realizations.py`,
+`isocontours.py`, or `experiment.py` in its matching `kllap/` domain. The
+remaining files below have one narrower responsibility.
+
 | File | Ownership |
 |---|---|
-| `kne_pipeline_common.py` | General run formats, interpolation, OpSim m5 products, posterior loading |
-| `kne_opsim_cli.py` | OpSim command-line parser and terminal menu |
-| `kne_generation_cli.py` | Generation parser, terminal menu, and option validation |
-| `kne_envelope_cli.py` | Envelope parser and terminal menu |
-| `dynamic_color_cut_common.py` | Colour matching, event splits, rule evaluation, bootstrap helpers |
-| `kne_m5.py` | Shared discovery and parsing of m5 percentile tables and raw OpSim depth files |
-| `kne_model_backends.py` | FIESTA surrogate and semi-analytical backend selection |
-| `kne_generation_core.py` | Deterministic generation table transformations |
-| `kne_generation_plots.py` | Generation-only diagnostic figures |
-| `kne_opsim_plots.py` | OpSim depth and revisit-cadence figures |
-| `kne_envelope_core.py` | Extinction, nested subsets, percentile validity, and envelope selection |
-| `kne_population_io.py` | Parquet/CSV discovery and scientific metadata selection shared by analyses |
-| `kne_envelope_population.py` | No-extrapolation interpolation and native colour tracks for envelope construction |
-| `kne_envelope_plots.py` | Plotting primitives for envelope products |
-| `kne_envelope_product_plots.py` | Complete envelope, AT2017gfo, SN Ia, and comparison figures |
-| `kne_convergence_common.py` | Parsing, aggregation, and plotting conventions shared by convergence commands |
-| `envelope_colour_convergence.py` | Detailed colour-value convergence calculations |
-| `envelope_multiquantile_convergence.py` | Multi-percentile value and temporal-extent convergence |
-| `kne_colour_population.py` | Metadata loading, parameter transforms, and colour interpolation for iso-colour maps |
-| `kne_latitude_population.py` | Per-population latitude-loss calculations and products |
-| `kne_latitude_comparison.py` | Paired disjoint-bin bootstrap comparison and products |
-| `kne_latitude_plateau.py` | Low/high latitude-cut stability calculations and products |
+| `kllap/opsim/command.py` | OpSim selection and export orchestration |
+| `kllap/common.py` | General run formats, interpolation, OpSim m5 products, posterior loading |
+| `kllap/opsim/cli.py` | OpSim command-line parser and terminal menu |
+| `kllap/generation/command.py` | Population and light-curve generation orchestration |
+| `kllap/generation/cli.py` | Generation parser, terminal menu, and option validation |
+| `kllap/envelope/command.py` | Colour-envelope orchestration and scientific table output |
+| `kllap/envelope/cli.py` | Envelope parser and terminal menu |
+| `kllap/colour/common.py` | Colour matching, event splits, rule evaluation, bootstrap helpers |
+| `kllap/m5.py` | Shared discovery and parsing of m5 percentile tables and raw OpSim depth files |
+| `kllap/generation/backends.py` | FIESTA surrogate and semi-analytical backend selection |
+| `kllap/generation/core.py` | Deterministic generation table transformations |
+| `kllap/generation/plots.py` | Generation-only diagnostic figures |
+| `kllap/opsim/plots.py` | OpSim depth and revisit-cadence figures |
+| `kllap/envelope/core.py` | Extinction, nested subsets, percentile validity, and envelope selection |
+| `kllap/population_io.py` | Parquet/CSV discovery and scientific metadata selection shared by analyses |
+| `kllap/envelope/population.py` | No-extrapolation interpolation and native colour tracks for envelope construction |
+| `kllap/envelope/plots.py` | Plotting primitives for envelope products |
+| `kllap/envelope/product_plots.py` | Complete envelope, AT2017gfo, SN Ia, and comparison figures |
+| `kllap/convergence/common.py` | Parsing, aggregation, and plotting conventions shared by convergence commands |
+| `kllap/convergence/command.py` | Single-load nested-population convergence orchestration |
+| `kllap/convergence/colour.py` | Detailed colour-value convergence calculations |
+| `kllap/convergence/multiquantile.py` | Multi-percentile value and temporal-extent convergence |
+| `kllap/colour/population.py` | Metadata loading, parameter transforms, and colour interpolation for iso-colour maps |
+| `kllap/colour/realizations.py` | Independent-realization and bootstrap comparison products |
+| `kllap/colour/isocontours.py` | Median-colour grids and iso-colour figures |
+| `kllap/latitude/experiment.py` | Paired-bin generation and analysis orchestration |
+| `kllap/latitude/cli.py` | Unified latitude-analysis dispatcher |
+| `kllap/latitude/population.py` | Per-population latitude-loss calculations and products |
+| `kllap/latitude/comparison.py` | Paired disjoint-bin bootstrap comparison and products |
+| `kllap/latitude/plateau.py` | Low/high latitude-cut stability calculations and products |
 The single-load convergence command replaces the former subprocess workflow.
 Its `--stability-metric last-edge` mode preserves the original last-bin
 analysis, while avoiding repeated reads and intermediate envelope builds.

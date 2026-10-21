@@ -1,7 +1,7 @@
 # Generate a Metzger kilonova population with FIESTA
 
 The generator supports `Bu2026_MLP`, `Bu2019_MLP`, `MetzgerModel`, and
-`MetzgerFullModel`. Keep `kne_model_backends.py` and `kne_pipeline_common.py`
+`MetzgerFullModel`. Keep `kllap/generation/backends.py` and `kllap/common.py`
 beside `generate_kne_lightcurves.py`. The existing envelope builder reads the
 saved magnitudes, so it does not need to load a Metzger model itself.
 The included `build_color_envelopes.py` update removes its requirement for
@@ -182,7 +182,7 @@ other sky-generation settings are identical.
 ## Tests
 
 ```bash
-python -m py_compile generate_kne_lightcurves.py kne_model_backends.py build_color_envelopes.py
+python -m py_compile generate_kne_lightcurves.py kllap/generation/backends.py build_color_envelopes.py
 PYTHONPATH=. python -m unittest discover -s tests -v
 ```
 

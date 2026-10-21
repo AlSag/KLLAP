@@ -9,8 +9,8 @@ import numpy as np
 
 import build_color_envelopes as envelope_command
 import get_opsim_baseline as opsim_command
-import kne_envelope_product_plots as envelope_plots
-import kne_opsim_plots as opsim_plots
+import kllap.envelope.product_plots as envelope_plots
+import kllap.opsim.plots as opsim_plots
 
 
 ROOT = Path(__file__).resolve().parents[1]

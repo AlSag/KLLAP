@@ -54,9 +54,9 @@ git add README.md CITATION.cff LICENSE THIRD_PARTY_NOTICES.md AI_USAGE.md \
 git commit -m "Document current KNe analysis workflow and provenance"
 
 git add \
-  generate_kne_lightcurves.py build_color_envelopes.py kne_model_backends.py \
+  generate_kne_lightcurves.py build_color_envelopes.py kllap/generation/backends.py \
   analyze_envelope_population_convergence_fast.py \
-  envelope_colour_convergence.py envelope_multiquantile_convergence.py \
+  kllap/convergence/colour.py kllap/convergence/multiquantile.py \
   plot_kne_colour_isocontours.py analyze_kne_latitude.py tests
 git commit -m "Add multiquantile convergence and parameter-space analyses"
 ```

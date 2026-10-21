@@ -11,9 +11,9 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from dynamic_color_cut_common import prompt_choice, prompt_text
-from kne_envelope_core import DEFAULT_TAIL_GRID
-from kne_m5 import M5_SCENARIO_LABELS
+from kllap.colour.common import prompt_choice, prompt_text
+from kllap.envelope.core import DEFAULT_TAIL_GRID
+from kllap.m5 import M5_SCENARIO_LABELS
 
 ZTF_DEPTH_FILENAMES = {
     "g": ("lims_public_g.joblib", "lims_g.joblib"),
@@ -557,5 +557,3 @@ def interactive(args: argparse.Namespace) -> argparse.Namespace:
     else:
         args.snia_parquet = None
     return args
-
-

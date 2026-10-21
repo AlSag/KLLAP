@@ -11,7 +11,7 @@ output modes remain in the scripts that own those choices.
 
 How to use this file
 --------------------
-Keep ``kne_pipeline_common.py`` in the same directory as the scripts that
+Keep ``kllap.common.py`` in the same directory as the scripts that
 import it.  Public helpers have names without a leading underscore.  Functions
 whose names start with ``_`` are implementation details and should not normally
 be imported by another script.
@@ -61,7 +61,7 @@ from typing import Any, BinaryIO, Iterable, Mapping, Sequence, TextIO
 import numpy as np
 import pandas as pd
 
-from kne_m5 import M5_SCENARIO_PERCENTILES
+from kllap.m5 import M5_SCENARIO_PERCENTILES
 
 
 # =============================================================================

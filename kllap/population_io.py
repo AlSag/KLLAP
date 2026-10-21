@@ -15,14 +15,14 @@ from typing import Iterator
 import numpy as np
 import pandas as pd
 
-from dynamic_color_cut_common import (
+from kllap.colour.common import (
     canonical_event_id,
     discover_synthetic_files,
     event_id_from_path,
     load_summary,
     run_root,
 )
-from kne_envelope_core import select_metadata_subset
+from kllap.envelope.core import select_metadata_subset
 
 
 LATITUDE_COLUMNS = (

@@ -36,15 +36,22 @@ cadence, image-by-image noise, alert production, or broker selection function.
 | Latitude experiment | `run_latitude_experiment.py` | Generate paired latitude-bin populations and run the comparison |
 | Latitude analysis | `analyze_kne_latitude.py` | Run population, paired-bin, or low/high plateau analyses |
 
-`kne_pipeline_common.py`, `dynamic_color_cut_common.py`,
-`kne_generation_core.py`, `kne_envelope_core.py`, and
-`kne_convergence_common.py` contain shared implementation. Plotting-only code
-is separated into dedicated modules. The terminal interfaces of the three
-main commands live in `kne_opsim_cli.py`, `kne_generation_cli.py`, and
-`kne_envelope_cli.py`; the public scripts reexport them for compatibility.
-Generation, envelope-product, and OpSim plots live respectively in
-`kne_generation_plots.py`, `kne_envelope_product_plots.py`, and
-`kne_opsim_plots.py`. Small inspection tools live in `tools/`.
+Only the eight executable entry points above remain at repository root. They
+are thin compatibility wrappers, so commands such as
+`python generate_kne_lightcurves.py` are unchanged. The implementation is
+grouped by scientific domain under `kllap/`:
+
+| Directory | Contents |
+|---|---|
+| `kllap/opsim/` | OpSim command, terminal interface, and plots |
+| `kllap/generation/` | orchestration, model backends, core calculations, and plots |
+| `kllap/envelope/` | orchestration, interpolation, statistical rules, and plots |
+| `kllap/convergence/` | colour-value and temporal-extent convergence |
+| `kllap/colour/` | shared colour calculations, realization comparison, and isocontours |
+| `kllap/latitude/` | paired experiment, population losses, bin comparison, and plateau analysis |
+
+Cross-domain utilities are limited to `kllap/common.py`, `kllap/m5.py`, and
+`kllap/population_io.py`. Small optional inspection tools live in `tools/`.
 A more detailed ownership map is available in
 [`docs/code_map.md`](docs/code_map.md). The separation between command-line
 entry points, numerical modules, and plotting modules is described in
@@ -178,7 +185,7 @@ python plot_kne_colour_isocontours.py
 ```
 
 Population loading and colour interpolation are isolated in
-`kne_colour_population.py`; the public command owns the terminal interface and
+`kllap/colour/population.py`; the public command owns the terminal interface and
 figures.
 
 ## 6. Study Galactic latitude

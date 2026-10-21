@@ -13,8 +13,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from kne_envelope_core import M5_STAGES, STAGES
-from kne_m5 import M5_SCENARIOS
+from kllap.envelope.core import M5_STAGES, STAGES
+from kllap.m5 import M5_SCENARIOS
 
 
 def parse_sample_sizes(text: str) -> list[int]:

@@ -5,24 +5,38 @@ storage transformations, and plotting code. It is intended as a review guide:
 the command-line scripts remain convenient entry points, while reusable
 modules contain operations that can be tested without launching a simulation.
 
+The repository root is intentionally restricted to stable public commands.
+Each is a short wrapper around the corresponding domain implementation:
+
+| Root command | Implementation |
+|---|---|
+| `get_opsim_baseline.py` | `kllap/opsim/command.py` |
+| `generate_kne_lightcurves.py` | `kllap/generation/command.py` |
+| `build_color_envelopes.py` | `kllap/envelope/command.py` |
+| `analyze_envelope_population_convergence_fast.py` | `kllap/convergence/command.py` |
+| `plot_colour_envelope_realizations.py` | `kllap/colour/realizations.py` |
+| `plot_kne_colour_isocontours.py` | `kllap/colour/isocontours.py` |
+| `run_latitude_experiment.py` | `kllap/latitude/experiment.py` |
+| `analyze_kne_latitude.py` | `kllap/latitude/cli.py` |
+
 ## Generation path
 
 ```mermaid
 flowchart TD
     O[get_opsim_baseline.py] --> E[OpSim exports and m5 tables]
     E --> G[generate_kne_lightcurves.py]
-    B[kne_model_backends.py] --> G
-    C[kne_pipeline_common.py] --> G
+    B[kllap/generation/backends.py] --> G
+    C[kllap/common.py] --> G
     G --> P[Saved light curves and summary]
-    K[kne_generation_core.py] --> G
-    G --> V[kne_generation_plots.py]
+    K[kllap/generation/core.py] --> G
+    G --> V[kllap/generation/plots.py]
 ```
 
 ### Public command
 
-`generate_kne_lightcurves.py` orchestrates one generation run and reexports
-its terminal functions from `kne_generation_cli.py`. Running it as a script
-preserves the interactive workflow.
+`kllap/generation/command.py` orchestrates one generation run and uses
+the terminal functions from `kllap/generation/cli.py`. The root wrapper
+`generate_kne_lightcurves.py` preserves the interactive workflow.
 Importing it only defines functions and does not prompt, initialize Rubin
 bandpasses, create directories, or generate events.
 
@@ -30,24 +44,24 @@ The three main commands have dedicated interface modules:
 
 | Public command | Terminal-only module |
 |---|---|
-| `get_opsim_baseline.py` | `kne_opsim_cli.py` |
-| `generate_kne_lightcurves.py` | `kne_generation_cli.py` |
-| `build_color_envelopes.py` | `kne_envelope_cli.py` |
+| `get_opsim_baseline.py` | `kllap/opsim/cli.py` |
+| `generate_kne_lightcurves.py` | `kllap/generation/cli.py` |
+| `build_color_envelopes.py` | `kllap/envelope/cli.py` |
 
 These modules contain parsers, menus, and validation of option combinations.
 They do not import Rubin, FIESTA, JAX, Astropy, or plotting libraries. Public
-commands reexport the historical function names so existing commands and
+wrappers reexport the historical function names so existing commands and
 external imports continue to work.
 
 ### Scientific backends
 
-`kne_model_backends.py` selects and validates the FIESTA surrogate or
+`kllap/generation/backends.py` selects and validates the FIESTA surrogate or
 semi-analytical model. Changes here can alter the physical prediction and
 therefore require model-level numerical tests.
 
 ### Deterministic generation operations
 
-`kne_generation_core.py` contains small transformations of existing arrays or
+`kllap/generation/core.py` contains small transformations of existing arrays or
 tables:
 
 - construction of Milky-Way extinction columns and summaries;
@@ -61,7 +75,7 @@ receive their inputs explicitly and are covered by small deterministic tests.
 
 ### Diagnostic presentation
 
-`kne_generation_plots.py` contains only the figures produced during
+`kllap/generation/plots.py` contains only the figures produced during
 generation. It receives already calculated arrays and tables. It does not
 draw physical parameters, modify magnitudes, apply depth cuts, classify
 detections, or write scientific CSV/Parquet tables.
@@ -72,41 +86,41 @@ by pixel.
 
 ### General shared utilities
 
-`kne_pipeline_common.py` contains format and discovery utilities shared by
-several pipeline stages. `kne_m5.py` owns m5-table discovery and percentile
+`kllap/common.py` contains format and discovery utilities shared by
+several pipeline stages. `kllap/m5.py` owns m5-table discovery and percentile
 selection. These shared modules avoid maintaining subtly different copies of
 the same convention in multiple scripts.
 
 `get_opsim_baseline.py` follows the same import-safety rule as the generator:
 importing it does not parse terminal input, locate the Rubin database, or
 create export products. Its completed depth and revisit tables are presented
-by `kne_opsim_plots.py`; database and sky-selection code does not call
+by `kllap/opsim/plots.py`; database and sky-selection code does not call
 Matplotlib directly.
 
 ### Envelope construction
 
 `build_color_envelopes.py` remains the user-facing command and orchestration
-layer; its parser and menus live in `kne_envelope_cli.py`.
-`kne_envelope_core.py` owns the numerical conventions shared with the
+layer; its parser and menus live in `kllap/envelope/cli.py`.
+`kllap/envelope/core.py` owns the numerical conventions shared with the
 convergence and parameter-space analyses: MW extinction, reproducible nested
 subsets, bootstrap percentile validity, tail support, and selection of the
 widest valid symmetric envelope.
 
-`kne_population_io.py` owns discovery of Parquet shards or legacy CSV files
+`kllap/population_io.py` owns discovery of Parquet shards or legacy CSV files
 and the metadata/latitude selection. It deliberately performs no colour,
 depth, bootstrap, or plotting calculation. Analysis commands can therefore
 read the saved population without importing the envelope command as their
 storage backend.
 
-`kne_envelope_population.py` owns the next scientific step: interpolation at
+`kllap/envelope/population.py` owns the next scientific step: interpolation at
 fixed bin centres and construction of native colour tracks. It uses only the
 saved temporal support, never extrapolates, and does not decide m5 or
 statistical validity. Those decisions remain visible in
 `build_stage_matrix()` and `build_stage_rules()` respectively.
 
-`kne_envelope_plots.py` receives already computed tracks and envelope tables.
+`kllap/envelope/plots.py` receives already computed tracks and envelope tables.
 It cannot select events, calculate percentiles, apply extinction, or impose an
-m5 cut. `kne_envelope_product_plots.py` assembles the complete stage,
+m5 cut. `kllap/envelope/product_plots.py` assembles the complete stage,
 AT2017gfo, SN Ia, permanent-exit, and two-survey figures from those primitives.
 Neither plotting module owns interpolation or statistical validity.
 Representative figures produced before and after extraction were identical
@@ -122,23 +136,23 @@ summary while the remaining I/O orchestration is reviewed.
 
 | Layer | Public entry point | Internal dependencies |
 |---|---|---|
-| Envelope construction | `build_color_envelopes.py` | `kne_population_io.py`, `kne_envelope_population.py`, `kne_envelope_core.py`, `kne_envelope_product_plots.py`, `dynamic_color_cut_common.py`, `kne_m5.py` |
-| Convergence | `analyze_envelope_population_convergence_fast.py` | `kne_convergence_common.py`, `kne_envelope_core.py`, `envelope_colour_convergence.py`, `envelope_multiquantile_convergence.py` |
-| Realization comparison | `plot_colour_envelope_realizations.py` | `dynamic_color_cut_common.py`, `kne_m5.py` |
-| Iso-colour maps | `plot_kne_colour_isocontours.py` | `kne_colour_population.py`, `kne_m5.py` |
+| Envelope construction | `build_color_envelopes.py` | `kllap/population_io.py`, `kllap/envelope/population.py`, `kllap/envelope/core.py`, `kllap/envelope/product_plots.py`, `kllap/colour/common.py`, `kllap/m5.py` |
+| Convergence | `analyze_envelope_population_convergence_fast.py` | `kllap/convergence/common.py`, `kllap/envelope/core.py`, `kllap/convergence/colour.py`, `kllap/convergence/multiquantile.py` |
+| Realization comparison | `plot_colour_envelope_realizations.py` | `kllap/colour/common.py`, `kllap/m5.py` |
+| Iso-colour maps | `plot_kne_colour_isocontours.py` | `kllap/colour/population.py`, `kllap/m5.py` |
 | Latitude experiment | `run_latitude_experiment.py` | generator, unified latitude analyzer |
-| Latitude analysis | `analyze_kne_latitude.py` | `kne_latitude_population.py`, `kne_latitude_comparison.py`, `kne_latitude_plateau.py` |
+| Latitude analysis | `analyze_kne_latitude.py` | `kllap/latitude/population.py`, `kllap/latitude/comparison.py`, `kllap/latitude/plateau.py` |
 
 Named m5 scenarios (`worst_p25`, `median_p50`, and `best_p75`) are owned by
-`kne_m5.py`. Commands may choose different defaults, but they must not carry a
+`kllap/m5.py`. Commands may choose different defaults, but they must not carry a
 private copy of the allowed names or percentile values. Likewise, the four
-photometric envelope stages are owned by `kne_envelope_core.py`.
+photometric envelope stages are owned by `kllap/envelope/core.py`.
 
 The single-load convergence command is the only convergence entry point.
 Its `last-edge` mode was compared end to end with the removed subprocess
 workflow on the deterministic fixture: all common raw and summary columns
 were identical. Shared aggregation and plotting definitions live in
-`kne_convergence_common.py`.
+`kllap/convergence/common.py`.
 
 ## How to review a scientific change
 

@@ -11,15 +11,16 @@ from unittest.mock import patch
 import numpy as np
 import pandas as pd
 
-import kne_model_backends as backend
-from kne_generation_cli import build_runtime_parser
+import kllap.generation.backends as backend
+from kllap.generation.cli import build_runtime_parser
 
 ROOT = Path(__file__).resolve().parents[1]
+GENERATOR = ROOT / "kllap/generation/command.py"
 
 
 def generator_functions(*names, **namespace):
     """Load selected definitions without executing the simulation at import."""
-    tree = ast.parse((ROOT / "generate_kne_lightcurves.py").read_text())
+    tree = ast.parse(GENERATOR.read_text())
     definitions = [
         n
         for n in ast.walk(tree)
@@ -29,7 +30,7 @@ def generator_functions(*names, **namespace):
         raise AssertionError("Missing generator definition")
     ns = dict(vars(backend), argparse=argparse, np=np, pd=pd, Path=Path, json=json, sys=sys)
     ns.update(namespace)
-    exec(compile(ast.Module(body=definitions, type_ignores=[]), str(ROOT / "generate_kne_lightcurves.py"), "exec"), ns)
+    exec(compile(ast.Module(body=definitions, type_ignores=[]), str(GENERATOR), "exec"), ns)
     return ns
 
 

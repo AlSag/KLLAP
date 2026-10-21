@@ -13,7 +13,7 @@ import secrets
 import sys
 from pathlib import Path
 
-from kne_pipeline_common import prompt_choice, prompt_text
+from kllap.common import prompt_choice, prompt_text
 
 
 def runtime_configuration(argv=None) -> argparse.Namespace:

@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import numpy as np
 import pandas as pd
 
-from envelope_colour_convergence import (
+from kllap.convergence.colour import (
     aggregate_colour_results, colour_errors, compare_profiles,
     envelope_profile, repetition_record, safe_quantile, save_colour_plot,
 )

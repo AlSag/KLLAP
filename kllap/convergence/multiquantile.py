@@ -26,8 +26,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from envelope_colour_convergence import colour_errors, safe_quantile
-import kne_envelope_core as envelope_core
+from kllap.convergence.colour import colour_errors, safe_quantile
+import kllap.envelope.core as envelope_core
 
 
 PROFILE_VERSION = 3
@@ -691,14 +691,17 @@ def _configuration(a, root, sizes, depths, fast, builder, common) -> dict:
             "parent population"
         ),
     })
-    source_files = (
-        Path(__file__), Path(fast.__file__), Path(builder.__file__),
-        Path(envelope_core.__file__),
-        Path(common.__file__), root / "summary.csv",
-    )
+    source_files = {
+        "convergence/multiquantile.py": Path(__file__),
+        "convergence/command.py": Path(fast.__file__),
+        "envelope/command.py": Path(builder.__file__),
+        "envelope/core.py": Path(envelope_core.__file__),
+        "convergence/common.py": Path(common.__file__),
+        "input/summary.csv": root / "summary.csv",
+    }
     conf["source_hashes"] = {
-        path.name: hashlib.sha256(path.read_bytes()).hexdigest()
-        for path in source_files
+        name: hashlib.sha256(path.read_bytes()).hexdigest()
+        for name, path in source_files.items()
     }
     files = sorted((root / "parquet").glob("synthetic_part_*.parquet"))
     if not files:
@@ -714,7 +717,7 @@ def run_multi_percentile_convergence(a, root, sizes, bands, edges, centres):
     """Entry point used by the fast convergence CLI."""
     import analyze_envelope_population_convergence_fast as fast
     import build_color_envelopes as builder
-    import dynamic_color_cut_common as common
+    import kllap.colour.common as common
 
     if a.tolerance_mode != "absolute":
         raise ValueError(
@@ -941,4 +944,3 @@ def run_multi_percentile_convergence(a, root, sizes, bands, edges, centres):
     print("Extent values table:", extent_table_plot)
     print("Percentile values table:", shape_table_plot)
     print("Threshold table:", outputs["thresholds"])
-

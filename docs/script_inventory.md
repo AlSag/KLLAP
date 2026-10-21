@@ -17,16 +17,22 @@ interfaces use descriptive module names and are not separate workflows.
 | `run_latitude_experiment.py` | Paired latitude-bin generation and full analysis |
 | `analyze_kne_latitude.py` | Population, paired-bin, or low/high plateau products |
 
-## Internal modules
+## Internal package
 
-- `kne_*_cli.py`: parsers, interactive menus, and validation;
-- `kne_*_core.py`, `envelope_*_convergence.py`: numerical definitions;
-- `kne_*_plots.py`: plotting implementations;
-- `kne_population_io.py`, `kne_envelope_population.py`, and
-  `kne_colour_population.py`: saved-population loading and interpolation;
-- `kne_latitude_population.py`, `kne_latitude_comparison.py`, and
-  `kne_latitude_plateau.py`: the three explicit latitude analyses dispatched
-  by `analyze_kne_latitude.py`.
+The root commands contain no scientific implementation. Their code is grouped
+under `kllap/` by domain:
+
+- `opsim/`: OpSim command, CLI, and plots;
+- `generation/`: command, CLI, model backends, deterministic core, and plots;
+- `envelope/`: command, CLI, population interpolation, statistics, and plots;
+- `convergence/`: command and the colour/multiquantile convergence methods;
+- `colour/`: shared colour rules, population loading, realizations, and
+  isocontours;
+- `latitude/`: experiment, unified CLI, population analysis, paired-bin
+  comparison, and plateau analysis.
+
+Only genuinely cross-domain code stays directly under `kllap/`:
+`common.py`, `m5.py`, and `population_io.py`.
 
 The latitude modules remain separate because they answer different questions:
 one population's losses, paired disjoint-bin ratios, and stability under a
@@ -43,7 +49,7 @@ were deliberately removed:
 - colour-selected HDR parameter-space projections.
 
 Iso-colour maps retain the required population loading and interpolation in
-`kne_colour_population.py`; no retained command imports a deleted script.
+`kllap/colour/population.py`; no retained command imports a deleted script.
 
 Generated runs, local audit reports, numbered copies, and backup sources must
 remain untracked. A deletion is committed separately enough to remain fully

@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import numpy as np
 import pandas as pd
 
-from kne_latitude_plateau import (
+from kllap.latitude.plateau import (
     allsky_counts, assess_plateau, high_over_low, load_table, pair_counts,
 )
 

@@ -133,7 +133,7 @@ justifier l'optimisation complète des cuts.
 ## Vérification
 
 ```bash
-python -m py_compile analyze_kne_latitude.py kne_latitude_plateau.py
+python -m py_compile analyze_kne_latitude.py kllap/latitude/plateau.py
 PYTHONPATH=. python -m unittest discover -s tests -p 'test_low_high_plateau.py' -v
 ```
 

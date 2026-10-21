@@ -32,8 +32,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from kne_pipeline_common import discover_m5_quantile_table
-from kne_m5 import M5_SCENARIOS
+from kllap.common import discover_m5_quantile_table
+from kllap.m5 import M5_SCENARIOS
 
 
 LSST_R = {

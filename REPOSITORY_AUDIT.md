@@ -16,33 +16,33 @@
 
 - `get_opsim_baseline.py`
 - `generate_kne_lightcurves.py`
-- `kne_model_backends.py`
-- `kne_pipeline_common.py`
+- `kllap/generation/backends.py`
+- `kllap/common.py`
 
 ### Colour and convergence analysis
 
 - `build_color_envelopes.py`
-- `dynamic_color_cut_common.py`
+- `kllap/colour/common.py`
 - `analyze_envelope_population_convergence_fast.py`
-- `envelope_colour_convergence.py`
-- `envelope_multiquantile_convergence.py`
+- `kllap/convergence/colour.py`
+- `kllap/convergence/multiquantile.py`
 - `plot_kne_colour_isocontours.py`
-- `kne_colour_population.py`
+- `kllap/colour/population.py`
 
 The original audit found that the fast convergence entry point imported a
 legacy subprocess command. The dependency was first removed and an end-to-end
 comparison then established that the fast `last-edge` mode preserved the
 legacy raw and summary tables. The redundant subprocess command was removed;
 shared aggregation and plotting definitions remain in
-`kne_convergence_common.py`.
+`kllap/convergence/common.py`.
 
 ### Latitude and reach analysis
 
 - `run_latitude_experiment.py`
 - `analyze_kne_latitude.py`
-- `kne_latitude_population.py`
-- `kne_latitude_comparison.py`
-- `kne_latitude_plateau.py`
+- `kllap/latitude/population.py`
+- `kllap/latitude/comparison.py`
+- `kllap/latitude/plateau.py`
 
 ### Utilities
 

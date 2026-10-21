@@ -13,8 +13,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-import kne_envelope_core as envelope_core
-from kne_population_io import SyntheticPopulationSource
+import kllap.envelope.core as envelope_core
+from kllap.population_io import SyntheticPopulationSource
 
 
 STAGES = envelope_core.STAGES
@@ -161,7 +161,7 @@ def resolve_root(path: Path) -> Path:
 
 
 def load_metadata(root: Path, maximum: int, seed: int) -> pd.DataFrame:
-    from dynamic_color_cut_common import load_summary
+    from kllap.colour.common import load_summary
 
     metadata = load_summary(root)
     if metadata.empty:
@@ -178,7 +178,7 @@ def load_metadata(root: Path, maximum: int, seed: int) -> pd.DataFrame:
 
 def load_event_colours(args, root, metadata, bands, times, depths):
     """Interpolate saved magnitudes and return colour/support/depth masks."""
-    from dynamic_color_cut_common import canonical_event_id, interpolate_band
+    from kllap.colour.common import canonical_event_id, interpolate_band
 
     source = SyntheticPopulationSource(root)
     if source.kind == "missing":
