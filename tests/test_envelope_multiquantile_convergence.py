@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import numpy as np
 import pandas as pd
 
-from envelope_multiquantile_convergence import (
+from analyze_envelope_population_convergence_fast import (
     FIXED_FAMILIES,
     FIXED_PERCENTILES,
     aggregate_extent,

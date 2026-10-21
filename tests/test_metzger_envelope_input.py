@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 
 from build_color_envelopes import (
-    build_parser, canonical_event_id, identify_permanent_exits, prepare_metadata,
+    default_configuration, canonical_event_id, identify_permanent_exits, prepare_metadata,
 )
 
 
@@ -20,7 +20,9 @@ class MetzgerEnvelopeInputTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             pd.DataFrame([row]).to_csv(root / "summary.csv", index=False)
-            args = build_parser().parse_args(["--run-dir", str(root), "--photometric-system", "lsst"])
+            args = default_configuration()
+            args.run_dir = root
+            args.photometric_system = "lsst"
             event_id = canonical_event_id("000000")
             meta = prepare_metadata(args, {event_id})
         self.assertEqual(len(meta), 1)
@@ -38,7 +40,8 @@ class MetzgerEnvelopeInputTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             pd.DataFrame([dict(event_id=0, model="MetzgerModel")]).to_csv(root / "summary.csv", index=False)
-            args = build_parser().parse_args(["--run-dir", str(root)])
+            args = default_configuration()
+            args.run_dir = root
             with self.assertRaisesRegex(ValueError, "ebv_mw"):
                 prepare_metadata(args, {canonical_event_id(0)})
 

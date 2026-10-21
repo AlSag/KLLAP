@@ -82,17 +82,6 @@ from dynamic_color_cut_common import (
 )
 from kne_pipeline_common import discover_m5_quantile_table
 from kne_m5 import M5_SCENARIO_PERCENTILES
-from kne_envelope_product_plots import (
-    event_colour_map,
-    save_at2017gfo_failed_table,
-    save_at2017gfo_overlay,
-    save_dual_system_comparison_plots,
-    save_kne_snia_overlay_plots,
-    save_permanent_exit_table_png,
-    save_snia_population_plots,
-    save_stage_plots,
-    stage_output_name,
-)
 from kne_envelope_core import (
     MW_EXTINCTED_STAGES,
     MW_R_BY_SYSTEM,
@@ -106,7 +95,1252 @@ from kne_envelope_core import (
 )
 from kne_population_io import SyntheticPopulationSource, prepare_metadata
 from kne_population_io import population_latitude_label as _population_latitude_label
-from kne_envelope_population import interpolate_saved_population
+
+# ============================================================================
+# FIGURE PRIMITIVES AND COMPLETE OUTPUT FIGURES
+# ============================================================================
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+from matplotlib.collections import LineCollection
+
+def draw_population(
+    ax: plt.Axes,
+    time_tracks: list[np.ndarray],
+    color_tracks: list[np.ndarray],
+    trajectory_colors: list[str] | None = None,
+) -> None:
+    """Draw every event trajectory without time/colour binning."""
+    segments = []
+    segment_colors = []
+    isolated_times = []
+    isolated_colors = []
+    isolated_plot_colors = []
+    for track_index, (times, colors) in enumerate(zip(time_tracks, color_tracks)):
+        times = np.asarray(times, dtype=float)
+        colors = np.asarray(colors, dtype=float)
+        plot_color = (
+            trajectory_colors[track_index]
+            if trajectory_colors is not None else "black"
+        )
+        finite = np.isfinite(times) & np.isfinite(colors)
+        points = np.column_stack((times[finite], colors[finite]))
+        if len(points) >= 2:
+            segments.append(points)
+            segment_colors.append(plot_color)
+        elif len(points) == 1:
+            isolated_times.append(points[0, 0])
+            isolated_colors.append(points[0, 1])
+            isolated_plot_colors.append(plot_color)
+    if segments:
+        collection = LineCollection(
+            segments,
+            colors=segment_colors,
+            linewidths=0.16 if trajectory_colors is None else 0.75,
+            alpha=0.018 if trajectory_colors is None else 0.78,
+            rasterized=True,
+        )
+        ax.add_collection(collection)
+    if isolated_times:
+        ax.scatter(
+            isolated_times,
+            isolated_colors,
+            s=0.18 if trajectory_colors is None else 3.0,
+            alpha=0.025 if trajectory_colors is None else 0.78,
+            color=isolated_plot_colors,
+            edgecolors="none",
+            rasterized=True,
+        )
+    if not segments and not isolated_times:
+        return
+
+
+def draw_envelope(ax: plt.Axes, rules: pd.DataFrame) -> None:
+    for row in rules.itertuples():
+        x = [row.t_min_days, row.t_max_days]
+        ax.fill_between(
+            x,
+            [row.color_min, row.color_min],
+            [row.color_max, row.color_max],
+            color="#4c78a8",
+            alpha=0.24,
+        )
+        ax.plot(x, [row.color_min] * 2, color="#2f5f98", lw=1.0)
+        ax.plot(x, [row.color_max] * 2, color="#2f5f98", lw=1.0)
+        ax.plot(x, [row.color_median] * 2, color="#d55e00", lw=1.25)
+
+
+def format_axes(ax: plt.Axes, pair: str, t_min: float, t_max: float) -> None:
+    ax.set_xlabel(r"$t-t_{\rm merger}$ [days]")
+    ax.set_ylabel(f"{pair} [mag]")
+    ax.set_xlim(t_min, t_max)
+    ax.grid(alpha=0.18)
+
+
+def format_snia_axes(
+    ax: plt.Axes,
+    pair: str,
+    t_min: float,
+    t_max: float,
+    comparison: bool,
+    time_reference: str,
+) -> None:
+    snia_reference = (
+        r"$t-t_{\rm first\ observation}$"
+        if time_reference == "first_observation"
+        else r"$t-t_{\rm max}$"
+    )
+    if comparison:
+        ax.set_xlabel(
+            r"phase [days] (KNe: $t-t_{\rm merger}$; SNe Ia: "
+            + snia_reference + ")"
+        )
+    else:
+        ax.set_xlabel(snia_reference + " [days]")
+    ax.set_ylabel(f"{pair} [mag]")
+    ax.set_xlim(t_min, t_max)
+    ax.grid(alpha=0.18)
+
+
+def draw_population_style(
+    ax: plt.Axes,
+    time_tracks: list[np.ndarray],
+    color_tracks: list[np.ndarray],
+    color: str,
+    alpha: float,
+    linewidth: float,
+) -> None:
+    segments = []
+    for times, colours in zip(time_tracks, color_tracks):
+        times = np.asarray(times, dtype=float)
+        colours = np.asarray(colours, dtype=float)
+        finite = np.isfinite(times) & np.isfinite(colours)
+        points = np.column_stack((times[finite], colours[finite]))
+        if len(points) >= 2:
+            segments.append(points)
+        elif len(points) == 1:
+            ax.scatter(
+                points[0, 0], points[0, 1], s=0.2, color=color,
+                alpha=alpha, edgecolors="none", rasterized=True,
+            )
+    if segments:
+        ax.add_collection(LineCollection(
+            segments, colors=color, linewidths=linewidth, alpha=alpha,
+            rasterized=True,
+        ))
+
+
+def draw_comparison_envelope(
+    ax: plt.Axes,
+    rules: pd.DataFrame,
+    color: str,
+    linestyle: str,
+    alpha: float,
+) -> None:
+    for row in rules.itertuples():
+        x = [row.t_min_days, row.t_max_days]
+        ax.fill_between(
+            x, [row.color_min] * 2, [row.color_max] * 2,
+            color=color, alpha=alpha,
+        )
+        ax.plot(x, [row.color_min] * 2, color=color, lw=0.9, linestyle=linestyle)
+        ax.plot(x, [row.color_max] * 2, color=color, lw=0.9, linestyle=linestyle)
+        ax.plot(x, [row.color_median] * 2, color=color, lw=1.4, linestyle=linestyle)
+
+
+def comparison_ylim(
+    *collections: list[np.ndarray] | pd.DataFrame,
+) -> tuple[float, float] | None:
+    arrays: list[np.ndarray] = []
+    for collection in collections:
+        if isinstance(collection, pd.DataFrame):
+            if not collection.empty:
+                arrays.append(
+                    collection[["color_min", "color_max"]].to_numpy(float).ravel()
+                )
+        else:
+            finite_tracks = [
+                np.asarray(values, dtype=float) for values in collection
+                if len(values)
+            ]
+            if finite_tracks:
+                values = np.concatenate(finite_tracks)
+                values = values[np.isfinite(values)]
+                if values.size:
+                    arrays.append(np.nanpercentile(values, [0.05, 99.95]))
+    if not arrays:
+        return None
+    values = np.concatenate(arrays)
+    values = values[np.isfinite(values)]
+    if not values.size:
+        return None
+    low, high = float(values.min()), float(values.max())
+    padding = max(0.1, 0.05 * max(high - low, 0.1))
+    return low - padding, high + padding
+
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+from matplotlib.colors import hsv_to_rgb, to_hex
+from matplotlib.lines import Line2D
+from matplotlib.patches import Patch
+import numpy as np
+import pandas as pd
+
+from kne_envelope_core import M5_STAGES, STAGES
+
+
+def event_colour_map(event_indices: np.ndarray) -> dict[int, str]:
+    """Assign stable, well-separated display colours in the supplied order."""
+    golden_ratio_conjugate = 0.6180339887498949
+    return {
+        int(event_index): to_hex(
+            hsv_to_rgb(((rank * golden_ratio_conjugate) % 1.0, 0.72, 0.82))
+        )
+        for rank, event_index in enumerate(event_indices)
+    }
+
+def save_snia_population_plots(
+    output: Path,
+    pair: str,
+    t_min: float,
+    t_max: float,
+    times: list[np.ndarray],
+    colours: list[np.ndarray],
+    rules_all: pd.DataFrame,
+    rules_consecutive: pd.DataFrame,
+    time_reference: str,
+) -> None:
+    fig, ax = plt.subplots(figsize=(9.2, 5.7), constrained_layout=True)
+    draw_population_style(ax, times, colours, "#d97706", 0.025, 0.20)
+    format_snia_axes(
+        ax, pair, t_min, t_max, comparison=False,
+        time_reference=time_reference,
+    )
+    limits = comparison_ylim(colours)
+    if limits is not None:
+        ax.set_ylim(*limits)
+    ax.legend(handles=[
+        Line2D([0], [0], color="#d97706", lw=1.4, label="SN Ia population")
+    ], frameon=False)
+    fig.savefig(
+        output / "snia_population_unbinned.png",
+        dpi=220, bbox_inches="tight",
+    )
+    plt.close(fig)
+
+    for envelope_name, rules in (
+        ("all_valid", rules_all),
+        ("consecutive", rules_consecutive),
+    ):
+        fig, ax = plt.subplots(figsize=(9.2, 5.7), constrained_layout=True)
+        draw_population_style(ax, times, colours, "#d97706", 0.025, 0.20)
+        draw_comparison_envelope(ax, rules, "#d97706", "-", 0.20)
+        format_snia_axes(
+            ax, pair, t_min, t_max, comparison=False,
+            time_reference=time_reference,
+        )
+        limits = comparison_ylim(colours, rules)
+        if limits is not None:
+            ax.set_ylim(*limits)
+        ax.legend(handles=[
+            Line2D([0], [0], color="#d97706", lw=1.6, label="SN Ia envelope")
+        ], frameon=False)
+        fig.savefig(
+            output / f"snia_population_with_envelope_{envelope_name}.png",
+            dpi=220, bbox_inches="tight",
+        )
+        plt.close(fig)
+
+
+def save_kne_snia_overlay_plots(
+    output: Path,
+    pair: str,
+    t_min: float,
+    t_max: float,
+    kne_times: list[np.ndarray],
+    kne_colours: list[np.ndarray],
+    snia_times: list[np.ndarray],
+    snia_colours: list[np.ndarray],
+    kne_rules: pd.DataFrame,
+    snia_rules: pd.DataFrame,
+    overlap: pd.DataFrame,
+    envelope_name: str,
+    time_reference: str,
+) -> None:
+    for show_population, stem in (
+        (False, "KNe_SNIa_envelopes"),
+        (True, "KNe_SNIa_population_and_envelopes"),
+    ):
+        fig, ax = plt.subplots(figsize=(9.2, 5.7), constrained_layout=True)
+        if show_population:
+            draw_population_style(ax, kne_times, kne_colours, "#111111", 0.010, 0.14)
+            draw_population_style(ax, snia_times, snia_colours, "#d97706", 0.018, 0.18)
+        draw_comparison_envelope(ax, kne_rules, "#2f5f98", "-", 0.16)
+        draw_comparison_envelope(ax, snia_rules, "#d97706", "--", 0.14)
+        for row in overlap.dropna(
+            subset=["overlap_color_min", "overlap_color_max"]
+        ).itertuples():
+            ax.fill_between(
+                [row.t_min_days, row.t_max_days],
+                [row.overlap_color_min] * 2,
+                [row.overlap_color_max] * 2,
+                color="#2ca02c", alpha=0.26,
+            )
+        format_snia_axes(
+            ax, pair, t_min, t_max, comparison=True,
+            time_reference=time_reference,
+        )
+        limits = comparison_ylim(
+            kne_colours if show_population else [],
+            snia_colours if show_population else [],
+            kne_rules,
+            snia_rules,
+        )
+        if limits is not None:
+            ax.set_ylim(*limits)
+        ax.legend(handles=[
+            Line2D([0], [0], color="#2f5f98", lw=1.7, label="KNe envelope"),
+            Line2D([0], [0], color="#d97706", lw=1.7, linestyle="--", label="SN Ia envelope"),
+            Patch(facecolor="#2ca02c", alpha=0.26, label="Envelope intersection"),
+        ], frameon=False, fontsize=8)
+        fig.savefig(
+            output / f"{stem}_{envelope_name}.png",
+            dpi=220, bbox_inches="tight",
+        )
+        plt.close(fig)
+
+
+def save_at2017gfo_overlay(
+    results: pd.DataFrame,
+    rules: pd.DataFrame,
+    bestfit_curve: pd.DataFrame | None,
+    path: Path,
+    pair: str,
+    t_min: float,
+    t_max: float,
+) -> None:
+    fig, ax = plt.subplots(figsize=(9.2, 5.7), constrained_layout=True)
+    if not rules.empty:
+        draw_envelope(ax, rules)
+    finite = results.loc[
+        np.isfinite(pd.to_numeric(results["phase_days"], errors="coerce"))
+        & np.isfinite(pd.to_numeric(results["color"], errors="coerce"))
+    ].sort_values("phase_days")
+    if not finite.empty:
+        ax.plot(
+            finite["phase_days"], finite["color"], color="#222222", lw=1.1,
+            alpha=0.75, zorder=4,
+        )
+        evaluated = finite["evaluated"].astype(bool)
+        pass_values = finite["passes_filter"].astype("boolean").fillna(False).astype(bool)
+        central_values = (
+            finite["passes_filter_central_value"]
+            .astype("boolean").fillna(False).astype(bool)
+        )
+        passed_central = evaluated & pass_values & central_values
+        passed_via_error = evaluated & pass_values & ~central_values
+        failed = evaluated & ~pass_values
+        unavailable = ~evaluated
+        for mask, color, marker, label, zorder in (
+            (passed_central, "#009e73", "o", "AT2017gfo: central value passes", 6),
+            (
+                passed_via_error, "#e69f00", "D",
+                "AT2017gfo: compatible within photometric error", 6,
+            ),
+            (failed, "#d62728", "X", "AT2017gfo: outside", 7),
+            (unavailable, "#777777", "s", "AT2017gfo: no valid envelope", 5),
+        ):
+            subset = finite.loc[mask]
+            if subset.empty:
+                continue
+            ax.errorbar(
+                subset["phase_days"], subset["color"],
+                yerr=subset["color_error"], fmt=marker, ms=5.5,
+                color=color, ecolor=color, elinewidth=0.8, capsize=2,
+                linestyle="none", label=label, zorder=zorder,
+            )
+    finite_bestfit = pd.DataFrame()
+    if bestfit_curve is not None and not bestfit_curve.empty:
+        finite_bestfit = bestfit_curve.loc[
+            np.isfinite(pd.to_numeric(bestfit_curve["phase_days"], errors="coerce"))
+            & np.isfinite(pd.to_numeric(bestfit_curve["color"], errors="coerce"))
+        ].sort_values("phase_days")
+        if not finite_bestfit.empty:
+            ax.plot(
+                finite_bestfit["phase_days"], finite_bestfit["color"],
+                color="#cc33aa", lw=2.2, alpha=0.95,
+                label="AT2017gfo best-fit model", zorder=5,
+            )
+    format_axes(ax, pair, t_min, t_max)
+    arrays = []
+    if not rules.empty:
+        arrays.append(rules[["color_min", "color_max"]].to_numpy(float).ravel())
+    if not finite.empty:
+        arrays.append(finite["color"].to_numpy(float))
+    if not finite_bestfit.empty:
+        arrays.append(finite_bestfit["color"].to_numpy(float))
+    if arrays:
+        values = np.concatenate(arrays)
+        values = values[np.isfinite(values)]
+        if values.size:
+            low, high = np.min(values), np.max(values)
+            padding = max(0.1, 0.06 * max(high - low, 0.1))
+            ax.set_ylim(low - padding, high + padding)
+    ax.legend(frameon=False, fontsize=8)
+    fig.savefig(path, dpi=220, bbox_inches="tight")
+    plt.close(fig)
+
+
+def save_at2017gfo_failed_table(results: pd.DataFrame, path: Path) -> None:
+    failed = results.loc[
+        results["evaluated"].astype(bool)
+        & ~results["passes_filter"].astype("boolean").fillna(False).astype(bool)
+    ].copy()
+    figure_height = max(1.8, 0.42 * (len(failed) + 2))
+    fig, ax = plt.subplots(figsize=(13.5, figure_height), constrained_layout=True)
+    ax.axis("off")
+    if failed.empty:
+        ax.text(
+            0.5, 0.5, "All evaluated AT2017gfo points pass",
+            ha="center", va="center", fontsize=13,
+        )
+    else:
+        display = pd.DataFrame({
+            "date UTC": failed["date_utc"].str.replace("T", " ").str.slice(0, 19),
+            "phase [d]": failed["phase_days"].map(lambda x: f"{x:.3f}"),
+            "colour [mag]": failed.apply(
+                lambda row: f"{row['color']:.3f} +/- {row['color_error']:.3f}", axis=1
+            ),
+            "allowed [mag]": failed.apply(
+                lambda row: f"[{row['color_min']:.3f}, {row['color_max']:.3f}]", axis=1
+            ),
+            "side": failed["result"].astype(str),
+            "excursion [mag]": failed["excursion_beyond_envelope_mag"].map(
+                lambda x: f"{x:.3f}"
+            ),
+        })
+        table = ax.table(
+            cellText=display.to_numpy(), colLabels=display.columns,
+            cellLoc="center", colLoc="center", loc="center",
+        )
+        table.auto_set_font_size(False)
+        table.set_fontsize(8.3)
+        table.scale(1.0, 1.3)
+        for (row_index, _), cell in table.get_celld().items():
+            if row_index == 0:
+                cell.set_facecolor("#dbe8f5")
+                cell.set_text_props(weight="bold")
+            elif row_index % 2 == 0:
+                cell.set_facecolor("#f4f6f8")
+    fig.savefig(path, dpi=220, bbox_inches="tight")
+    plt.close(fig)
+
+
+def save_permanent_exit_table_png(
+    exits: pd.DataFrame,
+    path: Path,
+    maximum_rows: int,
+    event_colors: dict[str, str] | None = None,
+) -> None:
+    """Save a compact, presentation-ready physical-parameter table."""
+    shown = exits.head(maximum_rows).copy()
+    base_columns = [
+        "event_id", "last_outside_time_days", "exit_direction",
+    ]
+    base_columns += [column for column in ("M_ej_dyn_Msun", "M_ej_wind_Msun")
+                     if column in shown and pd.to_numeric(shown[column], errors="coerce").notna().any()]
+    optional_columns = [
+        column for column in (
+            "v_ej_dyn_c", "Ye_dyn", "v_ej_wind_c", "Ye_wind", "phi_deg",
+            "M_ej_Msun", "v_min_c", "beta", "kappa_r_cm2_g",
+        )
+        if column in shown
+        and pd.to_numeric(shown[column], errors="coerce").notna().any()
+    ]
+    uses_inclination = ("inclination_used_by_model" not in shown
+                        or shown["inclination_used_by_model"].fillna(True).astype(bool).any())
+    display_columns = base_columns + optional_columns
+    if uses_inclination:
+        display_columns.append("inclination_deg")
+    display_columns.append("luminosity_distance_Mpc")
+    label_by_column = {
+        "event_id": "event",
+        "last_outside_time_days": "last out [d]",
+        "exit_direction": "side",
+        "M_ej_dyn_Msun": r"Mdyn [$M_\odot$]",
+        "v_ej_dyn_c": "vdyn/c",
+        "Ye_dyn": "Ye dyn",
+        "M_ej_wind_Msun": r"Mwind [$M_\odot$]",
+        "v_ej_wind_c": "vwind/c",
+        "Ye_wind": "Ye wind",
+        "phi_deg": "phi [deg]",
+        "inclination_deg": "incl. [deg]",
+        "luminosity_distance_Mpc": "DL [Mpc]",
+        "M_ej_Msun": r"Mej [$M_\odot$]",
+        "v_min_c": "vmin/c",
+        "beta": "beta",
+        "kappa_r_cm2_g": r"kappa [cm$^2$/g]",
+    }
+    labels = [label_by_column[column] for column in display_columns]
+    figure_height = max(1.8, 0.38 * (len(shown) + 2))
+    figure_width = max(11.0, 1.55 * len(display_columns))
+    fig, ax = plt.subplots(figsize=(figure_width, figure_height), constrained_layout=True)
+    ax.axis("off")
+    if shown.empty:
+        ax.text(0.5, 0.5, "No permanent exits", ha="center", va="center", fontsize=13)
+    else:
+        formatted = pd.DataFrame({
+            "event_id": shown["event_id"].astype(str),
+            "last_outside_time_days": shown["last_outside_time_days"].map(
+                lambda x: f"{x:.2f}"
+            ),
+            "exit_direction": shown["exit_direction"].astype(str),
+            "M_ej_dyn_Msun": shown["M_ej_dyn_Msun"].map(lambda x: f"{x:.3e}"),
+            "v_ej_dyn_c": shown["v_ej_dyn_c"].map(lambda x: f"{x:.3f}"),
+            "Ye_dyn": shown["Ye_dyn"].map(lambda x: f"{x:.3f}"),
+            "M_ej_wind_Msun": shown["M_ej_wind_Msun"].map(lambda x: f"{x:.3e}"),
+            "v_ej_wind_c": shown["v_ej_wind_c"].map(lambda x: f"{x:.3f}"),
+            "Ye_wind": shown["Ye_wind"].map(lambda x: f"{x:.3f}"),
+            "phi_deg": shown["phi_deg"].map(lambda x: f"{x:.1f}"),
+            "inclination_deg": shown["inclination_deg"].map(lambda x: f"{x:.1f}"),
+            "luminosity_distance_Mpc": shown["luminosity_distance_Mpc"].map(
+                lambda x: f"{x:.1f}"
+            ),
+        })
+        for column in ("M_ej_Msun", "v_min_c", "beta", "kappa_r_cm2_g"):
+            if column in shown:
+                formatted[column] = shown[column].map(lambda x: f"{x:.3g}")
+        table = ax.table(
+            cellText=formatted[display_columns].to_numpy(),
+            colLabels=labels,
+            cellLoc="center",
+            colLoc="center",
+            loc="center",
+        )
+        table.auto_set_font_size(False)
+        table.set_fontsize(7.2)
+        table.scale(1.0, 1.25)
+        for (row_index, _), cell in table.get_celld().items():
+            if row_index == 0:
+                cell.set_facecolor("#dbe8f5")
+                cell.set_text_props(weight="bold")
+            elif row_index % 2 == 0:
+                cell.set_facecolor("#f4f6f8")
+        if event_colors:
+            for row_index, event_id in enumerate(shown["event_id"].astype(str), start=1):
+                table[(row_index, 0)].set_text_props(
+                    color=event_colors.get(event_id, "black"),
+                    weight="bold",
+                )
+    fig.savefig(path, dpi=220, bbox_inches="tight")
+    plt.close(fig)
+
+
+def save_stage_plots(
+    stage_dir: Path,
+    pair: str,
+    t_min: float,
+    t_max: float,
+    population_times: list[np.ndarray],
+    population_colors: list[np.ndarray],
+    all_valid: pd.DataFrame,
+    consecutive: pd.DataFrame,
+    coloured_samples: dict[int, np.ndarray],
+    colour_by_event_index: dict[int, str],
+    event_ids: list[str],
+) -> None:
+    specifications = [
+        ("complete_population_unbinned.png", True, None),
+        ("envelope_all_valid.png", False, all_valid),
+        ("envelope_consecutive.png", False, consecutive),
+        ("complete_population_unbinned_with_envelope_all_valid.png", True, all_valid),
+        ("complete_population_unbinned_with_envelope_consecutive.png", True, consecutive),
+    ]
+    flattened_colors = (
+        np.concatenate(population_colors) if population_colors else np.array([])
+    )
+    flattened_colors = flattened_colors[np.isfinite(flattened_colors)]
+    rule_arrays = []
+    for table in (all_valid, consecutive):
+        if table is not None and not table.empty:
+            for column in ("color_min", "color_median", "color_max"):
+                if column in table:
+                    rule_arrays.append(table[column].to_numpy(dtype=float))
+    finite_rule_colors = (
+        np.concatenate(rule_arrays) if rule_arrays else np.array([], dtype=float)
+    )
+    finite_rule_colors = finite_rule_colors[np.isfinite(finite_rule_colors)]
+    for filename, show_population, rules in specifications:
+        fig, ax = plt.subplots(figsize=(9.2, 5.7), constrained_layout=True)
+        if show_population:
+            draw_population(ax, population_times, population_colors)
+        if rules is not None and not rules.empty:
+            draw_envelope(ax, rules)
+        format_axes(ax, pair, t_min, t_max)
+        if len(flattened_colors):
+            low, high = np.nanpercentile(flattened_colors, [0.05, 99.95])
+            if finite_rule_colors.size:
+                low = min(low, float(np.min(finite_rule_colors)))
+                high = max(high, float(np.max(finite_rule_colors)))
+            padding = max(0.1, 0.05 * (high - low))
+            ax.set_ylim(low - padding, high + padding)
+        fig.savefig(stage_dir / filename, dpi=220, bbox_inches="tight")
+        plt.close(fig)
+
+    # Readable event-level views.  The samples are nested and identical for
+    # every photometric stage; colours are also kept fixed between stages.
+    for sample_size, indices in coloured_samples.items():
+        selected_times = [population_times[index] for index in indices]
+        selected_colors = [population_colors[index] for index in indices]
+        trajectory_colors = [colour_by_event_index[index] for index in indices]
+        selected_event_ids = [event_ids[int(index)] for index in indices]
+        legend_handles = [
+            Line2D(
+                [0], [0], color=color, lw=1.6,
+                label=f"event {event_id}",
+            )
+            for event_id, color in zip(selected_event_ids, trajectory_colors)
+        ]
+        legend_columns = min(10, max(1, int(np.ceil(np.sqrt(sample_size)))))
+        legend_rows = int(np.ceil(sample_size / legend_columns))
+        show_legend = sample_size <= 10
+        coloured_specifications = [
+            (f"population_{sample_size}_random_coloured.png", None),
+            (
+                f"population_{sample_size}_random_coloured_with_envelope_all_valid.png",
+                all_valid,
+            ),
+            (
+                f"population_{sample_size}_random_coloured_with_envelope_consecutive.png",
+                consecutive,
+            ),
+        ]
+        for filename, rules in coloured_specifications:
+            if show_legend:
+                figure_height = 5.7 + 0.10 * max(0, legend_rows - 3)
+                fig, ax = plt.subplots(figsize=(9.2, figure_height))
+                fig.subplots_adjust(bottom=min(0.32, 0.16 + 0.023 * legend_rows))
+            else:
+                fig, ax = plt.subplots(figsize=(9.2, 5.7), constrained_layout=True)
+            draw_population(
+                ax,
+                selected_times,
+                selected_colors,
+                trajectory_colors=trajectory_colors,
+            )
+            if rules is not None and not rules.empty:
+                draw_envelope(ax, rules)
+            format_axes(ax, pair, t_min, t_max)
+            if len(flattened_colors):
+                low, high = np.nanpercentile(flattened_colors, [0.05, 99.95])
+                if finite_rule_colors.size:
+                    low = min(low, float(np.min(finite_rule_colors)))
+                    high = max(high, float(np.max(finite_rule_colors)))
+                padding = max(0.1, 0.05 * (high - low))
+                ax.set_ylim(low - padding, high + padding)
+            if show_legend:
+                fig.legend(
+                    handles=legend_handles,
+                    loc="lower center",
+                    bbox_to_anchor=(0.5, 0.015),
+                    ncol=legend_columns,
+                    frameon=False,
+                    fontsize=7.2,
+                    handlelength=1.6,
+                    columnspacing=1.0,
+                )
+            fig.savefig(stage_dir / filename, dpi=220, bbox_inches="tight")
+            plt.close(fig)
+
+
+def stage_output_name(stage: str, scenario: str) -> str:
+    return f"{stage}_{scenario}" if stage in M5_STAGES else stage
+
+
+def save_dual_system_comparison_plots(
+    output: Path,
+    pair: str,
+    scenario: str,
+    t_min: float,
+    t_max: float,
+    at2017gfo_enabled: bool,
+    systems: tuple[str, str] = ("lsst", "ps1"),
+) -> None:
+    """Overlay two survey envelopes built from identical physical events.
+
+    AT2017gfo measurements are plotted only for the historical LSST/PS1
+    comparison. They are PS1 photometry and must not be relabelled as ZTF.
+    """
+    system_style = {
+        "lsst": ("#2f5f98", "Rubin/LSST envelope"),
+        "ps1": ("#cc6677", "Pan-STARRS1 envelope"),
+        "ztf": ("#dd8d29", "ZTF envelope"),
+    }
+    for stage in STAGES:
+        stage_name = stage_output_name(stage, scenario)
+        for envelope_name, rules_filename in (
+            ("all_valid", "dynamic_color_cut_rules_all_valid.csv"),
+            ("consecutive", "dynamic_color_cut_rules.csv"),
+        ):
+            rules_by_system: dict[str, pd.DataFrame] = {}
+            for system in systems:
+                path = output / system / stage_name / rules_filename
+                if path.exists():
+                    rules_by_system[system] = pd.read_csv(path)
+            if not rules_by_system:
+                continue
+
+            fig, ax = plt.subplots(figsize=(9.2, 5.7), constrained_layout=True)
+            handles: list[Line2D] = []
+            color_arrays = []
+            for system, rules in rules_by_system.items():
+                color, label = system_style[system]
+                for row in rules.itertuples():
+                    x = [row.t_min_days, row.t_max_days]
+                    ax.fill_between(
+                        x,
+                        [row.color_min, row.color_min],
+                        [row.color_max, row.color_max],
+                        color=color,
+                        alpha=0.14,
+                    )
+                    ax.plot(x, [row.color_min] * 2, color=color, lw=0.9)
+                    ax.plot(x, [row.color_max] * 2, color=color, lw=0.9)
+                    ax.plot(
+                        x, [row.color_median] * 2, color=color, lw=1.35,
+                        linestyle="-" if system == systems[0] else "--",
+                    )
+                if not rules.empty:
+                    color_arrays.append(
+                        rules[["color_min", "color_max"]].to_numpy(float).ravel()
+                    )
+                handles.append(Line2D(
+                    [0], [0], color=color, lw=1.8,
+                    linestyle="-" if system == systems[0] else "--",
+                    label=label,
+                ))
+
+            at_points = pd.DataFrame()
+            if at2017gfo_enabled and "ps1" in systems:
+                candidate = (
+                    output / "ps1" / stage_name
+                    / f"AT2017gfo_{envelope_name}_color_points.csv"
+                )
+                if candidate.exists():
+                    at_points = pd.read_csv(candidate)
+                    at_points = at_points.loc[
+                        np.isfinite(pd.to_numeric(at_points["phase_days"], errors="coerce"))
+                        & np.isfinite(pd.to_numeric(at_points["color"], errors="coerce"))
+                    ].sort_values("phase_days")
+                    if not at_points.empty:
+                        ax.errorbar(
+                            at_points["phase_days"], at_points["color"],
+                            yerr=at_points["color_error"], color="#111111",
+                            marker="o", ms=4.5, lw=1.0, elinewidth=0.8,
+                            capsize=2, zorder=6,
+                        )
+                        handles.append(Line2D(
+                            [0], [0], color="#111111", marker="o", lw=1.0,
+                            label="AT2017gfo (PS1 photometry)",
+                        ))
+                        color_arrays.append(at_points["color"].to_numpy(float))
+
+            format_axes(ax, pair, t_min, t_max)
+            if color_arrays:
+                values = np.concatenate(color_arrays)
+                values = values[np.isfinite(values)]
+                if values.size:
+                    low, high = float(values.min()), float(values.max())
+                    padding = max(0.1, 0.06 * max(high - low, 0.1))
+                    ax.set_ylim(low - padding, high + padding)
+            ax.legend(handles=handles, frameon=False, fontsize=8)
+            comparison_prefix = "_".join(system.upper() for system in systems)
+            fig.savefig(
+                output
+                / f"{comparison_prefix}_{stage}_{envelope_name}_comparison.png",
+                dpi=220,
+                bbox_inches="tight",
+            )
+            plt.close(fig)
+
+# ============================================================================
+# SAVED-POPULATION INTERPOLATION
+# ============================================================================
+
+from dataclasses import dataclass
+
+import numpy as np
+import pandas as pd
+
+from dynamic_color_cut_common import canonical_event_id, interpolate_band
+from kne_envelope_core import MW_EXTINCTED_STAGES, STAGES, event_extinction_mag
+from kne_population_io import SyntheticPopulationSource
+
+
+@dataclass
+class InterpolatedPopulation:
+    intrinsic_band1: np.ndarray
+    intrinsic_band2: np.ndarray
+    extincted_band1: np.ndarray
+    extincted_band2: np.ndarray
+    selection_intrinsic_band1: np.ndarray
+    selection_intrinsic_band2: np.ndarray
+    selection_extincted_band1: np.ndarray
+    selection_extincted_band2: np.ndarray
+    native_times: dict[str, list[np.ndarray]]
+    native_colours: dict[str, list[np.ndarray]]
+    selection_system: str
+    missing_event_ids: list[str]
+
+
+def _normalise_lightcurve(lightcurve: pd.DataFrame) -> pd.DataFrame:
+    required = {"t_days", "band", "mag"}
+    missing = required.difference(lightcurve.columns)
+    if missing:
+        raise ValueError(f"Synthetic light curve is missing {sorted(missing)}")
+    return pd.DataFrame({
+        "t_days": pd.to_numeric(lightcurve["t_days"], errors="coerce"),
+        "band": lightcurve["band"].astype(str).str.strip().str.lower(),
+        "magnitude": pd.to_numeric(lightcurve["mag"], errors="coerce"),
+        "photometric_system": (
+            lightcurve["photometric_system"].astype(str).str.strip().str.lower()
+            if "photometric_system" in lightcurve else "lsst"
+        ),
+    })
+
+
+def interpolate_saved_population(
+    source: SyntheticPopulationSource,
+    metadata: pd.DataFrame,
+    band1: str,
+    band2: str,
+    centres: np.ndarray,
+    t_min: float,
+    t_max: float,
+    photometric_system: str,
+) -> InterpolatedPopulation:
+    """Read each selected event once and construct fixed-centre matrices."""
+    event_ids = metadata["event_id"].tolist()
+    n_events, n_times = len(metadata), len(centres)
+    intrinsic_band1 = np.full((n_events, n_times), np.nan, dtype=np.float32)
+    intrinsic_band2 = np.full_like(intrinsic_band1, np.nan)
+    extincted_band1 = np.full_like(intrinsic_band1, np.nan)
+    extincted_band2 = np.full_like(intrinsic_band1, np.nan)
+    selection_intrinsic_band1 = np.full_like(intrinsic_band1, np.nan)
+    selection_intrinsic_band2 = np.full_like(intrinsic_band1, np.nan)
+    selection_extincted_band1 = np.full_like(intrinsic_band1, np.nan)
+    selection_extincted_band2 = np.full_like(intrinsic_band1, np.nan)
+    native_times = {stage: [None] * n_events for stage in STAGES}
+    native_colours = {stage: [None] * n_events for stage in STAGES}
+
+    selection_system = "lsst" if photometric_system == "ps1" else photometric_system
+    requested_systems = tuple(dict.fromkeys((photometric_system, selection_system)))
+    positions = {
+        canonical_event_id(event_id): index
+        for index, event_id in enumerate(event_ids)
+    }
+    metadata_by_event = metadata.set_index("event_id", drop=False)
+    processed: set[str] = set()
+    progress_interval = max(500, n_events // 20)
+    print(
+        f"Reading {n_events:,} saved synthetic light curves; numerical support "
+        "is inherited from generate_kne_lightcurves.py"
+    )
+
+    for event_id, raw_lightcurve in source.iter_events(
+        event_ids, (band1, band2), requested_systems
+    ):
+        event_id = canonical_event_id(event_id)
+        if event_id in processed:
+            raise RuntimeError(
+                f"Synthetic event {event_id} occurs in more than one input group/shard"
+            )
+        processed.add(event_id)
+        matrix_index = positions[event_id]
+        metadata_row = metadata_by_event.loc[event_id]
+        lightcurve = _normalise_lightcurve(raw_lightcurve)
+        lightcurve = lightcurve.loc[
+            np.isfinite(lightcurve["t_days"])
+            & (lightcurve["t_days"] > 0)
+            & np.isfinite(lightcurve["magnitude"])
+            & lightcurve["band"].isin((band1, band2))
+            & lightcurve["photometric_system"].isin(requested_systems)
+        ].copy()
+        target_curve = lightcurve.loc[
+            lightcurve["photometric_system"] == photometric_system
+        ].copy()
+        selection_curve = lightcurve.loc[
+            lightcurve["photometric_system"] == selection_system
+        ].copy()
+
+        mw1 = event_extinction_mag(metadata_row, photometric_system, band1)
+        mw2 = event_extinction_mag(metadata_row, photometric_system, band2)
+        selection_mw1 = event_extinction_mag(metadata_row, selection_system, band1)
+        selection_mw2 = event_extinction_mag(metadata_row, selection_system, band2)
+
+        centre_ext1 = interpolate_band(target_curve, band1, centres)
+        centre_ext2 = interpolate_band(target_curve, band2, centres)
+        extincted_band1[matrix_index] = centre_ext1
+        extincted_band2[matrix_index] = centre_ext2
+        intrinsic_band1[matrix_index] = centre_ext1 - mw1
+        intrinsic_band2[matrix_index] = centre_ext2 - mw2
+        centre_selection_ext1 = interpolate_band(selection_curve, band1, centres)
+        centre_selection_ext2 = interpolate_band(selection_curve, band2, centres)
+        selection_extincted_band1[matrix_index] = centre_selection_ext1
+        selection_extincted_band2[matrix_index] = centre_selection_ext2
+        selection_intrinsic_band1[matrix_index] = centre_selection_ext1 - selection_mw1
+        selection_intrinsic_band2[matrix_index] = centre_selection_ext2 - selection_mw2
+
+        paired = (
+            target_curve.groupby(["t_days", "band"], as_index=False)["magnitude"]
+            .median().pivot(index="t_days", columns="band", values="magnitude")
+        )
+        if band1 not in paired.columns or band2 not in paired.columns:
+            times = np.array([], dtype=float)
+            saved1 = np.array([], dtype=float)
+            saved2 = np.array([], dtype=float)
+        else:
+            paired = paired.dropna(subset=[band1, band2]).sort_index()
+            times = paired.index.to_numpy(float)
+            saved1 = paired[band1].to_numpy(float)
+            saved2 = paired[band2].to_numpy(float)
+        finite_native = (
+            np.isfinite(times) & np.isfinite(saved1) & np.isfinite(saved2)
+            & (times >= t_min) & (times <= t_max)
+        )
+        intrinsic_colour = (saved1 - mw1) - (saved2 - mw2)
+        extincted_colour = saved1 - saved2
+        for stage in STAGES:
+            native_times[stage][matrix_index] = times[finite_native].astype(np.float32)
+            colours = extincted_colour if stage in MW_EXTINCTED_STAGES else intrinsic_colour
+            native_colours[stage][matrix_index] = colours[finite_native].astype(np.float32)
+
+        if len(processed) % progress_interval == 0:
+            print(f"  {len(processed):,}/{n_events:,}")
+
+    missing_event_ids = [
+        canonical_event_id(event_id) for event_id in event_ids
+        if canonical_event_id(event_id) not in processed
+    ]
+    if missing_event_ids:
+        empty = np.array([], dtype=np.float32)
+        for event_id in missing_event_ids:
+            matrix_index = positions[event_id]
+            for stage in STAGES:
+                native_times[stage][matrix_index] = empty.copy()
+                native_colours[stage][matrix_index] = empty.copy()
+    print(
+        f"Finished reading: {len(processed):,} events with saved {band1}-{band2} "
+        f"rows; {len(missing_event_ids):,} colour-unavailable events."
+    )
+    return InterpolatedPopulation(
+        intrinsic_band1, intrinsic_band2, extincted_band1, extincted_band2,
+        selection_intrinsic_band1, selection_intrinsic_band2,
+        selection_extincted_band1, selection_extincted_band2,
+        native_times, native_colours, selection_system, missing_event_ids,
+    )
+
+# ============================================================================
+# USER-FRIENDLY TERMINAL INTERFACE
+# ============================================================================
+
+import argparse
+from pathlib import Path
+
+from dynamic_color_cut_common import prompt_choice, prompt_text
+from kne_envelope_core import DEFAULT_TAIL_GRID
+from kne_m5 import M5_SCENARIO_LABELS
+
+ZTF_DEPTH_FILENAMES = {
+    "g": ("lims_public_g.joblib", "lims_g.joblib"),
+    "r": ("lims_public_r.joblib", "lims_r.joblib"),
+    "i": ("lims_i.joblib", "lims_public_i.joblib"),
+}
+AT2017GFO_DEFAULT_MERGER_MJD = 57982.52851852
+
+
+def default_configuration() -> argparse.Namespace:
+    """Return documented defaults before the interactive questions."""
+    return argparse.Namespace(
+        run_dir=Path("."), color_pair="g-r", photometric_system="both",
+        t_min=0.4, t_max=26.0, bin_width=0.4,
+        tail_percentiles="0.02,0.05,0.1,0.25,0.5,0.53,1,2.5,5,10,16,20,25,30,35,40,42,44,45,46,47,48,49,50",
+        n_boot=1000, bootstrap_threshold_mag=0.1, minimum_events=30,
+        minimum_tail_events=20.0, train_fraction=0.70,
+        validation_fraction=0.15, seed=12345, max_events=0,
+        event_subsample_seed=None, colored_plot_sizes="10,100",
+        population_plot_seed=20260921, outlier_table_plot_size=10,
+        minimum_final_outside_bins=3, max_outlier_table_events=20,
+        m5_quantile_table=None, ztf_depth_source=None, ztf_m5_g=None,
+        ztf_m5_r=None, ztf_m5_i=None, ztf_depth_dir=None,
+        ztf_depth_quantile_table=None, ztf_depth_samples=200000,
+        ztf_depth_seed=20261001, threshold_scope="common_global",
+        m5_scenario="median_p50", population_latitude_selection="all",
+        latitude_threshold_deg=20.0,
+        assume_latitude_selection_already_applied=False,
+        assume_high_latitude_run=False, output_dir=None,
+        at2017gfo_file=None, at2017gfo_merger_mjd=AT2017GFO_DEFAULT_MERGER_MJD,
+        at2017gfo_match_window_days=0.4, at2017gfo_ebv=0.105,
+        at2017gfo_error_sigma=1.0, at2017gfo_photometry_mode="dereddened",
+        at2017gfo_bestfit_file=None,
+        at2017gfo_bestfit_photometry_mode="dereddened", snia_parquet=None,
+        snia_magnitude_column="mag_perfect", snia_input_mw_mode="dereddened",
+        snia_time_reference="peak", snia_position_seed=20260929,
+        snia_max_events=0, write_adapted_snia_parquet=True,
+    )
+
+
+
+
+def interactive(args: argparse.Namespace) -> argparse.Namespace:
+    args.run_dir = Path(prompt_text("Run directory", str(args.run_dir)))
+    args.color_pair = prompt_text("Colour pair", args.color_pair)
+    args.photometric_system = prompt_choice(
+        "Photometric system for the colour envelope",
+        [
+            ("both", "LSST and PS1 from the same synthetic events"),
+            ("lsst+ztf", "LSST and ZTF from the same synthetic events"),
+            ("lsst", "LSST only"),
+            ("ps1", "PS1 colour with Rubin/LSST m5 selection"),
+            ("ztf", "ZTF colour with a supplied ZTF depth selection"),
+        ],
+        args.photometric_system,
+    )
+    args.population_latitude_selection = prompt_choice(
+        "Galactic-latitude selection for the KNe population",
+        [
+            ("all", "Use all generated Galactic latitudes (no latitude cut)"),
+            ("high", "Keep events with |b| >= a configurable threshold"),
+            ("low", "Keep events with |b| < a configurable threshold"),
+        ],
+        args.population_latitude_selection,
+    )
+    if args.population_latitude_selection != "all":
+        args.latitude_threshold_deg = float(prompt_text(
+            "Absolute Galactic-latitude threshold |b| [deg]",
+            str(args.latitude_threshold_deg),
+        ))
+    args.t_min = float(prompt_text("First temporal-bin lower edge [days]", str(args.t_min)))
+    args.t_max = float(prompt_text("Last temporal-bin upper edge [days]", str(args.t_max)))
+    args.bin_width = float(prompt_text("Fixed bin width [days]", str(args.bin_width)))
+    args.n_boot = int(prompt_text("Bootstrap repetitions", str(args.n_boot)))
+    args.minimum_tail_events = float(prompt_text(
+        "Minimum expected events in each percentile tail",
+        str(args.minimum_tail_events),
+    ))
+    args.bootstrap_threshold_mag = float(prompt_text(
+        "Maximum 68% bootstrap half-width per bound [mag]",
+        str(args.bootstrap_threshold_mag),
+    ))
+    args.colored_plot_sizes = prompt_text(
+        "Random coloured KNe sample sizes",
+        args.colored_plot_sizes,
+    )
+    args.population_plot_seed = int(prompt_text(
+        "Population-plot random seed",
+        str(args.population_plot_seed),
+    ))
+    args.minimum_final_outside_bins = int(prompt_text(
+        "Minimum consecutive final outside bins",
+        str(args.minimum_final_outside_bins),
+    ))
+    args.max_outlier_table_events = int(prompt_text(
+        "Maximum permanent exits in each PNG table",
+        str(args.max_outlier_table_events),
+    ))
+    if args.photometric_system in {"ztf", "lsst+ztf"}:
+        inferred_source = args.ztf_depth_source
+        if inferred_source is None:
+            if any(
+                value is not None
+                for value in (args.ztf_m5_g, args.ztf_m5_r, args.ztf_m5_i)
+            ):
+                inferred_source = "manual"
+            elif args.ztf_depth_quantile_table is not None:
+                inferred_source = "table"
+            elif args.ztf_depth_dir is not None:
+                inferred_source = "joblib"
+            else:
+                inferred_source = "manual"
+        args.ztf_depth_source = prompt_choice(
+            "ZTF limiting-depth input",
+            [
+                ("manual", "Enter fixed 5-sigma limiting magnitudes"),
+                ("table", "Read p25/p50/p75 values from a CSV table"),
+                ("joblib", "Read the legacy NMMA joblib KDE files"),
+            ],
+            inferred_source,
+        )
+        requested_ztf_bands = tuple(
+            dict.fromkeys(
+                piece.strip().lower()
+                for piece in args.color_pair.split("-")
+                if piece.strip()
+            )
+        )
+        if args.ztf_depth_source == "manual":
+            for band in requested_ztf_bands:
+                if band not in ZTF_DEPTH_FILENAMES:
+                    continue
+                attribute = f"ztf_m5_{band}"
+                current = getattr(args, attribute)
+                default = "" if current is None else str(current)
+                value = prompt_text(
+                    f"Fixed ZTF {band}-band 5-sigma limiting magnitude [AB mag]",
+                    default,
+                )
+                if not value.strip():
+                    raise ValueError(f"A fixed ZTF {band}-band depth is required")
+                setattr(args, attribute, float(value))
+        elif args.ztf_depth_source == "table":
+            args.ztf_depth_quantile_table = Path(prompt_text(
+                "ZTF depth-quantile CSV table",
+                str(args.ztf_depth_quantile_table or "ztf_depth_quantiles.csv"),
+            ))
+        else:
+            args.ztf_depth_dir = Path(prompt_text(
+                "Directory containing the three ZTF lims joblib files",
+                str(args.ztf_depth_dir or "ztf_depth_distributions"),
+            ))
+
+    if not (
+        args.photometric_system == "ztf"
+        and args.ztf_depth_source == "manual"
+    ):
+        args.m5_scenario = prompt_choice(
+            "m5 threshold used for the depth cut",
+            list(M5_SCENARIO_LABELS.items()),
+            args.m5_scenario,
+        )
+    else:
+        print(
+            "ZTF manual-depth mode: the entered fixed limits are used directly; "
+            "p25/p50/p75 is not applied."
+        )
+    if args.photometric_system != "ztf":
+        args.threshold_scope = prompt_choice(
+            "m5 latitude scope",
+            [
+                ("common_global", "Same all-sky thresholds for controlled comparisons"),
+                ("latitude_conditioned", "Thresholds measured at |b| >= 20 deg"),
+            ],
+            args.threshold_scope,
+        )
+    at2017gfo_comparison = prompt_choice(
+        "AT2017gfo comparison",
+        [
+            ("enable", "Overlay AT2017gfo and report the points outside the envelope"),
+            ("skip", "Do not compare this run with AT2017gfo"),
+        ],
+        "enable" if args.at2017gfo_file is not None else "skip",
+    )
+    if at2017gfo_comparison == "enable":
+        at_path = prompt_text(
+            "AT2017gfo photometry file",
+            (
+                str(args.at2017gfo_file)
+                if args.at2017gfo_file is not None
+                else "AT2017gfo_corrected.dat"
+            ),
+        ).strip()
+        args.at2017gfo_file = Path(at_path)
+        args.at2017gfo_merger_mjd = float(prompt_text(
+            "AT2017gfo merger epoch [MJD]",
+            str(args.at2017gfo_merger_mjd),
+        ))
+        args.at2017gfo_match_window_days = float(prompt_text(
+            "Maximum inter-band matching separation [days]",
+            str(args.at2017gfo_match_window_days),
+        ))
+        args.at2017gfo_ebv = float(prompt_text(
+            "AT2017gfo Milky-Way E(B-V)",
+            str(args.at2017gfo_ebv),
+        ))
+        args.at2017gfo_error_sigma = float(prompt_text(
+            "Photometric-error compatibility level [sigma]",
+            str(args.at2017gfo_error_sigma),
+        ))
+        args.at2017gfo_photometry_mode = prompt_choice(
+            "AT2017gfo input photometry",
+            [
+                ("dereddened", "Already corrected for Milky-Way extinction"),
+                ("mw_extincted", "Still contains Milky-Way extinction"),
+            ],
+            args.at2017gfo_photometry_mode,
+        )
+        bestfit_path = prompt_text(
+            "AT2017gfo best-fit pickle (empty = do not overlay)",
+            (
+                str(args.at2017gfo_bestfit_file)
+                if args.at2017gfo_bestfit_file is not None else ""
+            ),
+        ).strip()
+        args.at2017gfo_bestfit_file = Path(bestfit_path) if bestfit_path else None
+        if args.at2017gfo_bestfit_file is not None:
+            args.at2017gfo_bestfit_photometry_mode = prompt_choice(
+                "Foreground MW extinction in the AT2017gfo best-fit magnitudes",
+                [
+                    ("dereddened", "Absent/already corrected"),
+                    ("mw_extincted", "Already present"),
+                ],
+                args.at2017gfo_bestfit_photometry_mode,
+            )
+    else:
+        args.at2017gfo_file = None
+        args.at2017gfo_bestfit_file = None
+
+    snia_comparison = prompt_choice(
+        "SN Ia population comparison",
+        [
+            ("enable", "Build SN Ia colour plots and KNe--SN Ia overlap products"),
+            ("skip", "Do not load an SN Ia population"),
+        ],
+        "enable" if args.snia_parquet is not None else "skip",
+    )
+    if snia_comparison == "enable":
+        snia_path = prompt_text(
+            "SN Ia parquet file",
+            str(args.snia_parquet) if args.snia_parquet is not None
+            else "snia_mock_6band.parquet",
+        ).strip()
+        args.snia_parquet = Path(snia_path)
+        args.snia_magnitude_column = prompt_choice(
+            "SN Ia magnitude used for the colour",
+            [
+                ("mag_perfect", "Noise-free model magnitude"),
+                ("mag", "Noisy observed magnitude"),
+            ],
+            args.snia_magnitude_column,
+        )
+        args.snia_input_mw_mode = prompt_choice(
+            "Foreground MW extinction in the SN Ia input magnitude",
+            [
+                ("dereddened", "Absent/already corrected; add A for the MW-present output"),
+                ("mw_extincted", "Already present; subtract A for the corrected output"),
+            ],
+            args.snia_input_mw_mode,
+        )
+        args.snia_time_reference = prompt_choice(
+            "SN Ia time reference",
+            [
+                ("first_observation", "First available time of each SN Ia"),
+                ("peak", "SALT2 t0 (time of maximum light)"),
+            ],
+            args.snia_time_reference,
+        )
+        args.snia_position_seed = int(prompt_text(
+            "SN Ia to KNe sky-position assignment seed",
+            str(args.snia_position_seed),
+        ))
+        args.snia_max_events = int(prompt_text(
+            "Maximum number of SNe Ia (0 = all)",
+            str(args.snia_max_events),
+        ))
+    else:
+        args.snia_parquet = None
+    return args
 
 RA_COLUMNS = ("fieldRA", "field_ra_deg", "ra_deg", "ra")
 DEC_COLUMNS = ("fieldDec", "field_dec_deg", "dec_deg", "dec")
@@ -137,12 +1371,6 @@ AT2017GFO_FILTER_ALIASES = {
 
 # Compatibility exports: the terminal interface has a dedicated module so the
 # orchestration below can be reviewed independently from parser/menu code.
-from kne_envelope_cli import (
-    AT2017GFO_DEFAULT_MERGER_MJD,
-    ZTF_DEPTH_FILENAMES,
-    build_parser,
-    interactive,
-)
 
 
 def discover_m5_table(run_dir: Path, explicit: Path | None) -> Path:
@@ -2476,9 +3704,7 @@ def _run_single_system(
 def main(args: argparse.Namespace | None = None) -> Path:
     """Validate the request, dispatch paired analyses, or run one system."""
     if args is None:
-        args = build_parser().parse_args()
-        if args.interactive or len(sys.argv) == 1:
-            args = interactive(args)
+        args = interactive(default_configuration())
     band1, band2, pair, edges, centres = validate_analysis_arguments(args)
     combined_output = dispatch_dual_system_analysis(args, band1, band2, pair)
     if combined_output is not None:

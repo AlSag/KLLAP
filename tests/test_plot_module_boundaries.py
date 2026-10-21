@@ -9,7 +9,7 @@ import numpy as np
 
 import build_color_envelopes as envelope_command
 import get_opsim_baseline as opsim_command
-import kne_envelope_product_plots as envelope_plots
+import build_color_envelopes as envelope_plots
 import get_opsim_baseline as opsim_plots
 
 

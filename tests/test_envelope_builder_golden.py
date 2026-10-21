@@ -70,26 +70,28 @@ class EnvelopeBuilderGoldenTest(unittest.TestCase):
             run_dir = Path(temporary)
             self._make_run(run_dir)
             output = run_dir / "output"
-            args = builder.build_parser().parse_args([
-                "--run-dir", str(run_dir),
-                "--photometric-system", "lsst",
-                "--color-pair", "g-r",
-                "--t-min", "0.4",
-                "--t-max", "1.6",
-                "--bin-width", "0.4",
-                "--n-boot", "30",
-                "--bootstrap-threshold-mag", "10",
-                "--minimum-events", "2",
-                "--minimum-tail-events", "0",
-                "--train-fraction", "0.7",
-                "--validation-fraction", "0.15",
-                "--seed", "12345",
-                "--colored-plot-sizes", "2",
-                "--outlier-table-plot-size", "2",
-                "--max-outlier-table-events", "2",
-                "--m5-quantile-table", str(run_dir / "m5.csv"),
-                "--output-dir", str(output),
-            ])
+            args = builder.default_configuration()
+            for key, value in {
+                "run_dir": run_dir,
+                "photometric_system": "lsst",
+                "color_pair": "g-r",
+                "t_min": 0.4,
+                "t_max": 1.6,
+                "bin_width": 0.4,
+                "n_boot": 30,
+                "bootstrap_threshold_mag": 10.0,
+                "minimum_events": 2,
+                "minimum_tail_events": 0.0,
+                "train_fraction": 0.7,
+                "validation_fraction": 0.15,
+                "seed": 12345,
+                "colored_plot_sizes": "2",
+                "outlier_table_plot_size": 2,
+                "max_outlier_table_events": 2,
+                "m5_quantile_table": run_dir / "m5.csv",
+                "output_dir": output,
+            }.items():
+                setattr(args, key, value)
             self.assertEqual(builder.main(args), output)
 
             summary = pd.read_csv(output / "stage_summary.csv")

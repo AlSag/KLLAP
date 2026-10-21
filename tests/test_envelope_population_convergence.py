@@ -4,7 +4,7 @@ import unittest
 
 import pandas as pd
 
-from kne_convergence_common import (
+from analyze_envelope_population_convergence_fast import (
     aggregate_results,
     parse_sample_sizes,
 )
