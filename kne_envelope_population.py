@@ -13,9 +13,9 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from kllap.colour.common import canonical_event_id, interpolate_band
-from kllap.envelope.core import MW_EXTINCTED_STAGES, STAGES, event_extinction_mag
-from kllap.population_io import SyntheticPopulationSource
+from dynamic_color_cut_common import canonical_event_id, interpolate_band
+from kne_envelope_core import MW_EXTINCTED_STAGES, STAGES, event_extinction_mag
+from kne_population_io import SyntheticPopulationSource
 
 
 @dataclass

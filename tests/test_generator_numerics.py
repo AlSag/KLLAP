@@ -8,8 +8,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from kllap.common import interpolate_magnitude_log_time
-from kllap.generation.core import (
+from kne_pipeline_common import interpolate_magnitude_log_time
+from kne_generation_core import (
     apply_synthetic_m5_median_cut,
     derive_sky_seed,
     ensure_mw_extinction_columns,
@@ -19,7 +19,7 @@ from kllap.generation.core import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
-GENERATOR = ROOT / "kllap/generation/command.py"
+GENERATOR = ROOT / "generate_kne_lightcurves.py"
 
 
 def generator_functions(*names, **namespace):

@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import numpy as np
 import pandas as pd
 
-from kllap.convergence.multiquantile import (
+from envelope_multiquantile_convergence import (
     FIXED_FAMILIES,
     FIXED_PERCENTILES,
     aggregate_extent,
@@ -227,3 +227,4 @@ class MultiQuantileConvergenceTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

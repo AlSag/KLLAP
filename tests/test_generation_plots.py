@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from kllap.generation.plots import (
+from kne_generation_plots import (
     plot_lsstlike_only,
     plot_numerical_floor_diagnostic,
     plot_saved_synthetic_measurements,

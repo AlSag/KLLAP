@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from kllap.envelope.plots import (
+from kne_envelope_plots import (
     comparison_ylim,
     draw_envelope,
     draw_population,

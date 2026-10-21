@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from kllap.common import (
+from kne_pipeline_common import (
     compute_m5_depth_quantiles,
     discover_m5_quantile_table,
     write_m5_depth_quantiles,

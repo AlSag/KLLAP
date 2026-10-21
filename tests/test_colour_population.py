@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 from types import SimpleNamespace
 
-from kllap.colour.population import (
+from kne_colour_population import (
     axis_domain,
     parameter_values,
     parse_parameter_pairs,

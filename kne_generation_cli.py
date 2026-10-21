@@ -16,14 +16,14 @@ from pathlib import Path
 
 import numpy as np
 
-from kllap.generation.core import derive_sky_seed
-from kllap.generation.backends import (
+from kne_generation_core import derive_sky_seed
+from kne_model_backends import (
     ANALYTICAL_MODELS,
     MODEL_NAMES,
     add_metzger_arguments,
     validate_model_options,
 )
-from kllap.common import prompt_choice, prompt_text
+from kne_pipeline_common import prompt_choice, prompt_text
 
 
 def build_runtime_parser() -> argparse.ArgumentParser:
@@ -789,3 +789,5 @@ def configure_runtime() -> argparse.Namespace:
     ):
         raise ValueError("--posterior-file is required when --parameter-source posterior")
     return args
+
+

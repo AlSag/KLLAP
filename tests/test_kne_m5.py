@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from kllap.m5 import (
+from kne_m5 import (
     M5_SCENARIO_LABELS,
     M5_SCENARIO_PERCENTILES,
     M5_SCENARIOS,

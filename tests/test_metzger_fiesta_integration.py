@@ -9,7 +9,7 @@ import unittest
 
 import numpy as np
 
-from kllap.generation.backends import add_metzger_arguments, create_fiesta_model, saved_observer_times
+from kne_model_backends import add_metzger_arguments, create_fiesta_model, saved_observer_times
 
 
 @unittest.skipUnless(os.environ.get("KNE_RUN_FIESTA_INTEGRATION_TESTS") == "1",

@@ -5,7 +5,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-GENERATOR = ROOT / "kllap/generation/command.py"
+GENERATOR = ROOT / "generate_kne_lightcurves.py"
 
 
 class GeneratorStructureTest(unittest.TestCase):

@@ -16,7 +16,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-import kllap.envelope.core as envelope_core
+import kne_envelope_core as envelope_core
 
 COMPONENTS = ("color_min", "color_median", "color_max")
 PROFILE_VERSION = 2
@@ -62,7 +62,7 @@ def colour_errors(
 def envelope_profile(a, sample, arrays, indices, depths, bands, edges, centres,
                      reference=None):
     """Compute one full profile, delegating percentile validity to the builder."""
-    from kllap.colour.common import assign_event_splits, parse_floats
+    from dynamic_color_cut_common import assign_event_splits, parse_floats
 
     split = assign_event_splits(sample.event_id.astype(str).tolist(),
                                 a.train_fraction, a.validation_fraction, a.builder_seed)
@@ -311,7 +311,7 @@ def atomic_csv(frame, path):
 def run_colour_convergence(a, root, sizes, bands, edges, centres):
     import analyze_envelope_population_convergence_fast as fast
     import build_color_envelopes as builder
-    import kllap.colour.common as common
+    import dynamic_color_cut_common as common
 
     if a.tolerance_mode not in {"absolute", "relative"}:
         raise ValueError("tolerance-mode must be 'absolute' or 'relative'")
@@ -346,18 +346,9 @@ def run_colour_convergence(a, root, sizes, bands, edges, centres):
     # Do not reuse profiles silently after changing the builder, input summary,
     # or any recorded photometry shard. Content hash for code/summary; stat for
     # potentially enormous photometry products.
-    source_files = {
-        "convergence/colour.py": Path(__file__),
-        "convergence/command.py": Path(fast.__file__),
-        "envelope/command.py": Path(builder.__file__),
-        "envelope/core.py": Path(envelope_core.__file__),
-        "convergence/common.py": Path(common.__file__),
-        "input/summary.csv": root / "summary.csv",
-    }
-    conf["source_hashes"] = {
-        name: hashlib.sha256(path.read_bytes()).hexdigest()
-        for name, path in source_files.items()
-    }
+    conf["source_hashes"] = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in (
+        Path(__file__), Path(fast.__file__), Path(builder.__file__),
+        Path(envelope_core.__file__), Path(common.__file__), root / "summary.csv")}
     files = sorted((root / "parquet").glob("synthetic_part_*.parquet"))
     if not files:
         files = sorted((root / "csv").glob("lightcurve_*.csv"))
@@ -431,7 +422,7 @@ def run_colour_convergence(a, root, sizes, bands, edges, centres):
     atomic_csv(pd.concat(comparisons, ignore_index=True), output / "envelope_colour_convergence_per_bin.csv")
     atomic_csv(pd.concat(all_profiles, ignore_index=True), output / "envelope_colour_profiles.csv")
     atomic_csv(pd.concat(references, ignore_index=True), output / "envelope_colour_reference.csv")
-    plot_path = output / "kllap.convergence.colour.png"
+    plot_path = output / "envelope_colour_convergence.png"
     save_colour_plot(raw, summary, a, threshold, plot_path)
     result = dict(conf, stable_population_threshold=threshold,
                   below_largest_tested_size=bool(threshold is not None and threshold < sizes[-1]),
@@ -447,3 +438,4 @@ def run_colour_convergence(a, root, sizes, bands, edges, centres):
     print("Plot:", plot_path)
     print("Summary:", output / "envelope_colour_convergence_summary.csv")
     print("Per-bin comparisons:", output / "envelope_colour_convergence_per_bin.csv")
+

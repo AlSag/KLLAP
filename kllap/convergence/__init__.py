@@ -1,1 +1,0 @@
-"""Population-size convergence calculations."""

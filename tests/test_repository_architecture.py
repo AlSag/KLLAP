@@ -4,8 +4,8 @@ import ast
 import unittest
 from pathlib import Path
 
-from kllap.envelope.core import STAGES
-from kllap.m5 import M5_SCENARIOS
+from kne_envelope_core import STAGES
+from kne_m5 import M5_SCENARIOS
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -68,17 +68,6 @@ class RepositoryArchitectureTest(unittest.TestCase):
                     for node in tree.body
                 )
                 self.assertTrue(guarded_main)
-
-    def test_repository_root_contains_only_public_python_commands(self):
-        root_python = {path.name for path in ROOT.glob("*.py")}
-        self.assertEqual(root_python, set(PUBLIC_COMMANDS))
-
-    def test_internal_domains_are_python_packages(self):
-        for domain in (
-            "opsim", "generation", "envelope", "convergence", "colour", "latitude"
-        ):
-            with self.subTest(domain=domain):
-                self.assertTrue((ROOT / "kllap" / domain / "__init__.py").is_file())
 
     def test_retired_redundant_commands_do_not_return(self):
         for relative in RETIRED_COMMANDS:

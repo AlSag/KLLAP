@@ -2,7 +2,6 @@ import pickle
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
 import numpy as np
 
@@ -11,31 +10,9 @@ from build_color_envelopes import (
     at2017gfo_stage_colours,
     load_at2017gfo_bestfit_colour_curve,
 )
-from kllap.envelope.command import _RestrictedBestFitUnpickler
 
 
 class AT2017gfoBestFitTest(unittest.TestCase):
-    def test_numpy_1x_multiarray_fallback(self):
-        fallback = __import__("numpy.core.multiarray", fromlist=["multiarray"])
-
-        def import_numpy_multiarray(module_name):
-            if module_name == "numpy._core.multiarray":
-                raise ModuleNotFoundError(module_name)
-            self.assertEqual(module_name, "numpy.core.multiarray")
-            return fallback
-
-        with patch(
-            "kllap.envelope.command.importlib.import_module",
-            side_effect=import_numpy_multiarray,
-        ):
-            with tempfile.TemporaryFile() as stream:
-                unpickler = _RestrictedBestFitUnpickler(stream)
-                resolved = unpickler.find_class(
-                    "numpy.core.multiarray", "_reconstruct"
-                )
-
-        self.assertIs(resolved, fallback._reconstruct)
-
     def test_saved_light_curves_become_colour_curve(self):
         payload = {
             "bestfit_params": {"luminosity_distance": np.array(40.7)},

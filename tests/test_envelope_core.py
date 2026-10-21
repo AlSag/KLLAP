@@ -5,7 +5,7 @@ import unittest
 import numpy as np
 import pandas as pd
 
-from kllap.envelope.core import (
+from kne_envelope_core import (
     RUBIN_MW_R,
     event_extinction_mag,
     percentile_diagnostics,

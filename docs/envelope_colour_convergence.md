@@ -102,6 +102,6 @@ figurer dans toute présentation du critère.
 ## Vérification
 
 ```bash
-python -m py_compile analyze_envelope_population_convergence_fast.py kllap/convergence/colour.py
+python -m py_compile analyze_envelope_population_convergence_fast.py envelope_colour_convergence.py
 PYTHONPATH=. python -m unittest discover -s tests -p 'test_envelope_colour_convergence.py' -v
 ```
