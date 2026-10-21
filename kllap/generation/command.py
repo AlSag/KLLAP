@@ -354,6 +354,8 @@ def plot_saved_synthetic_measurements(
     filter_colors,
     outfile,
     event_index,
+    filter_systems,
+    filter_by_system,
 ):
     """Compatibility wrapper for :mod:`kllap.generation.plots`."""
     return _plot_saved_synthetic_measurements(
@@ -361,8 +363,8 @@ def plot_saved_synthetic_measurements(
         filter_colors,
         outfile,
         event_index,
-        FILTER_SYSTEMS,
-        FILTER_BY_SYSTEM,
+        filter_systems,
+        filter_by_system,
     )
 
 
@@ -429,6 +431,7 @@ def apply_lsst_realism_to_fiesta(
     det_snr=5.0,
     mag_truth_cap=None,
     rng=None,
+    apply_mw_extinction=False,
 ):
 
     """Project a dense FIESTA light curve through an OpSim visit sequence.
@@ -455,6 +458,9 @@ def apply_lsst_realism_to_fiesta(
         this limit are treated as unavailable.
     rng
         NumPy random generator used for the Gaussian flux realization.
+    apply_mw_extinction
+        Whether the event's Rubin foreground extinction is added before the
+        SNR and detection calculations.
 
     Returns
     -------
@@ -517,9 +523,9 @@ def apply_lsst_realism_to_fiesta(
     v["mag_true_no_mw"] = mag_true
     A_mw = pd.to_numeric(v.get("A_mw", np.nan), errors="coerce").to_numpy(float)
     mag_true_mw = mag_true + A_mw
-    v["mw_extinction_applied_to_snr"] = bool(APPLY_MW_EXTINCTION_TO_LSST_REALISM)
+    v["mw_extinction_applied_to_snr"] = bool(apply_mw_extinction)
 
-    if APPLY_MW_EXTINCTION_TO_LSST_REALISM:
+    if apply_mw_extinction:
         v["mag_true_mw_extincted"] = mag_true_mw
         v["mag_true"] = mag_true_mw
     else:
@@ -681,31 +687,39 @@ class UniformComovingVolumeSampler:
 def sample_distance_redshift_for_event(
     rng: np.random.Generator,
     sampler: UniformComovingVolumeSampler | None,
+    mode: str,
+    fixed_redshift: float,
+    fixed_luminosity_distance_mpc: float,
 ) -> tuple[float, float]:
     """Return one Planck18-consistent ``(z, D_L[Mpc])`` pair.
 
     Population runs draw independently and uniformly in comoving volume.
     Fixed-distance runs return the single configured diagnostic distance.
     """
-    mode = str(DISTANCE_SAMPLING).lower().strip()
+    mode = str(mode).lower().strip()
     if mode == "fixed":
-        return float(FIXED_REDSHIFT), float(FIXED_LUMINOSITY_DISTANCE_MPC)
+        return float(fixed_redshift), float(fixed_luminosity_distance_mpc)
     if mode == "comoving_volume":
         if sampler is None:
             raise RuntimeError("Comoving-volume sampler was not initialized")
         return sampler.sample(rng)
-    raise ValueError("DISTANCE_SAMPLING must be 'fixed' or 'comoving_volume'")
+    raise ValueError("mode must be 'fixed' or 'comoving_volume'")
 
 
-def sample_inclination_for_event(rng: np.random.Generator) -> float:
+def sample_inclination_for_event(
+    rng: np.random.Generator,
+    mode: str = "uniform_cos",
+    minimum_rad: float = 0.0,
+    maximum_rad: float = np.pi / 2,
+) -> float:
     """Return inclination_EM [rad].
 
     For isotropic orientations over [0, pi/2], draw mu=cos(i) uniformly
     in [0, 1] and return i=arccos(mu). This gives p(i) proportional to sin(i).
     """
-    mode = str(INCLINATION_SAMPLING).lower().strip()
-    i_min = float(INCLINATION_MIN_RAD)
-    i_max = float(INCLINATION_MAX_RAD)
+    mode = str(mode).lower().strip()
+    i_min = float(minimum_rad)
+    i_max = float(maximum_rad)
     if not (0.0 <= i_min < i_max <= np.pi):
         raise ValueError("Require 0 <= INCLINATION_MIN_RAD < INCLINATION_MAX_RAD <= pi")
 
@@ -719,7 +733,7 @@ def sample_inclination_for_event(rng: np.random.Generator) -> float:
         mu = float(np.clip(mu, -1.0, 1.0))
         return float(np.arccos(mu))
 
-    raise ValueError("INCLINATION_SAMPLING must be 'uniform_cos' or 'uniform_angle'")
+    raise ValueError("mode must be 'uniform_cos' or 'uniform_angle'")
 
 
 # --- PHOTOMETRIC FILTER SYSTEMS ---
@@ -799,6 +813,7 @@ DUST_R_X_BY_SYSTEM = {
 
 def add_multisystem_extinction_summary(
     event_summary: dict[str, object],
+    filter_systems: list[str] | tuple[str, ...],
 ) -> dict[str, object]:
     """Add unambiguous per-system ``R`` and ``A`` values for one event.
 
@@ -811,7 +826,7 @@ def add_multisystem_extinction_summary(
     """
     out = dict(event_summary)
     ebv = float(out.get("ebv_mw", np.nan))
-    for system in FILTER_SYSTEMS:
+    for system in filter_systems:
         for band, coefficient in DUST_R_X_BY_SYSTEM[system].items():
             coefficient = float(coefficient)
             out[f"R_{system}_{band}_mw"] = coefficient
@@ -1545,10 +1560,18 @@ def main() -> None:
             params = {name: float(sample[name][0]) for name in prior.naming}
         params.update(fixed_params)
         if "inclination_EM" not in params:
-            params["inclination_EM"] = sample_inclination_for_event(physical_rng)
+            params["inclination_EM"] = sample_inclination_for_event(
+                physical_rng,
+                mode=INCLINATION_SAMPLING,
+                minimum_rad=INCLINATION_MIN_RAD,
+                maximum_rad=INCLINATION_MAX_RAD,
+            )
         z, d_l = sample_distance_redshift_for_event(
             rng=physical_rng,
             sampler=COMOVING_VOLUME_SAMPLER,
+            mode=DISTANCE_SAMPLING,
+            fixed_redshift=FIXED_REDSHIFT,
+            fixed_luminosity_distance_mpc=FIXED_LUMINOSITY_DISTANCE_MPC,
         )
         params["redshift"] = float(z)
         params["luminosity_distance"] = float(d_l)
@@ -2373,7 +2396,8 @@ def main() -> None:
             event_mw_extinction[f"R_{_band}_mw"] = float(DUST_R_X[_band])
             event_mw_extinction[f"A_{_band}_mw"] = np.nan
         event_mw_extinction = add_multisystem_extinction_summary(
-            event_mw_extinction
+            event_mw_extinction,
+            filter_systems=FILTER_SYSTEMS,
         )
 
         detection_evaluated = False
@@ -2399,7 +2423,8 @@ def main() -> None:
             field_idx, selected_opsim_file = ELIGIBLE_OPSIM_FILES[selected_position]
             visits = OPSIM_VISIT_CACHE.get(selected_opsim_file)
             event_mw_extinction = add_multisystem_extinction_summary(
-                get_event_mw_extinction_summary(visits)
+                get_event_mw_extinction_summary(visits),
+                filter_systems=FILTER_SYSTEMS,
             )
             ra_event = float(event_mw_extinction.get("fieldRA", np.nan))
             dec_event = float(event_mw_extinction.get("fieldDec", np.nan))
@@ -2467,6 +2492,7 @@ def main() -> None:
                 det_snr=DET_SNR,
                 mag_truth_cap=event_numerical_support_cut_mag,
                 rng=rng_i,
+                apply_mw_extinction=APPLY_MW_EXTINCTION_TO_LSST_REALISM,
             )
             (
                 obs,
@@ -2664,6 +2690,8 @@ def main() -> None:
                 filter_colors=FILTER_COLORS,
                 outfile=pngdir / f"lightcurve_synthetic_{i:04d}.png",
                 event_index=i,
+                filter_systems=FILTER_SYSTEMS,
+                filter_by_system=FILTER_BY_SYSTEM,
             )
             if plot_written and APPLY_NUMERICAL_SUPPORT_CUT:
                 plot_numerical_floor_diagnostic(

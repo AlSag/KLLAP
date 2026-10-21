@@ -157,21 +157,16 @@ class GeneratorNumericsTest(unittest.TestCase):
 
     def test_inclination_sampling_matches_the_selected_geometry(self):
         rng = MidpointRng()
-        uniform_angle = generator_functions(
-            "sample_inclination_for_event",
-            INCLINATION_SAMPLING="uniform_angle",
-            INCLINATION_MIN_RAD=0.0,
-            INCLINATION_MAX_RAD=np.pi / 2.0,
-        )["sample_inclination_for_event"]
-        isotropic = generator_functions(
-            "sample_inclination_for_event",
-            INCLINATION_SAMPLING="uniform_cos",
-            INCLINATION_MIN_RAD=0.0,
-            INCLINATION_MAX_RAD=np.pi / 2.0,
+        sample_inclination = generator_functions(
+            "sample_inclination_for_event"
         )["sample_inclination_for_event"]
 
-        self.assertAlmostEqual(uniform_angle(rng), np.pi / 4.0)
-        self.assertAlmostEqual(isotropic(rng), np.pi / 3.0)
+        self.assertAlmostEqual(
+            sample_inclination(rng, mode="uniform_angle"), np.pi / 4.0
+        )
+        self.assertAlmostEqual(
+            sample_inclination(rng, mode="uniform_cos"), np.pi / 3.0
+        )
 
     def test_sky_seeds_are_reproducible_and_latitude_specific(self):
         values = {
