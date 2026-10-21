@@ -30,16 +30,22 @@ class GeneratorStructureTest(unittest.TestCase):
             for node in self.tree.body
             if isinstance(node, ast.FunctionDef) and node.name == "main"
         )
-        runtime_assignments = {
-            target.id
+        called = {
+            node.func.id
             for node in ast.walk(main)
-            if isinstance(node, (ast.Assign, ast.AnnAssign))
-            for target in (
-                node.targets if isinstance(node, ast.Assign) else [node.target]
-            )
-            if isinstance(target, ast.Name)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
         }
-        self.assertIn("RUNTIME", runtime_assignments)
+        self.assertIn("configure_runtime", called)
+        self.assertIn("run_generation", called)
+
+    def test_public_file_contains_science_plots_and_terminal_interface(self):
+        functions = {
+            node.name for node in self.tree.body if isinstance(node, ast.FunctionDef)
+        }
+        self.assertIn("ensure_mw_extinction_columns", functions)
+        self.assertIn("plot_synthetic_only", functions)
+        self.assertIn("configure_runtime", functions)
+        self.assertIn("run_generation", functions)
 
     def test_main_is_called_only_by_the_module_guard(self):
         guards = [

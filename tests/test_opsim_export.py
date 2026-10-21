@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+import inspect
 
 import numpy as np
 import pandas as pd
@@ -19,23 +20,10 @@ class OpSimExportTest(unittest.TestCase):
         self.assertTrue(callable(opsim.main))
         self.assertFalse(hasattr(opsim, "RUNTIME"))
 
-    def test_noninteractive_configuration_accepts_explicit_argv(self) -> None:
-        args = opsim.runtime_configuration(
-            [
-                "--selection-mode",
-                "LOWDUST",
-                "--n-fields",
-                "17",
-                "--seed",
-                "123",
-                "--m5-latitude-threshold-deg",
-                "25",
-            ]
+    def test_public_configuration_has_no_command_line_arguments(self) -> None:
+        self.assertEqual(
+            len(inspect.signature(opsim.runtime_configuration).parameters), 0
         )
-        self.assertEqual(args.selection_mode, "LOWDUST")
-        self.assertEqual(args.n_fields, 17)
-        self.assertEqual(args.seed, 123)
-        self.assertEqual(args.m5_latitude_threshold_deg, 25.0)
 
     def test_selection_builders_keep_queries_parameterized(self) -> None:
         target = opsim.build_selection("TARGET", target_name="DD:COSMOS")

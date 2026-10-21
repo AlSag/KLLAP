@@ -9,12 +9,12 @@ import numpy as np
 import pandas as pd
 
 from kne_pipeline_common import interpolate_magnitude_log_time
-from kne_generation_core import (
-    apply_synthetic_m5_median_cut,
-    derive_sky_seed,
-    ensure_mw_extinction_columns,
-    keep_only_mw_extincted_synthetic_magnitude,
-    trim_lsstlike_after_last_detection,
+from generate_kne_lightcurves import (
+    _apply_synthetic_m5_median_cut as apply_synthetic_m5_median_cut,
+    _derive_sky_seed as derive_sky_seed,
+    _ensure_mw_extinction_columns as ensure_mw_extinction_columns,
+    _keep_only_mw_extincted_synthetic_magnitude as keep_only_mw_extincted_synthetic_magnitude,
+    _trim_lsstlike_after_last_detection as trim_lsstlike_after_last_detection,
 )
 
 

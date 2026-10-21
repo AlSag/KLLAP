@@ -6,11 +6,11 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from kne_generation_plots import (
-    plot_lsstlike_only,
-    plot_numerical_floor_diagnostic,
-    plot_saved_synthetic_measurements,
-    plot_synthetic_and_lsstlike,
+from generate_kne_lightcurves import (
+    _plot_lsstlike_only as plot_lsstlike_only,
+    _plot_numerical_floor_diagnostic as plot_numerical_floor_diagnostic,
+    _plot_saved_synthetic_measurements as plot_saved_synthetic_measurements,
+    _plot_synthetic_and_lsstlike as plot_synthetic_and_lsstlike,
 )
 
 

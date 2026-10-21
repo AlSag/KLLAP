@@ -3,27 +3,28 @@
 KNE_RUN_FIESTA_INTEGRATION_TESTS=1 PYTHONPATH=. python -m unittest discover \
     -s tests -p test_metzger_fiesta_integration.py -v
 """
-import argparse
 import os
 import unittest
 
 import numpy as np
 
-from kne_model_backends import add_metzger_arguments, create_fiesta_model, saved_observer_times
+from generate_kne_lightcurves import (
+    create_fiesta_model,
+    default_runtime_configuration,
+    saved_observer_times,
+)
 
 
 @unittest.skipUnless(os.environ.get("KNE_RUN_FIESTA_INTEGRATION_TESTS") == "1",
                      "optional real-FIESTA test; set KNE_RUN_FIESTA_INTEGRATION_TESTS=1")
 class MetzgerFiestaIntegrationTest(unittest.TestCase):
     def test_real_models_scalar_batch_distance_and_spherical_symmetry(self):
-        parser = argparse.ArgumentParser()
-        add_metzger_arguments(parser)
         filters = ["lsst" + b for b in "ugrizy"] + ["ps1::" + b for b in "grizy"] + ["ztf" + b for b in "gri"]
         params = dict(log10_mej=-2.0, log10_vej=-1.0, beta=3.0, log10_kappa_r=1.0,
                       redshift=0.009, luminosity_distance=40.7, inclination_EM=0.4)
         for name in ("MetzgerModel", "MetzgerFullModel"):
             with self.subTest(model=name):
-                args = parser.parse_args([])
+                args = default_runtime_configuration()
                 args.model = name
                 args.parameter_source = "broad"
                 args.fiesta_surrogate_dir = None
