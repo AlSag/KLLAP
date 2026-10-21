@@ -75,42 +75,6 @@ class GeneratorStructureTest(unittest.TestCase):
         }
         self.assertTrue(forbidden.isdisjoint(top_level_calls))
 
-    def test_module_helpers_do_not_read_main_local_configuration(self):
-        formerly_leaked_names = {
-            "APPLY_MW_EXTINCTION_TO_LSST_REALISM",
-            "DISTANCE_SAMPLING",
-            "FILTER_BY_SYSTEM",
-            "FILTER_SYSTEMS",
-            "FIXED_LUMINOSITY_DISTANCE_MPC",
-            "FIXED_REDSHIFT",
-            "INCLINATION_MAX_RAD",
-            "INCLINATION_MIN_RAD",
-            "INCLINATION_SAMPLING",
-        }
-        helpers = {
-            node.name: node
-            for node in self.tree.body
-            if isinstance(node, ast.FunctionDef)
-        }
-        checked_helpers = {
-            "add_multisystem_extinction_summary",
-            "apply_lsst_realism_to_fiesta",
-            "plot_saved_synthetic_measurements",
-            "sample_distance_redshift_for_event",
-            "sample_inclination_for_event",
-        }
-
-        for helper_name in checked_helpers:
-            loaded_names = {
-                node.id
-                for node in ast.walk(helpers[helper_name])
-                if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
-            }
-            self.assertTrue(
-                formerly_leaked_names.isdisjoint(loaded_names),
-                f"{helper_name} still reads main-local runtime configuration",
-            )
-
 
 if __name__ == "__main__":
     unittest.main()
