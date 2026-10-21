@@ -2,12 +2,18 @@ from __future__ import annotations
 
 import unittest
 
+import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
+from matplotlib.colors import LogNorm
 
 from plot_kne_colour_isocontours import (
+    display_axis_domain,
+    draw_panel,
     fixed_levels,
     parameter_colour_grid,
     plotting_axis,
+    population_model,
 )
 
 
@@ -76,6 +82,41 @@ class ColourIsocontoursTest(unittest.TestCase):
         np.testing.assert_allclose(coordinates, [1e-4, 1e-3, 1e-2])
         self.assertEqual(scale, "log")
         self.assertIn("M_", label)
+
+    def test_bu2026_display_domain_can_use_full_model_validity(self):
+        metadata = pd.DataFrame({"model": ["Bu2026_MLP", "Bu2026_MLP"]})
+        model = population_model(metadata)
+        domain = display_axis_domain(
+            np.array([-2.0, -0.9]), "log10_mej_wind", model, "model"
+        )
+
+        np.testing.assert_allclose(domain, [-4.0, -0.5502131530142267])
+
+    def test_count_heatmap_keeps_nonzero_cells_below_contour_support(self):
+        grid = {
+            "count": np.array([[0, 2], [1, 4]]),
+            "p50": np.array([[np.nan, 1.0], [2.0, 3.0]]),
+            "supported": np.array([[False, False], [False, True]]),
+            "smoothed_p50": np.array([[np.nan, np.nan], [np.nan, 3.0]]),
+            "N_available": 7,
+        }
+        fig, ax = plt.subplots()
+        mesh, _ = draw_panel(
+            ax,
+            grid,
+            np.array([0.0, 1.0, 2.0]),
+            np.array([0.0, 1.0, 2.0]),
+            np.array([]),
+            LogNorm(vmin=1, vmax=4),
+            plt.get_cmap("viridis"),
+            0.4,
+            0.8,
+        )
+        displayed = mesh.get_array()
+        self.assertTrue(np.ma.getmaskarray(displayed)[0, 0])
+        self.assertFalse(np.ma.getmaskarray(displayed)[0, 1])
+        self.assertEqual(displayed[0, 1], 1)
+        plt.close(fig)
 
 
 if __name__ == "__main__":

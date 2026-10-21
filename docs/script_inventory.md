@@ -13,7 +13,7 @@ without starting a calculation.
 | `build_color_envelopes.py` | colour tracks, percentile envelopes and stage comparisons |
 | `analyze_envelope_population_convergence_fast.py` | nested-sample convergence tables and figures |
 | `plot_colour_envelope_realizations.py` | realization comparisons and bootstrap distributions |
-| `plot_kne_colour_isocontours.py` | parameter-space median-colour maps and iso-colour contours |
+| `plot_kne_colour_isocontours.py` | parameter-space KNe-count maps and median iso-colour contours |
 | `analyze_kne_latitude.py` | population, paired-bin and low/high-cut latitude products |
 | `run_latitude_experiment.py` | complete paired latitude-bin generation and comparison |
 

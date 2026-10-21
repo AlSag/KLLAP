@@ -12,7 +12,7 @@ shared implementation modules in the reviewable pipeline.
 | `build_color_envelopes.py` | population, colour, m5 and support questions | colour interpolation, stage masks, bootstrap and percentiles | envelopes and comparison products |
 | `analyze_envelope_population_convergence_fast.py` | nested sizes, tolerances and bootstrap questions | value and temporal-extent convergence | summary tables and convergence figures |
 | `plot_colour_envelope_realizations.py` | realization, time and validity questions | nested prefixes, percentiles, tails and bootstrap | realization and bootstrap-distribution figures |
-| `plot_kne_colour_isocontours.py` | plane, time, m5 and contour questions | population loading, cell medians and supported-cell smoothing | individual and overview iso-colour maps |
+| `plot_kne_colour_isocontours.py` | plane, time, m5, axis-domain and contour questions | population loading, cell counts, cell medians and supported-cell smoothing | KNe-count heatmaps with individual and overview median iso-colour maps |
 | `analyze_kne_latitude.py` | analysis-mode and method-specific questions | population losses, paired-bin bootstrap and moving-cut plateau | latitude tables and figures |
 | `run_latitude_experiment.py` | experiment and resume questions | paired generation/analysis configuration | complete latitude experiment outputs |
 

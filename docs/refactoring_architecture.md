@@ -44,6 +44,12 @@ constructing subprocess commands.
 Importing a public script must not prompt, load a FIESTA model, create a run,
 or write a figure. Tests enforce this boundary.
 
+For iso-colour products, population counts and colour contours have distinct
+support rules: every non-empty parameter cell may appear in the count heatmap,
+whereas a median-colour contour uses only cells meeting the requested minimum
+event count. Full surrogate bounds may be displayed without extending the
+scientific grid beyond the population actually sampled.
+
 ## Shared definitions
 
 Five small modules prevent duplication of scientific conventions:

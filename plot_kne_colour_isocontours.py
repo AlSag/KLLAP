@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Map median KNe colour and iso-colour contours in parameter planes.
+"""Map KNe counts and median-colour contours in parameter planes.
 
 The program reuses the population loading, log-time interpolation, Milky-Way
 convention, and m5 cuts from ``kne_colour_py``.  For each
 time bin and each requested physical-parameter plane, it computes p16, p50,
-and p84 of the colour in rectangular parameter cells.  The heatmap shows p50;
-iso-colour contours are drawn from a support-aware smoothed p50 field.
+and p84 of the colour in rectangular parameter cells.  The heatmap shows the
+number of stage-available KNe in each cell; iso-colour contours are drawn from
+a support-aware smoothed p50 field.
 Smoothing never fills unsupported cells, so contours are not extrapolated
 beyond the measured population support.
 
@@ -30,7 +31,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.colors import Normalize, TwoSlopeNorm
+from matplotlib.colors import LogNorm, Normalize
 from matplotlib.ticker import FuncFormatter, LogLocator, NullFormatter
 import numpy as np
 import pandas as pd
@@ -189,6 +190,46 @@ def axis_domain(values: np.ndarray) -> tuple[float, float]:
     return low, high
 
 
+def population_model(metadata: pd.DataFrame) -> str | None:
+    """Return the unique saved light-curve model, when it is identifiable."""
+    for column in ("model", "light_curve_model"):
+        if column not in metadata:
+            continue
+        models = metadata[column].dropna().astype(str).unique()
+        if len(models) == 1:
+            return str(models[0])
+    return None
+
+
+def display_axis_domain(
+    values: np.ndarray,
+    parameter: str,
+    model: str | None,
+    mode: str,
+) -> tuple[float, float]:
+    """Choose plot limits without changing the grid or extrapolating colours."""
+    sampled = axis_domain(values)
+    if mode == "sample" or model not in MODEL_VALIDITY_DOMAINS:
+        return sampled
+    source_parameter = {
+        "mej_dyn": "log10_mej_dyn",
+        "mej_wind": "log10_mej_wind",
+        "inclination_deg": "inclination_EM",
+        "cos_inclination": "inclination_EM",
+    }.get(parameter, parameter)
+    bounds = MODEL_VALIDITY_DOMAINS[model].get(source_parameter)
+    if bounds is None:
+        return sampled
+    if parameter in {"mej_dyn", "mej_wind"}:
+        return tuple(float(10.0 ** value) for value in bounds)
+    if parameter == "inclination_deg":
+        return tuple(float(value) for value in np.rad2deg(bounds))
+    if parameter == "cos_inclination":
+        transformed = tuple(float(value) for value in np.cos(bounds))
+        return min(transformed), max(transformed)
+    return tuple(float(value) for value in bounds)
+
+
 def resolve_root(path: Path) -> Path:
     root = path.expanduser().resolve()
     if root.name in ("parquet", "csv") and (root.parent / "summary.csv").is_file():
@@ -301,6 +342,21 @@ MASS_AXIS_LABELS = {
     "log10_mej_wind": r"$M_{\mathrm{ej}}^{\mathrm{wind}}\ [M_\odot]$",
 }
 
+# FIESTA surrogate validity domains.  They control only the displayed axes:
+# the statistical grid remains restricted to the population actually sampled.
+# Therefore no colour is invented outside the simulated parameter support.
+MODEL_VALIDITY_DOMAINS = {
+    "Bu2026_MLP": {
+        "log10_mej_dyn": (-4.0, -1.3010299956639813),
+        "v_ej_dyn": (0.12, 0.35),
+        "Ye_dyn": (0.15, 0.35),
+        "log10_mej_wind": (-4.0, -0.5502131530142267),
+        "v_ej_wind": (0.05, 0.15),
+        "Ye_wind": (0.20, 0.40),
+        "inclination_EM": (0.0, 0.5 * math.pi),
+    },
+}
+
 
 # -----------------------------------------------------------------------------
 # USER-FRIENDLY TERMINAL INTERFACE AND INPUT VALIDATION
@@ -316,7 +372,8 @@ def default_configuration() -> argparse.Namespace:
         parameter_pairs="log10_mej_dyn:log10_mej_wind",
         contour_mode="fixed", contour_levels="-3:3:1", contour_step=1.0,
         bounds_file=None, percentile_pair="5,95", reference_repetition=0,
-        colour_scale=None, m5_percentile=75.0, m5_scenario=None,
+        axis_domain_mode="model", count_scale="log",
+        m5_percentile=75.0, m5_scenario=None,
         threshold_scope="common_global", m5_quantile_table=None,
         ztf_m5_g=None, ztf_m5_r=None, ztf_m5_i=None, max_events=0,
         grid_size=20, minimum_cell_events=20, smooth_sigma=1.0,
@@ -364,6 +421,19 @@ def interactive(args: argparse.Namespace) -> argparse.Namespace:
     )
     args.parameter_pairs = ask(
         "Plans x:y (séparés par une virgule)", args.parameter_pairs
+    )
+    args.axis_domain_mode = choose(
+        "Domaine affiché sur les axes",
+        [
+            ("model", "Domaine de validité complet du modèle"),
+            ("sample", "Minimum et maximum de la population simulée"),
+        ],
+        args.axis_domain_mode,
+    )
+    args.count_scale = choose(
+        "Échelle de la colormap des effectifs",
+        [("log", "Logarithmique"), ("linear", "Linéaire")],
+        args.count_scale,
     )
     args.contour_mode = choose(
         "Niveaux des isocouleurs",
@@ -507,15 +577,6 @@ def fixed_levels(text: str) -> np.ndarray:
     return levels
 
 
-def parse_colour_scale(text: str | None):
-    if text is None:
-        return None
-    fields = [float(value.strip()) for value in text.split(":")]
-    if len(fields) != 2 or not np.isfinite(fields).all() or fields[1] <= fields[0]:
-        raise ValueError("--colour-scale doit suivre min:max")
-    return tuple(fields)
-
-
 def envelope_levels(bounds: pd.DataFrame, step: float) -> list[np.ndarray]:
     if not np.isfinite(step) or step <= 0:
         raise ValueError("--contour-step doit être fini et positif")
@@ -630,37 +691,12 @@ def parameter_colour_grid(
     }
 
 
-def robust_colour_domain(
-    colour: np.ndarray,
-    available: np.ndarray,
-    requested_levels: list[np.ndarray],
-    explicit: tuple[float, float] | None,
-):
-    if explicit is not None:
-        return explicit
-    values = colour[available & np.isfinite(colour)]
-    if not len(values):
-        raise ValueError("Aucune couleur disponible pour définir l’échelle")
-    low, high = np.quantile(values, [.01, .99])
-    nonempty_levels = [level for level in requested_levels if len(level)]
-    all_levels = (
-        np.concatenate(nonempty_levels)
-        if nonempty_levels else np.array([], dtype=float)
-    )
-    if len(all_levels):
-        low, high = min(low, all_levels.min()), max(high, all_levels.max())
-    if not np.isfinite(low + high) or high <= low:
-        low, high = float(np.nanmin(values)), float(np.nanmax(values))
-    if high <= low:
-        high = low + 1e-6
-    return float(low), float(high)
-
-
-def colour_norm(vmin: float, vmax: float):
-    return (
-        TwoSlopeNorm(vmin=vmin, vcenter=0.0, vmax=vmax)
-        if vmin < 0 < vmax else Normalize(vmin=vmin, vmax=vmax)
-    )
+def count_normalization(maximum: int, scale: str):
+    """Return a shared normalization for population counts."""
+    maximum = max(1, int(maximum))
+    if scale == "log":
+        return LogNorm(vmin=1, vmax=max(2, maximum))
+    return Normalize(vmin=0, vmax=max(1, maximum))
 
 
 # -----------------------------------------------------------------------------
@@ -679,10 +715,11 @@ def draw_panel(
     time_low,
     time_high,
 ):
-    raw = np.ma.masked_invalid(grid["p50"])
-    raw.mask = np.ma.getmaskarray(raw) | ~grid["supported"]
+    # The heatmap reports every non-empty cell.  The stricter support mask is
+    # used only for the median-colour contours below.
+    counts = np.ma.masked_less_equal(grid["count"], 0)
     mesh = ax.pcolormesh(
-        x_edges, y_edges, raw.T, shading="flat", cmap=cmap, norm=norm,
+        x_edges, y_edges, counts.T, shading="flat", cmap=cmap, norm=norm,
         rasterized=True,
     )
     field = grid["smoothed_p50"]
@@ -706,7 +743,7 @@ def draw_panel(
     supported_cells = int(grid["supported"].sum())
     ax.set_title(
         f"{time_low:g}–{time_high:g} j  ·  "
-        f"N={grid['N_available']:,}  ·  cellules={supported_cells:,}",
+        f"N={grid['N_available']:,}  ·  cellules contours={supported_cells:,}",
         fontsize=9.5,
     )
     ax.set_facecolor("#e4e6e8")
@@ -732,9 +769,10 @@ def save_individual_panels(
     y_label: str,
     x_scale: str,
     y_scale: str,
+    x_limits: tuple[float, float],
+    y_limits: tuple[float, float],
     norm,
     cmap,
-    colour_label: str,
 ):
     for index, grid in enumerate(grids):
         fig, ax = plt.subplots(figsize=(7.0, 5.7))
@@ -743,10 +781,12 @@ def save_individual_panels(
             edges[index], edges[index + 1],
         )
         configure_axis_scale(ax, x_scale, y_scale)
+        ax.set_xlim(*x_limits)
+        ax.set_ylim(*y_limits)
         ax.set_xlabel(x_label)
         ax.set_ylabel(y_label)
         colorbar = fig.colorbar(mesh, ax=ax, pad=.02)
-        colorbar.set_label(f"{colour_label} median [mag]")
+        colorbar.set_label("KNe per cell")
         fig.tight_layout()
         fig.savefig(
             output / f"{stem}_{time_tag(edges[index], edges[index + 1])}.png",
@@ -767,9 +807,10 @@ def save_overview_pages(
     y_label: str,
     x_scale: str,
     y_scale: str,
+    x_limits: tuple[float, float],
+    y_limits: tuple[float, float],
     norm,
     cmap,
-    colour_label: str,
     panels_per_page: int,
 ):
     columns = min(2, panels_per_page)
@@ -807,6 +848,8 @@ def save_overview_pages(
                 norm, cmap, edges[index], edges[index + 1],
             )
             configure_axis_scale(ax, x_scale, y_scale)
+            ax.set_xlim(*x_limits)
+            ax.set_ylim(*y_limits)
             row, column = divmod(local, columns)
             if row == rows - 1:
                 ax.set_xlabel(x_label)
@@ -817,7 +860,7 @@ def save_overview_pages(
         if mesh is not None:
             colorbar_axis = fig.add_subplot(layout[:rows, columns])
             colorbar = fig.colorbar(mesh, cax=colorbar_axis)
-            colorbar.set_label(f"{colour_label} median [mag]")
+            colorbar.set_label("KNe per cell")
         fig.savefig(output / f"{stem}_overview_{page:02d}.png", dpi=190)
         plt.close(fig)
 
@@ -881,8 +924,13 @@ def run_analysis(args: argparse.Namespace) -> None:
         raise ValueError("--smooth-sigma doit être fini et >= 0")
     if args.panels_per_page < 1:
         raise ValueError("--panels-per-page doit être positif")
+    if args.axis_domain_mode not in {"model", "sample"}:
+        raise ValueError("Domaine d’axes invalide")
+    if args.count_scale not in {"log", "linear"}:
+        raise ValueError("Échelle d’effectifs invalide")
 
     metadata = load_metadata(root, args.max_events, args.seed)
+    model_name = population_model(metadata)
     parameter_arrays = {}
     for pair in pairs:
         for parameter in pair:
@@ -924,18 +972,7 @@ def run_analysis(args: argparse.Namespace) -> None:
             )
             levels_by_stage[stage] = envelope_levels(bounds, args.contour_step)
 
-    explicit_scale = parse_colour_scale(args.colour_scale)
-    combined_available = np.logical_or.reduce(list(availability.values()))
-    all_levels = [
-        levels
-        for stage_levels in levels_by_stage.values()
-        for levels in stage_levels
-    ]
-    vmin, vmax = robust_colour_domain(
-        colour, combined_available, all_levels, explicit_scale
-    )
-    norm = colour_norm(vmin, vmax)
-    cmap = plt.get_cmap("coolwarm").copy()
+    cmap = plt.get_cmap("viridis").copy()
     cmap.set_bad("#e4e6e8")
 
     if stage_uses_m5(requested_stage):
@@ -969,8 +1006,21 @@ def run_analysis(args: argparse.Namespace) -> None:
             y = parameter_arrays[y_name]
             x_domain = axis_domain(x)
             y_domain = axis_domain(y)
+            x_display_domain = display_axis_domain(
+                x, x_name, model_name, args.axis_domain_mode
+            )
+            y_display_domain = display_axis_domain(
+                y, y_name, model_name, args.axis_domain_mode
+            )
             x_edges = np.linspace(*x_domain, args.grid_size + 1)
             y_edges = np.linspace(*y_domain, args.grid_size + 1)
+            full_population_counts = np.histogram2d(
+                x[np.isfinite(x) & np.isfinite(y)],
+                y[np.isfinite(x) & np.isfinite(y)],
+                bins=(x_edges, y_edges),
+            )[0]
+            count_maximum = int(full_population_counts.max(initial=0))
+            norm = count_normalization(count_maximum, args.count_scale)
             grids = []
             for index in range(len(times)):
                 grid = parameter_colour_grid(
@@ -998,6 +1048,10 @@ def run_analysis(args: argparse.Namespace) -> None:
                     "N_model_supported": int(model_supported[:, index].sum()),
                     "N_stage_available": grid["N_available"],
                     "N_supported_cells": int(grid["supported"].sum()),
+                    "x_display_min": x_display_domain[0],
+                    "x_display_max": x_display_domain[1],
+                    "y_display_min": y_display_domain[0],
+                    "y_display_max": y_display_domain[1],
                     "requested_contour_levels": ",".join(
                         f"{value:g}" for value in levels_by_time[index]
                     ),
@@ -1010,15 +1064,22 @@ def run_analysis(args: argparse.Namespace) -> None:
             )
             plot_x_edges, x_label, x_scale = plotting_axis(x_name, x_edges)
             plot_y_edges, y_label, y_scale = plotting_axis(y_name, y_edges)
+            plot_x_limits = plotting_axis(
+                x_name, np.asarray(x_display_domain)
+            )[0]
+            plot_y_limits = plotting_axis(
+                y_name, np.asarray(y_display_domain)
+            )[0]
             save_individual_panels(
                 stage_output, stem, grids, levels_by_time, time_edges,
                 plot_x_edges, plot_y_edges, x_label, y_label, x_scale, y_scale,
-                norm, cmap, args.color_pair,
+                tuple(plot_x_limits), tuple(plot_y_limits), norm, cmap,
             )
             save_overview_pages(
                 stage_output, stem, grids, levels_by_time, time_edges,
                 plot_x_edges, plot_y_edges, x_label, y_label, x_scale, y_scale,
-                norm, cmap, args.color_pair, args.panels_per_page,
+                tuple(plot_x_limits), tuple(plot_y_limits), norm, cmap,
+                args.panels_per_page,
             )
             table = grid_table(
                 (x_name, y_name), grids, levels_by_time, time_edges,
@@ -1049,12 +1110,15 @@ def run_analysis(args: argparse.Namespace) -> None:
         "applied_depths": depths,
         "depth_source": depth_source,
         "N_analysed": len(metadata),
-        "heatmap_statistic": "cell-wise median colour among stage-available events",
+        "population_model": model_name,
+        "axis_display_domain": args.axis_domain_mode,
+        "heatmap_statistic": "stage-available KNe count per parameter cell",
+        "heatmap_count_scale": args.count_scale,
+        "heatmap_count_reference": "full analysed population, shared across times and stages",
         "cell_spread": "cell-wise colour p16 and p84 saved in grid CSV",
         "contour_field": "support-aware Gaussian-smoothed cell-wise median colour",
         "marginalisation": "all unplotted parameters follow the simulated population",
         "interpolation": "saved magnitude linear in log10(observer time); no extrapolation",
-        "colour_scale": [vmin, vmax],
         "summary_sha256": hashlib.sha256((root / "summary.csv").read_bytes()).hexdigest(),
         "bounds_sha256": (
             hashlib.sha256(bounds_path.read_bytes()).hexdigest()

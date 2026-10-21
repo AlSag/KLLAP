@@ -23,7 +23,7 @@ there is no second command-line interface based on long option lists.
 | 3 | `build_color_envelopes.py` | colour populations, percentile envelopes and stage comparisons |
 | 4 | `analyze_envelope_population_convergence_fast.py` | percentile-value and temporal-extent convergence tables and figures |
 | 5 | `plot_colour_envelope_realizations.py` | comparisons across independent realizations and bootstrap distributions |
-| 6 | `plot_kne_colour_isocontours.py` | median-colour maps and iso-colour contours in physical-parameter space |
+| 6 | `plot_kne_colour_isocontours.py` | population-count maps and median iso-colour contours in physical-parameter space |
 | 7 | `analyze_kne_latitude.py` | population losses, paired-bin comparisons, or low/high plateau diagnostics |
 | 8 | `run_latitude_experiment.py` | complete paired latitude-bin generation and analysis workflow |
 
@@ -149,10 +149,14 @@ python plot_kne_colour_isocontours.py
 ```
 
 The script reads saved populations, computes colours without temporal
-extrapolation, bins physical-parameter planes, and plots cell medians plus
-requested iso-colour contours. Unsupported cells remain masked. Smoothing can
-be applied to supported cells for contour presentation but never fills a cell
-without statistical support.
+extrapolation, and bins physical-parameter planes. The heatmap reports the
+number of stage-available KNe in every non-empty cell; requested iso-colour
+contours are calculated from the median colour in statistically supported
+cells. Smoothing can be applied to supported cells for contour presentation
+but never fills a cell without statistical support. By default, axes show the
+full validity domain of a recognized surrogate. Regions outside the sampled
+population are gray: displaying the model domain does not extrapolate colours
+or invent events there.
 
 ### 7. Analyse Galactic latitude
 
