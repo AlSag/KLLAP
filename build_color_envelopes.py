@@ -961,14 +961,15 @@ def estimate_interior_peak_time(
     times: np.ndarray,
     magnitudes: np.ndarray,
     minimum_prominence_mag: float,
+    allow_bright_first_point_fallback: bool = False,
 ) -> PeakEstimate:
     """Locate the most prominent interior flux maximum.
 
-    Magnitude minima are flux maxima. End points are deliberately never peak
-    candidates, which prevents the first Bu2026 sample from being mistaken for
-    a measured maximum. The selected discrete minimum is refined with a local
-    three-point quadratic fit when that fit is convex and remains bracketed by
-    its two neighbours.
+    Magnitude minima are flux maxima. An interior peak always has priority. For
+    KNe only, callers may use the brightest first saved point as a boundary
+    proxy when no significant interior (second) peak exists. The selected
+    interior minimum is refined with a local three-point quadratic fit when
+    that fit is convex and remains bracketed by its two neighbours.
     """
     samples = pd.DataFrame({"time": times, "magnitude": magnitudes})
     samples = samples.loc[
@@ -978,17 +979,38 @@ def estimate_interior_peak_time(
         samples.groupby("time", as_index=False)["magnitude"]
         .median().sort_values("time")
     )
-    if len(samples) < 3:
-        return PeakEstimate(status="insufficient_points")
+    if samples.empty:
+        return PeakEstimate(status="no_finite_reference_band_points")
     x = samples["time"].to_numpy(float)
     y = samples["magnitude"].to_numpy(float)
     first_is_brightest = bool(np.isclose(y[0], np.min(y), atol=1e-12))
+    if len(samples) < 3:
+        if allow_bright_first_point_fallback and first_is_brightest:
+            return PeakEstimate(
+                status="valid_boundary_first_point_insufficient_points",
+                time_days=float(x[0]),
+                discrete_time_days=float(x[0]),
+                magnitude=float(y[0]),
+                first_point_is_brightest=True,
+            )
+        return PeakEstimate(
+            status="insufficient_points",
+            first_point_is_brightest=first_is_brightest,
+        )
     candidates, properties = find_peaks(
         -y, prominence=float(minimum_prominence_mag)
     )
     if candidates.size == 0:
         any_interior, _ = find_peaks(-y)
         status = "below_minimum_prominence" if any_interior.size else "no_interior_peak"
+        if allow_bright_first_point_fallback and first_is_brightest:
+            return PeakEstimate(
+                status=f"valid_boundary_first_point_{status}",
+                time_days=float(x[0]),
+                discrete_time_days=float(x[0]),
+                magnitude=float(y[0]),
+                first_point_is_brightest=True,
+            )
         return PeakEstimate(
             status=status,
             first_point_is_brightest=first_is_brightest,
@@ -1154,6 +1176,7 @@ def interpolate_saved_population(
                 peak_curve["t_days"].to_numpy(float),
                 peak_curve["magnitude"].to_numpy(float),
                 peak_min_prominence_mag,
+                allow_bright_first_point_fallback=True,
             )
             peak_rows.append({
                 "event_id": event_id,
@@ -1165,6 +1188,7 @@ def interpolate_saved_population(
                 "prominence_mag": peak.prominence_mag,
                 "minimum_prominence_mag": peak_min_prominence_mag,
                 "first_saved_point_is_brightest": peak.first_point_is_brightest,
+                "peak_is_boundary_proxy": peak.status.startswith("valid_boundary_"),
                 "used_in_peak_relative_envelope": peak.valid,
             })
             if not peak.valid:
@@ -1243,6 +1267,7 @@ def interpolate_saved_population(
                 "prominence_mag": np.nan,
                 "minimum_prominence_mag": peak_min_prominence_mag,
                 "first_saved_point_is_brightest": False,
+                "peak_is_boundary_proxy": False,
                 "used_in_peak_relative_envelope": False,
             } for event_id in missing_event_ids)
     print(
@@ -1331,7 +1356,7 @@ def interactive(args: argparse.Namespace) -> argparse.Namespace:
             ("merger", "Time since merger (current KNe convention)"),
             (
                 "band_peak",
-                "Time relative to an interior peak measured in one colour band",
+                "Time relative to the selected-band peak (second peak preferred for KNe)",
             ),
         ],
         args.time_reference_mode,
@@ -2074,6 +2099,7 @@ def prepare_snia_population(
                 reference_curve["mjd"].to_numpy(float),
                 reference_curve[peak_magnitude_column].to_numpy(float),
                 args.peak_min_prominence_mag,
+                allow_bright_first_point_fallback=False,
             )
             reference_by_sn[int(sn_id)] = peak.time_days if peak.valid else np.nan
             peak_rows.append({
@@ -2087,6 +2113,7 @@ def prepare_snia_population(
                 "prominence_mag": peak.prominence_mag,
                 "minimum_prominence_mag": args.peak_min_prominence_mag,
                 "first_saved_point_is_brightest": peak.first_point_is_brightest,
+                "peak_is_boundary_proxy": False,
                 "used_in_peak_relative_envelope": peak.valid,
             })
         peak_diagnostics = pd.DataFrame(peak_rows)
@@ -3560,9 +3587,14 @@ def _run_single_system(
         n_valid_peaks = int(
             population.peak_diagnostics["used_in_peak_relative_envelope"].sum()
         ) if not population.peak_diagnostics.empty else 0
+        n_boundary_proxies = int(
+            population.peak_diagnostics["peak_is_boundary_proxy"].sum()
+        ) if not population.peak_diagnostics.empty else 0
         print(
-            f"KNe peak alignment: {n_valid_peaks:,}/{n_events:,} events have a "
-            f"resolved interior {args.peak_reference_band}-band peak."
+            f"KNe peak alignment: {n_valid_peaks:,}/{n_events:,} usable "
+            f"{args.peak_reference_band}-band references "
+            f"({n_valid_peaks - n_boundary_proxies:,} resolved interior peaks; "
+            f"{n_boundary_proxies:,} first-point boundary proxies)."
         )
     if missing_event_ids:
         missing_table = metadata.loc[
@@ -3820,13 +3852,15 @@ def _run_single_system(
             if args.time_reference_mode == "band_peak" else None
         ),
         "peak_definition": (
-            "most prominent interior local magnitude minimum; endpoints are "
-            "excluded; a bracketed convex three-point quadratic refines time"
+            "most prominent significant interior local magnitude minimum; for "
+            "KNe, the brightest first saved point is used only when no such "
+            "second peak exists; a bracketed convex three-point quadratic "
+            "refines an interior peak time"
             if args.time_reference_mode == "band_peak" else None
         ),
         "unresolved_peak_policy": (
-            "exclude event from every peak-relative envelope and record it in "
-            "kne_peak_time_diagnostics.csv"
+            "after the KNe first-point fallback, exclude any still-unresolved "
+            "event and record every decision in kne_peak_time_diagnostics.csv"
             if args.time_reference_mode == "band_peak" else None
         ),
         "population_latitude_selection_mode": (
@@ -3968,7 +4002,11 @@ def _run_single_system(
                 else "SALT2 t0 (time of maximum light)"
             ),
             "KNe_time_reference": (
-                f"measured interior {args.peak_reference_band}-band peak"
+                (
+                    f"resolved interior {args.peak_reference_band}-band peak; "
+                    "brightest first saved point used only when no significant "
+                    "later peak exists"
+                )
                 if args.time_reference_mode == "band_peak" else "merger"
             ),
             "position_projection": (
