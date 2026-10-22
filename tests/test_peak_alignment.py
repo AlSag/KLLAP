@@ -19,7 +19,6 @@ class PeakAlignmentTest(unittest.TestCase):
             np.array([0.2, 0.4, 0.6, 0.8, 1.0, 1.2]),
             np.array([10.0, 10.5, 11.0, 10.6, 10.2, 10.7]),
             minimum_prominence_mag=0.05,
-            allow_bright_first_point_fallback=True,
         )
         self.assertTrue(estimate.valid)
         self.assertTrue(estimate.first_point_is_brightest)
@@ -27,22 +26,7 @@ class PeakAlignmentTest(unittest.TestCase):
         self.assertGreater(estimate.time_days, 0.8)
         self.assertLess(estimate.time_days, 1.2)
 
-    def test_bright_first_point_is_used_when_no_second_peak_exists(self) -> None:
-        estimate = estimate_interior_peak_time(
-            np.array([0.2, 0.4, 0.6, 0.8]),
-            np.array([10.0, 10.4, 10.8, 11.0]),
-            minimum_prominence_mag=0.05,
-            allow_bright_first_point_fallback=True,
-        )
-        self.assertTrue(estimate.valid)
-        self.assertEqual(
-            estimate.status,
-            "valid_boundary_first_point_no_interior_peak",
-        )
-        self.assertAlmostEqual(estimate.time_days, 0.2)
-        self.assertTrue(estimate.first_point_is_brightest)
-
-    def test_boundary_fallback_is_not_used_for_snia_style_search(self) -> None:
+    def test_boundary_only_peak_is_unresolved(self) -> None:
         estimate = estimate_interior_peak_time(
             np.array([0.2, 0.4, 0.6, 0.8]),
             np.array([10.0, 10.4, 10.8, 11.0]),
@@ -50,6 +34,7 @@ class PeakAlignmentTest(unittest.TestCase):
         )
         self.assertFalse(estimate.valid)
         self.assertEqual(estimate.status, "no_interior_peak")
+        self.assertTrue(estimate.first_point_is_brightest)
 
     def test_small_local_minimum_can_fail_prominence_threshold(self) -> None:
         estimate = estimate_interior_peak_time(
@@ -77,7 +62,7 @@ class PeakAlignmentTest(unittest.TestCase):
             r"$t-t_{\rm peak,z}$ [days]",
         )
 
-    def test_kne_population_prefers_second_peak_then_uses_boundary_fallback(self) -> None:
+    def test_unresolved_event_is_excluded_from_peak_relative_population(self) -> None:
         class Source:
             @staticmethod
             def iter_events(event_ids, bands, systems):
@@ -109,16 +94,14 @@ class PeakAlignmentTest(unittest.TestCase):
             "ebv_mw": [0.0, 0.0],
         })
         population = interpolate_saved_population(
-            Source(), metadata, "g", "r", np.array([0.0, 0.1, 0.2]),
-            0.0, 0.2, "lsst", "band_peak", "g", 0.05,
+            Source(), metadata, "g", "r", np.array([-0.1, 0.0, 0.1]),
+            -0.2, 0.2, "lsst", "band_peak", "g", 0.05,
         )
         self.assertTrue(np.isfinite(population.intrinsic_band1[0]).all())
-        self.assertTrue(np.isfinite(population.intrinsic_band1[1]).all())
+        self.assertTrue(np.isnan(population.intrinsic_band1[1]).all())
         diagnostics = population.peak_diagnostics.set_index("event_id")
         self.assertTrue(diagnostics.loc["0", "used_in_peak_relative_envelope"])
-        self.assertFalse(diagnostics.loc["0", "peak_is_boundary_proxy"])
-        self.assertTrue(diagnostics.loc["1", "used_in_peak_relative_envelope"])
-        self.assertTrue(diagnostics.loc["1", "peak_is_boundary_proxy"])
+        self.assertFalse(diagnostics.loc["1", "used_in_peak_relative_envelope"])
 
 
 if __name__ == "__main__":

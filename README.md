@@ -110,16 +110,15 @@ The four scientific stages are:
 | `m5_with_mw` | yes | yes |
 
 The terminal interface can retain time since merger or align every KNe and
-SN Ia to a peak in either band of the requested colour. Peak-relative
+SN Ia to a measured peak in either band of the requested colour. Peak-relative
 interpolation is linear in phase (including negative phase) and never
-extrapolates. For KNe, a significant interior second peak has priority; if it
-does not exist and the first saved point is the brightest, that boundary point
-is used as the temporal reference. SN Ia peaks remain strict interior peaks.
-Unresolved events and boundary fallbacks are identified in dedicated
-peak-diagnostic CSV files. Merger-relative interpolation retains the historical
-logarithmic-positive-time convention. The saved configuration records the
-temporal reference, peak rule, bootstrap, tail-support, depth, and
-population-split conventions.
+extrapolates. A peak must be an interior local magnitude minimum with the
+requested prominence; endpoints are rejected, so a bright first Bu2026 sample
+is not silently treated as a resolved peak. Unresolved events are excluded and
+listed in dedicated peak-diagnostic CSV files. Merger-relative interpolation
+retains the historical logarithmic-positive-time convention. The saved
+configuration records the temporal reference, peak rule, bootstrap,
+tail-support, depth, and population-split conventions.
 
 ### 4. Measure convergence
 
