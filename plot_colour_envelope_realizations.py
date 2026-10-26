@@ -9,6 +9,10 @@ The script reads the realization manifest written by
 the interactive multi-realization mode of ``generate_kne_lightcurves.py`` and produces, for every
 requested colour pair, one panel per sample size. At each realization and
 target time the marker is p50 and the asymmetric error bar spans p16--p84.
+The median and the p16--p84 extent are validated independently. A valid p50
+can therefore be displayed without an interval, and a valid p16--p84 interval
+can be displayed without a median marker. Invalid components are omitted from
+the figure but remain fully documented in the output CSV.
 
 Optionally, both bands must pass a selected percentile of the OpSim limiting-
 depth distribution. Statistical support is checked from the expected number
@@ -692,8 +696,6 @@ def plot_pair(
     target_times: np.ndarray,
     output_dir: Path,
     connect: bool,
-    bootstrap: bool,
-    m5_percentile: float | None,
 ) -> None:
     realizations = sorted(values["realization"].unique())
     n_panels = len(sample_sizes)
@@ -724,69 +726,42 @@ def plot_pair(
             p84 = series["p84"].to_numpy(float)
             lower = y - p16
             upper = p84 - y
-            finite = np.isfinite(y) & np.isfinite(lower) & np.isfinite(upper)
-            enough = series["minimum_events_valid"].fillna(False).to_numpy(bool)
-            median_valid = finite & series["median_valid"].fillna(False).to_numpy(bool)
-            envelope_valid = finite & series["envelope_valid"].fillna(False).to_numpy(bool)
+            median_valid = (
+                np.isfinite(y)
+                & series["median_valid"].fillna(False).to_numpy(bool)
+            )
+            envelope_valid = (
+                np.isfinite(y)
+                & np.isfinite(lower)
+                & np.isfinite(upper)
+                & series["envelope_valid"].fillna(False).to_numpy(bool)
+            )
             if connect:
                 axis.plot(
-                    x, np.where(median_valid, y, np.nan), color=colour, alpha=0.45,
+                    x, np.where(median_valid, y, np.nan),
+                    color=colour, alpha=0.45,
                     linewidth=1.0, zorder=1,
                 )
 
-            # The p16--p84 interval remains scientifically useful as a
-            # descriptive population spread even if one of its estimators is
-            # not statistically validated.  Fade, rather than hide, it.
+            # The p16--p84 extent and p50 marker have independent validity.
+            # The p50 value only centres the asymmetric error-bar geometry;
+            # no median marker is drawn unless p50 itself is valid.
             axis.errorbar(
                 x[envelope_valid], y[envelope_valid],
-                yerr=np.vstack([lower[envelope_valid], upper[envelope_valid]]),
+                yerr=np.vstack([
+                    lower[envelope_valid], upper[envelope_valid]
+                ]),
                 fmt="none",
                 capsize=3,
                 elinewidth=1.25,
                 color=colour,
                 zorder=2 + time_index,
             )
-            envelope_invalid = finite & ~envelope_valid
-            axis.errorbar(
-                x[envelope_invalid], y[envelope_invalid],
-                yerr=np.vstack([lower[envelope_invalid], upper[envelope_invalid]]),
-                fmt="none",
-                capsize=2.5,
-                elinewidth=1.0,
-                color=colour,
-                alpha=0.30,
-                zorder=1.5 + time_index,
-            )
             axis.plot(
-                x[median_valid], y[median_valid], linestyle="none", marker="o",
+                x[median_valid], y[median_valid],
+                linestyle="none", marker="o",
                 markersize=5.5, color=colour, zorder=4 + time_index,
             )
-
-            # Marker position identifies the estimator: p16/p84 at the bar
-            # endpoints and p50 at its centre. Marker shape identifies why it
-            # failed: x for statistical support, + for bootstrap precision.
-            percentile_values = (p16, y, p84)
-            percentile_names = ("p16", "p50", "p84")
-            for percentile_value, name in zip(percentile_values, percentile_names):
-                value_finite = finite & np.isfinite(percentile_value)
-                tail_ok = series[f"tail_valid_{name}"].fillna(False).to_numpy(bool)
-                tail_failed = value_finite & ~(enough & tail_ok)
-                axis.plot(
-                    x[tail_failed], percentile_value[tail_failed],
-                    linestyle="none", marker="x", markersize=7.5,
-                    markeredgewidth=1.6, color=colour, zorder=6,
-                )
-                if bootstrap:
-                    bootstrap_ok = (
-                        series[f"bootstrap_valid_{name}"]
-                        .fillna(False).to_numpy(bool)
-                    )
-                    bootstrap_failed = value_finite & enough & ~bootstrap_ok
-                    axis.plot(
-                        x[bootstrap_failed], percentile_value[bootstrap_failed],
-                        linestyle="none", marker="+", markersize=9.0,
-                        markeredgewidth=1.6, color=colour, zorder=7,
-                    )
         axis.set_title(f"N = {sample_size:,}")
         axis.set_xlabel("Population realization")
         axis.set_xticks(realizations)
@@ -806,40 +781,16 @@ def plot_pair(
     fig.add_artist(time_legend)
     status_handles = [
         Line2D([], [], color="0.25", marker="o", linestyle="none",
-               label="p50 statistically valid"),
+               label="median"),
         Line2D([], [], color="0.25", linestyle="-", linewidth=1.4,
                marker="_", markersize=9,
-               label="p16 and p84 statistically valid"),
-        Line2D([], [], color="0.45", linestyle="-", linewidth=1.0,
-               alpha=0.30, label="descriptive p16–p84; bound invalid"),
-        Line2D([], [], color="0.45", marker="x", linestyle="none",
-               markersize=8, markeredgewidth=1.6,
-               label="insufficient tail support"),
+               label="16th–84th percentiles"),
     ]
-    if bootstrap:
-        status_handles.append(
-            Line2D([], [], color="0.45", marker="+", linestyle="none",
-                   markersize=9, markeredgewidth=1.6,
-                   label="bootstrap half-width failed")
-        )
     fig.legend(
         handles=status_handles, loc="lower center", bbox_to_anchor=(0.5, 0.035),
-        ncol=min(3, len(status_handles)), frameon=False,
+        ncol=len(status_handles), frameon=False,
     )
-    fig.text(
-        0.5, 0.012,
-        "Failure marker at centre: p50; at lower/upper endpoint: p16/p84.",
-        ha="center", va="bottom", fontsize=9, color="0.35",
-    )
-    depth_label = (
-        f" — two-band m5 p{m5_percentile:g} cut"
-        if m5_percentile is not None else " — no m5 cut"
-    )
-    fig.suptitle(
-        "Colour-envelope median and p16–p84 extent" + depth_label,
-        y=1.02,
-    )
-    fig.tight_layout(rect=(0, 0.17, 1, 0.90))
+    fig.tight_layout(rect=(0, 0.12, 1, 0.94))
     stem = f"{pair[0]}_minus_{pair[1]}_realization_envelopes"
     fig.savefig(output_dir / f"{stem}.png", dpi=220, bbox_inches="tight")
     fig.savefig(output_dir / f"{stem}.pdf", bbox_inches="tight")
@@ -1178,8 +1129,6 @@ def main() -> None:
             target_times,
             output_dir,
             connect=not args.no_connect,
-            bootstrap=args.bootstrap,
-            m5_percentile=args.m5_percentile if args.m5_cut else None,
         )
     if args.plot_bootstrap_distributions:
         if not all_bootstrap_draws:
