@@ -69,7 +69,7 @@ def default_configuration() -> argparse.Namespace:
     """Return documented defaults before the terminal questions."""
     return argparse.Namespace(
         manifest=None, run_dir=None, sample_sizes="1000,10000",
-        times="0.5,1.0,1.5,2.0", colour_pairs="g-r",
+        times="0.5,1.0,1.5,2.0", time_groups=None, colour_pairs="g-r",
         photometric_system="lsst", mw_treatment="corrected",
         minimum_valid_events=30, minimum_tail_events=20.0,
         m5_cut=True, m5_file=None, m5_percentile=50.0,
@@ -133,9 +133,21 @@ def configure_runtime() -> argparse.Namespace:
         args.sample_sizes = prompt_text(
             "Nested population sizes", args.sample_sizes
         )
-        args.times = prompt_text(
-            "Post-merger times [days]", args.times
-        )
+        n_time_groups = int(prompt_text("Number of separate time plots", "1"))
+        if n_time_groups < 1:
+            raise ValueError("The number of time plots must be at least one")
+        time_group_defaults = [args.times, "3.0,4.0,6.0,8.0"]
+        args.time_groups = []
+        for group_index in range(n_time_groups):
+            default_times = (
+                time_group_defaults[group_index]
+                if group_index < len(time_group_defaults)
+                else args.times
+            )
+            args.time_groups.append(prompt_text(
+                f"Post-merger times for plot {group_index + 1} [days]",
+                default_times,
+            ))
         args.colour_pairs = prompt_text(
             "Colour pairs", args.colour_pairs
         )
@@ -689,6 +701,15 @@ def time_palette(n_times: int) -> list[object]:
     return list(plt.get_cmap("viridis")(np.linspace(0.08, 0.92, n_times)))
 
 
+def time_group_filename_tag(target_times: np.ndarray) -> str:
+    """Return a compact, filesystem-safe description of one time group."""
+    encoded = []
+    for value in target_times:
+        token = f"{float(value):g}".replace("-", "m").replace(".", "p")
+        encoded.append(token)
+    return "times_" + "_".join(encoded)
+
+
 def plot_pair(
     values: pd.DataFrame,
     pair: tuple[str, str],
@@ -696,6 +717,7 @@ def plot_pair(
     target_times: np.ndarray,
     output_dir: Path,
     connect: bool,
+    output_tag: str | None = None,
 ) -> None:
     realizations = sorted(values["realization"].unique())
     n_panels = len(sample_sizes)
@@ -792,6 +814,8 @@ def plot_pair(
     )
     fig.tight_layout(rect=(0, 0.12, 1, 0.94))
     stem = f"{pair[0]}_minus_{pair[1]}_realization_envelopes"
+    if output_tag:
+        stem += f"_{output_tag}"
     fig.savefig(output_dir / f"{stem}.png", dpi=220, bbox_inches="tight")
     fig.savefig(output_dir / f"{stem}.pdf", bbox_inches="tight")
     plt.close(fig)
@@ -957,9 +981,16 @@ def main() -> None:
     if not args.bootstrap:
         args.plot_bootstrap_distributions = False
     sample_sizes = sorted(set(comma_separated_values(args.sample_sizes, int)))
-    target_times = np.asarray(
-        comma_separated_values(args.times, float), dtype=float
-    )
+    raw_time_groups = args.time_groups or [args.times]
+    time_groups = [
+        np.asarray(comma_separated_values(group, float), dtype=float)
+        for group in raw_time_groups
+    ]
+    target_times = np.asarray(sorted({
+        float(time)
+        for group in time_groups
+        for time in group
+    }), dtype=float)
     diagnostic_sizes = sorted(set(comma_separated_values(
         args.bootstrap_plot_sample_sizes, int
     )))
@@ -969,8 +1000,15 @@ def main() -> None:
     pairs = [colour_pair(token) for token in args.colour_pairs.split(",")]
     if any(size <= 0 for size in sample_sizes):
         raise ValueError("Sample sizes must be positive")
-    if np.any(~np.isfinite(target_times)) or np.any(target_times <= 0):
-        raise ValueError("Target times must be finite and positive")
+    for group_index, group in enumerate(time_groups, start=1):
+        if np.any(~np.isfinite(group)) or np.any(group <= 0):
+            raise ValueError(
+                f"Times in plot {group_index} must be finite and positive"
+            )
+        if len(np.unique(group)) != len(group):
+            raise ValueError(
+                f"Times in plot {group_index} must not contain duplicates"
+            )
     if args.minimum_valid_events < 1:
         raise ValueError("--minimum-valid-events must be positive")
     if args.minimum_tail_events < 0:
@@ -1120,16 +1158,30 @@ def main() -> None:
 
     result = pd.concat(all_rows, ignore_index=True)
     result.to_csv(output_dir / "colour_envelope_realization_values.csv", index=False)
+    multiple_time_plots = len(time_groups) > 1
     for pair in pairs:
         pair_name = f"{pair[0]}-{pair[1]}"
-        plot_pair(
-            result.loc[result["colour_pair"].eq(pair_name)],
-            pair,
-            sample_sizes,
-            target_times,
-            output_dir,
-            connect=not args.no_connect,
-        )
+        pair_values = result.loc[result["colour_pair"].eq(pair_name)]
+        for group_index, group_times in enumerate(time_groups, start=1):
+            output_tag = (
+                time_group_filename_tag(group_times)
+                if multiple_time_plots else None
+            )
+            plot_pair(
+                pair_values,
+                pair,
+                sample_sizes,
+                group_times,
+                output_dir,
+                connect=not args.no_connect,
+                output_tag=output_tag,
+            )
+            if multiple_time_plots:
+                print(
+                    f"Saved time plot {group_index}/{len(time_groups)}: "
+                    f"{pair[0]}-{pair[1]} at "
+                    + ", ".join(f"{time:g} d" for time in group_times)
+                )
     if args.plot_bootstrap_distributions:
         if not all_bootstrap_draws:
             raise RuntimeError("No bootstrap draws were captured for the diagnostic")
