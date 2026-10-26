@@ -2,8 +2,8 @@
 """Single-load convergence analysis for KNe colour envelopes.
 
 This self-contained workflow reads the saved population once, constructs
-reproducible nested subsets and evaluates bootstrap robustness for every
-requested population size.  It contains three explicitly labelled scientific
+reproducible nested subsets and optionally evaluates bootstrap robustness for
+every requested population size.  It contains three explicitly labelled scientific
 paths: fixed-percentile shape/extent convergence, the former adaptive-envelope
 comparison, and the legacy last-valid-bin analysis.  Calculation, aggregation,
 figure generation, terminal questions and orchestration are kept in this file.
@@ -73,6 +73,88 @@ def split_colour_pair(pair: str) -> tuple[str, str]:
     if len(pieces) != 2 or not all(pieces) or pieces[0] == pieces[1]:
         raise ValueError("Colour pair must look like g-r, g-i or r-i")
     return pieces[0], pieces[1]
+
+
+def percentile_diagnostics(
+    values: np.ndarray,
+    lower_grid: list[float],
+    bootstrap: bool,
+    n_boot: int,
+    bootstrap_threshold: float,
+    minimum_tail_events: float,
+    rng: np.random.Generator,
+) -> tuple[pd.DataFrame, dict[str, float] | None]:
+    """Validate percentiles with optional event bootstrap.
+
+    With bootstrap enabled, this delegates to the canonical envelope helper.
+    Without bootstrap, no resampling is performed: percentile validity is
+    determined only from the expected support in the nearest tail.  The NaN
+    bootstrap columns are retained so output tables keep the same schema.
+    """
+    if bootstrap:
+        diagnostics, selected = envelope_core.percentile_diagnostics(
+            values,
+            lower_grid,
+            n_boot,
+            bootstrap_threshold,
+            minimum_tail_events,
+            rng,
+        )
+        diagnostics = diagnostics.copy()
+        diagnostics["bootstrap_enabled"] = True
+        return diagnostics, selected
+
+    values = np.asarray(values, dtype=float)
+    values = values[np.isfinite(values)]
+    lower = sorted(set(float(q) for q in lower_grid if 0.0 < q <= 50.0))
+    percentiles = sorted(set(lower + [100.0 - q for q in lower] + [50.0]))
+    estimates = np.percentile(values, percentiles)
+    n_values = len(values)
+    rows = []
+    for q, value in zip(percentiles, estimates):
+        expected_tail = n_values * min(q, 100.0 - q) / 100.0
+        tail_valid = bool(expected_tail >= minimum_tail_events)
+        rows.append({
+            "percentile": q,
+            "value": float(value),
+            "bootstrap_p16": np.nan,
+            "bootstrap_p84": np.nan,
+            "bootstrap_half_width_68": np.nan,
+            "expected_nearest_tail_events": expected_tail,
+            # True means that this disabled criterion cannot reject the row.
+            "bootstrap_width_valid": True,
+            "tail_support_valid": tail_valid,
+            "percentile_valid": tail_valid,
+            "bootstrap_enabled": False,
+        })
+    diagnostics = pd.DataFrame(rows)
+    by_q = diagnostics.set_index("percentile")
+    median_valid = bool(by_q.loc[50.0, "percentile_valid"])
+    valid_pairs = [
+        q for q in lower
+        if median_valid
+        and bool(by_q.loc[q, "percentile_valid"])
+        and bool(by_q.loc[100.0 - q, "percentile_valid"])
+    ]
+    if not valid_pairs:
+        return diagnostics, None
+
+    q_low = min(valid_pairs)
+    q_high = 100.0 - q_low
+    selected = {
+        "low_percentile": q_low,
+        "high_percentile": q_high,
+        "color_min": float(by_q.loc[q_low, "value"]),
+        "color_median": float(by_q.loc[50.0, "value"]),
+        "color_max": float(by_q.loc[q_high, "value"]),
+        "low_bootstrap_half_width_68": np.nan,
+        "median_bootstrap_half_width_68": np.nan,
+        "high_bootstrap_half_width_68": np.nan,
+        "expected_lower_tail_events": float(n_values * q_low / 100.0),
+        "expected_upper_tail_events": float(n_values * q_low / 100.0),
+        "nominal_coverage_percent": float(q_high - q_low),
+    }
+    return diagnostics, selected
 
 
 def resolve_run_root(path: Path) -> Path:
@@ -347,8 +429,9 @@ def envelope_profile(a, sample, arrays, indices, depths, bands, edges, centres,
             active = False
             rows.append(row)
             continue
-        diagnostics, selected = envelope_core.percentile_diagnostics(
-            values, tails, a.n_boot, a.bootstrap_threshold_mag, a.minimum_tail_events, rng)
+        diagnostics, selected = percentile_diagnostics(
+            values, tails, getattr(a, "bootstrap", True), a.n_boot,
+            a.bootstrap_threshold_mag, a.minimum_tail_events, rng)
         if (reference_lookup is not None and a.bound_mode == "reference-percentiles"
                 and bool(reference_lookup.loc[b, "valid"])):
             ref = reference_lookup.loc[b]
@@ -360,7 +443,7 @@ def envelope_profile(a, sample, arrays, indices, depths, bands, edges, centres,
             else:
                 selected = None
         if selected is None:
-            row["status"] = "no_bootstrap_valid_pair"
+            row["status"] = "no_valid_percentile_pair"
             active = False
         else:
             row.update({k: float(selected[k]) for k in (*COMPONENTS, "low_percentile", "high_percentile")})
@@ -558,13 +641,18 @@ def run_colour_convergence(a, root, sizes, bands, edges, centres):
         raise ValueError("relative-tolerance must be finite and positive")
     if not np.isfinite(a.absolute_tolerance_mag) or a.absolute_tolerance_mag <= 0:
         raise ValueError("absolute-tolerance-mag must be finite and positive")
-    if a.minimum_events < 1 or a.minimum_tail_events < 0 or a.bootstrap_threshold_mag < 0:
+    if (a.minimum_events < 1 or a.minimum_tail_events < 0
+            or (getattr(a, "bootstrap", True)
+                and a.bootstrap_threshold_mag < 0)):
         raise ValueError("Invalid event-count or bootstrap-validity limits")
     if not (0 < a.train_fraction < 1 and 0 <= a.validation_fraction < 1
             and a.train_fraction + a.validation_fraction < 1):
         raise ValueError("Invalid train/validation fractions")
     output = a.output_dir.expanduser().resolve() if a.output_dir else (
-        root / "analysis" / f"convergence_colours_{a.color_pair.replace('-', '_')}_{a.photometric_system}_{a.stage}")
+        root / "analysis" /
+        f"convergence_colours_{a.color_pair.replace('-', '_')}_"
+        f"{a.photometric_system}_{a.stage}"
+        f"{'_no_bootstrap' if not getattr(a, 'bootstrap', True) else ''}")
     output.mkdir(parents=True, exist_ok=True)
     bargs = fast.make_builder_args(a, root)
     depths = (
@@ -812,9 +900,10 @@ def multiquantile_profile(a, sample, arrays, indices, depths, bands, edges,
                 rows.append(_empty_estimator_row(base, name, "fixed", q))
             continue
 
-        diagnostics, _ = envelope_core.percentile_diagnostics(
+        diagnostics, _ = percentile_diagnostics(
             values,
             diagnostic_lower,
+            getattr(a, "bootstrap", True),
             a.n_boot,
             a.bootstrap_threshold_mag,
             a.minimum_tail_events,
@@ -1346,7 +1435,11 @@ def _configuration(a, root, sizes, depths, fast, builder, common) -> dict:
         "population_usage": "100% of each selected subset; no split",
         "shape_definition": (
             "all requested percentile values in every fixed-window bin; "
-            "both reference and sample must satisfy tail and bootstrap support"
+            + (
+                "both reference and sample must satisfy tail and bootstrap support"
+                if getattr(a, "bootstrap", True) else
+                "both reference and sample must satisfy tail support; bootstrap disabled"
+            )
         ),
         "extent_definition": (
             "last upper edge in the initial consecutive sequence where every "
@@ -1391,12 +1484,14 @@ def run_multi_percentile_convergence(a, root, sizes, bands, edges, centres):
         raise ValueError("absolute-tolerance-mag must be finite and positive")
     if a.minimum_events < 1 or a.minimum_tail_events < 0:
         raise ValueError("Invalid event-count validity limits")
-    if a.bootstrap_threshold_mag < 0:
+    if (getattr(a, "bootstrap", True)
+            and a.bootstrap_threshold_mag < 0):
         raise ValueError("bootstrap-threshold-mag cannot be negative")
     output = a.output_dir.expanduser().resolve() if a.output_dir else (
         root / "analysis" /
         f"convergence_multiquantile_{a.color_pair.replace('-', '_')}_"
         f"{a.photometric_system}_{a.stage}"
+        f"{'_no_bootstrap' if not getattr(a, 'bootstrap', True) else ''}"
     )
     output.mkdir(parents=True, exist_ok=True)
     bargs = fast.make_builder_args(a, root)
@@ -1619,7 +1714,8 @@ def default_configuration() -> argparse.Namespace:
         stage="m5_with_mw",
         sample_sizes="1000,3000,10000,30000,50000,75000,100000,150000,200000",
         repetitions=10, subsample_seed=20261002, builder_seed=12345,
-        t_min=0.4, t_max=16.0, bin_width=0.4, n_boot=200,
+        t_min=0.4, t_max=16.0, bin_width=0.4,
+        bootstrap=True, n_boot=200,
         minimum_events=30, minimum_tail_events=20.0,
         bootstrap_threshold_mag=0.1, train_fraction=0.70,
         validation_fraction=0.15, tail_percentiles=None,
@@ -1650,20 +1746,31 @@ def interactive_configuration(args: argparse.Namespace) -> argparse.Namespace:
     args.sample_sizes = prompt_text("Nested population sizes", args.sample_sizes)
     args.repetitions = int(prompt_text("Independent subset repetitions", str(args.repetitions)))
     args.subsample_seed = int(prompt_text("Subset master seed", str(args.subsample_seed)))
-    args.builder_seed = int(prompt_text("Bootstrap master seed", str(args.builder_seed)))
+    args.builder_seed = int(prompt_text("Builder master seed", str(args.builder_seed)))
     args.t_min = float(prompt_text("First temporal-bin lower edge [days]", str(args.t_min)))
     args.t_max = float(prompt_text("Last temporal-bin upper edge [days]", str(args.t_max)))
     args.bin_width = float(prompt_text("Temporal-bin width [days]", str(args.bin_width)))
-    args.n_boot = int(prompt_text("Bootstrap repetitions per bin", str(args.n_boot)))
     args.minimum_events = int(prompt_text("Minimum finite colours per bin", str(args.minimum_events)))
     args.minimum_tail_events = float(prompt_text(
         "Minimum expected events in each percentile tail",
         str(args.minimum_tail_events),
     ))
-    args.bootstrap_threshold_mag = float(prompt_text(
-        "Maximum 68% bootstrap half-width [mag]",
-        str(args.bootstrap_threshold_mag),
-    ))
+    bootstrap_choice = prompt_choice(
+        "Bootstrap validation of percentiles",
+        [("yes", "Enable bootstrap"), ("no", "Do not bootstrap")],
+        "yes" if args.bootstrap else "no",
+    )
+    args.bootstrap = bootstrap_choice == "yes"
+    if args.bootstrap:
+        args.n_boot = int(prompt_text(
+            "Bootstrap repetitions per bin", str(max(args.n_boot, 1))
+        ))
+        args.bootstrap_threshold_mag = float(prompt_text(
+            "Maximum 68% bootstrap half-width [mag]",
+            str(args.bootstrap_threshold_mag),
+        ))
+    else:
+        args.n_boot = 0
     args.stability_metric = prompt_choice(
         "Convergence analysis",
         [("colour", "Fixed percentiles: shape and temporal extent"),
@@ -1736,8 +1843,10 @@ def validate(a: argparse.Namespace) -> tuple[Path, list[int], tuple[str, str], n
         raise ValueError("ZTF supports g, r and i only")
     if sizes[-1] > count_summary_events(root):
         raise ValueError("Largest sample size exceeds the events in summary.csv")
-    if a.repetitions < 1 or a.n_boot < 1:
-        raise ValueError("repetitions and n-boot must be positive")
+    if a.repetitions < 1:
+        raise ValueError("repetitions must be positive")
+    if getattr(a, "bootstrap", True) and a.n_boot < 1:
+        raise ValueError("n-boot must be positive when bootstrap is enabled")
     if a.bin_width <= 0 or a.t_max <= a.t_min or a.tolerance_days < 0:
         raise ValueError("Invalid time grid or tolerance")
     if not a.t_min < a.shape_t_max <= a.t_max:
@@ -1930,8 +2039,9 @@ def last_adaptive_edge(a: argparse.Namespace, sample: pd.DataFrame, arrays: dict
         values = colours[train & available[:, b], b].astype(float)
         if len(values) < a.minimum_events:
             break
-        _, selected = envelope_core.percentile_diagnostics(
-            values, tails, a.n_boot, a.bootstrap_threshold_mag,
+        _, selected = percentile_diagnostics(
+            values, tails, getattr(a, "bootstrap", True), a.n_boot,
+            a.bootstrap_threshold_mag,
             a.minimum_tail_events, rng,
         )
         if selected is None:
@@ -1947,12 +2057,17 @@ def last_adaptive_edge(a: argparse.Namespace, sample: pd.DataFrame, arrays: dict
 
 def configuration(a: argparse.Namespace, root: Path, sizes: list[int]) -> dict[str, object]:
     return {
-        "method": "single_load_in_memory_exact_builder_bootstrap_early_stop",
+        "method": (
+            "single_load_in_memory_exact_builder_bootstrap_early_stop"
+            if getattr(a, "bootstrap", True) else
+            "single_load_in_memory_tail_support_early_stop_no_bootstrap"
+        ),
         "run_dir": str(root), "color_pair": a.color_pair,
         "photometric_system": a.photometric_system, "stage": a.stage,
         "sample_sizes": sizes, "repetitions": a.repetitions,
         "subsample_seed": a.subsample_seed, "builder_seed": a.builder_seed,
         "t_min": a.t_min, "t_max": a.t_max, "bin_width": a.bin_width,
+        "bootstrap": getattr(a, "bootstrap", True),
         "n_boot": a.n_boot, "minimum_events": a.minimum_events,
         "minimum_tail_events": a.minimum_tail_events,
         "bootstrap_threshold_mag": a.bootstrap_threshold_mag,
@@ -1974,7 +2089,14 @@ def main() -> None:
     if a.stability_metric == "legacy-colour":
         run_colour_convergence(a, root, sizes, bands, edges, centres)
         return
-    output = (a.output_dir.expanduser().resolve() if a.output_dir else root / "analysis" / f"convergence_fast_{a.color_pair.replace('-', '_')}_{a.photometric_system}_{a.stage}")
+    output = (
+        a.output_dir.expanduser().resolve()
+        if a.output_dir else
+        root / "analysis" /
+        f"convergence_fast_{a.color_pair.replace('-', '_')}_"
+        f"{a.photometric_system}_{a.stage}"
+        f"{'_no_bootstrap' if not getattr(a, 'bootstrap', True) else ''}"
+    )
     output.mkdir(parents=True, exist_ok=True)
     conf = configuration(a, root, sizes)
     conf_path = output / "fast_configuration.json"
