@@ -92,7 +92,7 @@ from kne_envelope_core import (
     STAGE_BOOTSTRAP_SEED_OFFSETS,
     ZTF_MW_R,
     event_extinction_mag,
-    percentile_diagnostics,
+    percentile_diagnostics as _percentile_diagnostics_with_bootstrap,
 )
 from kne_population_io import SyntheticPopulationSource, prepare_metadata
 from kne_population_io import population_latitude_label as _population_latitude_label
@@ -105,6 +105,93 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from matplotlib.collections import LineCollection
+
+
+def percentile_diagnostics(
+    values: np.ndarray,
+    lower_grid: list[float],
+    n_boot: int,
+    bootstrap_threshold: float,
+    minimum_tail_events: float,
+    rng: np.random.Generator,
+) -> tuple[pd.DataFrame, dict[str, float] | None]:
+    """Validate percentile bounds, optionally without bootstrapping.
+
+    With ``n_boot > 0`` this delegates to the established bootstrap
+    implementation. With ``n_boot == 0`` the percentile estimates are
+    computed directly and the bootstrap-width criterion is deliberately not
+    applied. The minimum total sample size is still enforced by the caller,
+    and the expected-number-of-events criterion remains active for every
+    percentile tail.
+    """
+    if n_boot < 0:
+        raise ValueError("Bootstrap repetitions must be non-negative")
+    if n_boot > 0:
+        return _percentile_diagnostics_with_bootstrap(
+            values,
+            lower_grid,
+            n_boot,
+            bootstrap_threshold,
+            minimum_tail_events,
+            rng,
+        )
+
+    finite_values = np.asarray(values, dtype=float)
+    finite_values = finite_values[np.isfinite(finite_values)]
+    lower = sorted(set(float(q) for q in lower_grid if 0.0 < q <= 50.0))
+    percentiles = sorted(set(lower + [100.0 - q for q in lower] + [50.0]))
+    if not len(finite_values) or not percentiles:
+        return pd.DataFrame(), None
+
+    estimates = np.percentile(finite_values, percentiles)
+    n_values = len(finite_values)
+    rows: list[dict[str, object]] = []
+    for percentile, estimate in zip(percentiles, estimates):
+        expected_tail = (
+            n_values * min(percentile, 100.0 - percentile) / 100.0
+        )
+        tail_valid = bool(expected_tail >= minimum_tail_events)
+        rows.append({
+            "percentile": percentile,
+            "value": float(estimate),
+            "bootstrap_p16": np.nan,
+            "bootstrap_p84": np.nan,
+            "bootstrap_half_width_68": np.nan,
+            "expected_nearest_tail_events": expected_tail,
+            "bootstrap_applied": False,
+            "bootstrap_width_valid": True,
+            "tail_support_valid": tail_valid,
+            "percentile_valid": tail_valid,
+        })
+
+    diagnostics = pd.DataFrame(rows)
+    by_percentile = diagnostics.set_index("percentile")
+    median_valid = bool(by_percentile.loc[50.0, "percentile_valid"])
+    valid_pairs = [
+        q for q in lower
+        if median_valid
+        and bool(by_percentile.loc[q, "percentile_valid"])
+        and bool(by_percentile.loc[100.0 - q, "percentile_valid"])
+    ]
+    if not valid_pairs:
+        return diagnostics, None
+
+    q_low = min(valid_pairs)
+    q_high = 100.0 - q_low
+    selected = {
+        "low_percentile": q_low,
+        "high_percentile": q_high,
+        "color_min": float(by_percentile.loc[q_low, "value"]),
+        "color_median": float(by_percentile.loc[50.0, "value"]),
+        "color_max": float(by_percentile.loc[q_high, "value"]),
+        "low_bootstrap_half_width_68": np.nan,
+        "median_bootstrap_half_width_68": np.nan,
+        "high_bootstrap_half_width_68": np.nan,
+        "expected_lower_tail_events": float(n_values * q_low / 100.0),
+        "expected_upper_tail_events": float(n_values * q_low / 100.0),
+        "nominal_coverage_percent": float(q_high - q_low),
+    }
+    return diagnostics, selected
 
 def draw_population(
     ax: plt.Axes,
@@ -1179,13 +1266,15 @@ def save_peak_validation_pages(
             ax.grid(alpha=0.18)
             ax.set_xlabel(rf"$t-t_{{\rm peak,{reference_band}}}$ [days]")
             ax.set_ylabel("magnitude [mag]")
-            status = str(record.get("status", ""))
-            proxy = "boundary proxy" if bool(
-                record.get("peak_is_boundary_proxy", False)
-            ) else "interior peak"
-            ax.text(
-                0.02, 0.04, f"{event_id}\n{status}; {proxy}",
-                transform=ax.transAxes, ha="left", va="bottom", fontsize=8,
+            # Keep only the object identifier on the figure.  Peak status and
+            # boundary/interior diagnostics remain available in the selection
+            # CSV, where they can be inspected without covering the curves.
+            ax.set_title(
+                event_id,
+                loc="left",
+                fontsize=8.5,
+                fontweight="semibold",
+                pad=4.0,
             )
             handles, labels = ax.get_legend_handles_labels()
             unique = dict(zip(labels, handles))
@@ -1615,14 +1704,27 @@ def interactive(args: argparse.Namespace) -> argparse.Namespace:
     args.t_min = float(prompt_text(first_edge_label, str(args.t_min)))
     args.t_max = float(prompt_text(last_edge_label, str(args.t_max)))
     args.bin_width = float(prompt_text("Fixed bin width [days]", str(args.bin_width)))
-    args.n_boot = int(prompt_text("Bootstrap repetitions", str(args.n_boot)))
+    bootstrap_mode = prompt_choice(
+        "Bootstrap validation of percentile bounds",
+        [
+            ("enable", "Enable bootstrap validation"),
+            ("disable", "Do not bootstrap"),
+        ],
+        "enable" if args.n_boot > 0 else "disable",
+    )
+    if bootstrap_mode == "enable":
+        args.n_boot = int(prompt_text(
+            "Bootstrap repetitions", str(max(1, args.n_boot))
+        ))
+        args.bootstrap_threshold_mag = float(prompt_text(
+            "Maximum 68% bootstrap half-width per bound [mag]",
+            str(args.bootstrap_threshold_mag),
+        ))
+    else:
+        args.n_boot = 0
     args.minimum_tail_events = float(prompt_text(
         "Minimum expected events in each percentile tail",
         str(args.minimum_tail_events),
-    ))
-    args.bootstrap_threshold_mag = float(prompt_text(
-        "Maximum 68% bootstrap half-width per bound [mag]",
-        str(args.bootstrap_threshold_mag),
     ))
     args.colored_plot_sizes = prompt_text(
         "Random coloured KNe sample sizes",
@@ -3391,6 +3493,17 @@ def validate_analysis_arguments(
 
     if args.bin_width <= 0 or args.t_max <= args.t_min:
         raise ValueError("Require bin-width > 0 and t-max > t-min")
+    if args.n_boot < 0:
+        raise ValueError("Bootstrap repetitions must be non-negative")
+    if args.n_boot > 0 and args.bootstrap_threshold_mag <= 0:
+        raise ValueError(
+            "The bootstrap half-width threshold must be positive when "
+            "bootstrap validation is enabled"
+        )
+    if args.minimum_events < 1:
+        raise ValueError("The minimum number of events must be at least 1")
+    if args.minimum_tail_events < 0:
+        raise ValueError("The minimum expected tail count must be non-negative")
     if args.time_reference_mode not in {"merger", "band_peak"}:
         raise ValueError("time-reference-mode must be merger or band_peak")
     if args.time_reference_mode == "band_peak":
@@ -4251,7 +4364,15 @@ def _run_single_system(
             "the event has no comparable colour in the final valid envelope bin"
         ),
         "bootstrap_repetitions": args.n_boot,
-        "bootstrap_half_width_threshold_mag": args.bootstrap_threshold_mag,
+        "bootstrap_enabled": bool(args.n_boot > 0),
+        "bootstrap_half_width_threshold_mag": (
+            args.bootstrap_threshold_mag if args.n_boot > 0 else None
+        ),
+        "percentile_validity_without_bootstrap": (
+            "minimum total sample size and minimum expected events in each "
+            "percentile tail"
+            if args.n_boot == 0 else None
+        ),
         "minimum_events": args.minimum_events,
         "minimum_expected_tail_events": args.minimum_tail_events,
         "train_fraction": args.train_fraction,
