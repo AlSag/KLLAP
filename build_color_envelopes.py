@@ -1290,6 +1290,187 @@ def save_peak_validation_pages(
         plt.close(fig)
 
 
+def _format_peak_parameter_value(value: object) -> str:
+    """Format a parameter compactly without changing the saved CSV value."""
+    if pd.isna(value):
+        return ""
+    if isinstance(value, (bool, np.bool_)):
+        return "yes" if bool(value) else "no"
+    if isinstance(value, (int, np.integer)):
+        return str(int(value))
+    if isinstance(value, (float, np.floating)):
+        number = float(value)
+        if number == 0.0:
+            return "0"
+        if abs(number) < 1e-3 or abs(number) >= 1e5:
+            return f"{number:.3e}"
+        return f"{number:.5g}"
+    return str(value)
+
+
+def save_peak_parameter_table_pages(
+    parameters: pd.DataFrame,
+    output: Path,
+    population_name: str,
+    display_labels: dict[str, str],
+    panels_per_page: int = 4,
+) -> None:
+    """Save exact parameter vectors for the objects shown on each plot page."""
+    output.mkdir(parents=True, exist_ok=True)
+    csv_path = output / f"{population_name}_peak_validation_parameters.csv"
+    parameters.to_csv(csv_path, index=False)
+    if parameters.empty:
+        return
+
+    columns = [column for column in display_labels if column in parameters]
+    for page_start in range(0, len(parameters), panels_per_page):
+        page = parameters.iloc[page_start:page_start + panels_per_page][columns]
+        displayed = page.copy()
+        for column in columns:
+            displayed[column] = displayed[column].map(_format_peak_parameter_value)
+
+        n_columns = len(columns)
+        n_rows = len(displayed)
+        fig_width = max(10.0, 1.35 * n_columns)
+        fig_height = max(1.8, 0.48 * (n_rows + 1))
+        fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+        ax.axis("off")
+        table = ax.table(
+            cellText=displayed.to_numpy(),
+            colLabels=[display_labels[column] for column in columns],
+            cellLoc="center",
+            colLoc="center",
+            loc="center",
+        )
+        table.auto_set_font_size(False)
+        table.set_fontsize(7.5)
+        table.scale(1.0, 1.35)
+        for (row, column), cell in table.get_celld().items():
+            cell.set_edgecolor("#c7c9cc")
+            cell.set_linewidth(0.55)
+            if row == 0:
+                cell.set_facecolor("#dde2e7")
+                cell.set_text_props(weight="semibold")
+            elif row % 2 == 0:
+                cell.set_facecolor("#f4f5f6")
+            if column in (0, 1) and row > 0:
+                cell.set_text_props(weight="semibold")
+        fig.tight_layout(pad=0.5)
+        page_number = page_start // panels_per_page + 1
+        fig.savefig(
+            output
+            / f"{population_name}_peak_validation_parameters_{page_number:02d}.png",
+            dpi=220,
+            bbox_inches="tight",
+        )
+        plt.close(fig)
+
+
+def save_kne_peak_parameter_tables(
+    selection: pd.DataFrame,
+    metadata: pd.DataFrame,
+    output: Path,
+) -> None:
+    """Write model-parameter tables for the randomly selected KNe."""
+    preferred_labels = {
+        "random_order": "#",
+        "event_id": "KNe ID",
+        "model": "model",
+        "log10_mej_dyn": r"log10 Mej,dyn",
+        "v_ej_dyn": r"vej,dyn / c",
+        "Ye_dyn": r"Ye,dyn",
+        "log10_mej_wind": r"log10 Mej,wind",
+        "v_ej_wind": r"vej,wind / c",
+        "Ye_wind": r"Ye,wind",
+        "inclination_EM": r"inclination [rad]",
+        "luminosity_distance": r"DL [Mpc]",
+        "redshift": "z",
+        "phi": r"phi [deg]",
+        "log10_mej": r"log10 Mej",
+        "log10_vej": r"log10 vej",
+        "beta": "beta",
+        "log10_kappa_r": r"log10 kappa_r",
+    }
+    if selection.empty:
+        parameters = pd.DataFrame(columns=list(preferred_labels))
+    else:
+        selected = selection[["random_order", "event_id"]].copy()
+        selected["event_id"] = selected["event_id"].map(canonical_event_id)
+        event_metadata = metadata.copy()
+        event_metadata["event_id"] = event_metadata["event_id"].map(
+            canonical_event_id
+        )
+        parameters = selected.merge(
+            event_metadata,
+            on="event_id",
+            how="left",
+            validate="one_to_one",
+        )
+        keep = ["random_order", "event_id"]
+        keep.extend(
+            column for column in preferred_labels
+            if column not in keep
+            and column in parameters
+            and parameters[column].notna().any()
+        )
+        parameters = parameters[keep]
+    save_peak_parameter_table_pages(
+        parameters,
+        output,
+        "kne",
+        preferred_labels,
+    )
+
+
+def save_snia_peak_parameter_tables(
+    selection: pd.DataFrame,
+    metadata: pd.DataFrame,
+    output: Path,
+) -> None:
+    """Write SALT2 parameter tables for the randomly selected SNe Ia."""
+    preferred_labels = {
+        "random_order": "#",
+        "event_id": "SN Ia ID",
+        "model": "model",
+        "redshift": "z",
+        "x0": "x0",
+        "x1": "x1",
+        "c": "c",
+        "m_abs_b": "MB [mag]",
+        "distance_mpc": "DL [Mpc]",
+        "t0": "SALT2 t0 [MJD]",
+    }
+    if selection.empty:
+        parameters = pd.DataFrame(columns=list(preferred_labels))
+    else:
+        selected = selection[["random_order", "event_id"]].copy()
+        selected["event_id"] = selected["event_id"].map(canonical_event_id)
+        object_metadata = metadata.copy()
+        object_metadata["event_id"] = object_metadata["event_id"].map(
+            canonical_event_id
+        )
+        parameters = selected.merge(
+            object_metadata,
+            on="event_id",
+            how="left",
+            validate="one_to_one",
+        )
+        keep = ["random_order", "event_id"]
+        keep.extend(
+            column for column in preferred_labels
+            if column not in keep
+            and column in parameters
+            and parameters[column].notna().any()
+        )
+        parameters = parameters[keep]
+    save_peak_parameter_table_pages(
+        parameters,
+        output,
+        "snia",
+        preferred_labels,
+    )
+
+
 def save_kne_peak_validation(
     source: SyntheticPopulationSource,
     metadata: pd.DataFrame,
@@ -1318,6 +1499,11 @@ def save_kne_peak_validation(
             curves[event_id] = curve.loc[
                 curve["photometric_system"].eq(args.photometric_system)
             ].copy()
+    save_kne_peak_parameter_tables(
+        selection,
+        metadata,
+        output / "peak_validation",
+    )
     save_peak_validation_pages(
         curves, selection, output / "peak_validation", "kne",
         args.peak_reference_band, band1, band2,
@@ -2348,9 +2534,27 @@ def prepare_snia_population(
         raise FileNotFoundError(f"SN Ia parquet not found: {path}")
 
     peak_magnitude_column = "mag_perfect"
+    optional_parameter_columns = [
+        "model", "x0", "x1", "c", "m_abs_b", "distance_mpc",
+    ]
+    available_optional_columns: list[str] = []
+    try:
+        import pyarrow.parquet as pyarrow_parquet
+
+        available_columns = set(pyarrow_parquet.ParquetFile(path).schema.names)
+        available_optional_columns = [
+            column for column in optional_parameter_columns
+            if column in available_columns
+        ]
+    except (ImportError, ModuleNotFoundError):
+        # The required photometric columns can still be read through another
+        # pandas parquet engine; only the optional SALT2 parameter table will
+        # then contain fewer columns.
+        available_optional_columns = []
     requested_columns = list(dict.fromkeys([
         "sn_id", "mjd", "band", args.snia_magnitude_column, "magerr",
         peak_magnitude_column, "redshift", "t0", "ra", "dec",
+        *available_optional_columns,
     ]))
     try:
         measurements = pd.read_parquet(
@@ -2373,9 +2577,13 @@ def prepare_snia_population(
     measurements = measurements.loc[measurements["band"].isin((band1, band2))].copy()
     for column in dict.fromkeys((
         "sn_id", "mjd", args.snia_magnitude_column, "magerr", "redshift",
-        peak_magnitude_column, "t0", "ra", "dec",
+        peak_magnitude_column, "t0", "ra", "dec", "x0", "x1", "c",
+        "m_abs_b", "distance_mpc",
     )):
-        measurements[column] = pd.to_numeric(measurements[column], errors="coerce")
+        if column in measurements:
+            measurements[column] = pd.to_numeric(
+                measurements[column], errors="coerce"
+            )
     required_columns = ["sn_id", "mjd", "band", args.snia_magnitude_column]
     if args.time_reference_mode == "merger" and args.snia_time_reference == "peak":
         required_columns.append("t0")
@@ -2564,13 +2772,18 @@ def prepare_snia_population(
                 corrected_colours[keep] + differential_extinction
             ).astype(np.float32)
 
+    object_metadata_columns = [
+        "event_id", "sn_id", "redshift", "t0", "snia_time_reference",
+        "snia_time_reference_mjd", "fieldRA", "fieldDec",
+        "source_ra", "source_dec", "ebv_mw", "projected_kne_event_id",
+    ]
+    object_metadata_columns.extend(
+        column for column in optional_parameter_columns
+        if column in measurements and column not in object_metadata_columns
+    )
     object_metadata = (
         measurements.sort_values(["sn_id", "mjd"])
-        .drop_duplicates("event_id")[[
-            "event_id", "sn_id", "redshift", "t0", "snia_time_reference",
-            "snia_time_reference_mjd", "fieldRA", "fieldDec",
-            "source_ra", "source_dec", "ebv_mw", "projected_kne_event_id",
-        ]]
+        .drop_duplicates("event_id")[object_metadata_columns]
         .reset_index(drop=True)
     )
     split = assign_event_splits(
@@ -2600,6 +2813,11 @@ def prepare_snia_population(
             for event_id, curve in measurements.groupby("event_id", sort=False)
             if canonical_event_id(event_id) in selected_ids
         }
+        save_snia_peak_parameter_tables(
+            selection,
+            object_metadata,
+            output / "peak_validation",
+        )
         save_peak_validation_pages(
             curves, selection, output / "peak_validation", "snia",
             args.peak_reference_band, band1, band2,
