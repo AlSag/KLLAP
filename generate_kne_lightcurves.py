@@ -2050,7 +2050,9 @@ def generate_realization_batch(args: argparse.Namespace, seeds: list[int]) -> Pa
 
     manifest_rows = []
     for realization, intrinsic_seed in enumerate(seeds, start=1):
-        child = namespace_as_json_dict(args)
+        # The child runs directly in this Python process. Preserve Path
+        # objects; namespace_as_json_dict() is reserved for JSON output.
+        child = dict(vars(args))
         child_run_name = f"{args.run_name}_realization_{realization:02d}"
         child.update(
             {
