@@ -1047,6 +1047,196 @@ def estimate_interior_peak_time(
     )
 
 
+def select_peak_validation_events(
+    event_ids: list[str],
+    training_mask: np.ndarray,
+    supported_bin_counts: np.ndarray,
+    peak_diagnostics: pd.DataFrame,
+    sample_size: int,
+    seed: int,
+) -> pd.DataFrame:
+    """Select reproducible envelope contributors for visual peak checks.
+
+    An eligible object must belong to the training split, have a peak reference
+    accepted by the production estimator, and contribute a finite colour to at
+    least one requested temporal bin.  The returned table records the precise
+    random selection and can therefore be audited independently of the plots.
+    """
+    columns = [
+        "random_order", "event_id", "N_supported_envelope_bins", "status",
+        "reference_band", "peak_is_boundary_proxy",
+    ]
+    if sample_size <= 0 or peak_diagnostics.empty:
+        return pd.DataFrame(columns=columns)
+    if not (
+        len(event_ids) == len(training_mask) == len(supported_bin_counts)
+    ):
+        raise ValueError("Peak-validation masks must match the event list")
+
+    candidates = pd.DataFrame({
+        "event_id": [canonical_event_id(value) for value in event_ids],
+        "training_split": np.asarray(training_mask, dtype=bool),
+        "N_supported_envelope_bins": np.asarray(
+            supported_bin_counts, dtype=int
+        ),
+    })
+    diagnostics = peak_diagnostics.copy()
+    diagnostics["event_id"] = diagnostics["event_id"].map(canonical_event_id)
+    candidates = candidates.merge(
+        diagnostics, on="event_id", how="inner", validate="one_to_one"
+    )
+    used = candidates["used_in_peak_relative_envelope"]
+    if used.dtype != bool:
+        used = used.astype(str).str.lower().isin(("true", "1"))
+    candidates = candidates.loc[
+        candidates["training_split"]
+        & candidates["N_supported_envelope_bins"].gt(0)
+        & used
+    ].copy()
+    if candidates.empty:
+        return pd.DataFrame(columns=columns)
+
+    rng = np.random.default_rng(seed)
+    order = rng.permutation(len(candidates))[:min(sample_size, len(candidates))]
+    selected = candidates.iloc[order].copy().reset_index(drop=True)
+    selected.insert(0, "random_order", np.arange(1, len(selected) + 1))
+    return selected
+
+
+def save_peak_validation_pages(
+    curves: dict[str, pd.DataFrame],
+    selection: pd.DataFrame,
+    output: Path,
+    population_name: str,
+    reference_band: str,
+    band1: str,
+    band2: str,
+    peak_time_column: str,
+    discrete_peak_time_column: str,
+    time_column: str,
+    magnitude_column: str,
+) -> None:
+    """Plot the exact reference-band samples and adopted peak for each object."""
+    output.mkdir(parents=True, exist_ok=True)
+    selection.to_csv(
+        output / f"{population_name}_peak_validation_selection.csv", index=False
+    )
+    if selection.empty:
+        return
+
+    colours = {band1: "#0072B2", band2: "#D55E00"}
+    markers = {band1: "o", band2: "s"}
+    panels_per_page = 4
+    records = selection.to_dict(orient="records")
+    for page_start in range(0, len(records), panels_per_page):
+        page = records[page_start:page_start + panels_per_page]
+        fig, axes = plt.subplots(2, 2, figsize=(10.0, 7.4), squeeze=False)
+        for ax, record in zip(axes.ravel(), page):
+            event_id = canonical_event_id(record["event_id"])
+            curve = curves.get(event_id, pd.DataFrame()).copy()
+            peak_time = float(record[peak_time_column])
+            discrete_time = float(record[discrete_peak_time_column])
+            if not curve.empty:
+                curve[time_column] = pd.to_numeric(
+                    curve[time_column], errors="coerce"
+                )
+                curve[magnitude_column] = pd.to_numeric(
+                    curve[magnitude_column], errors="coerce"
+                )
+                curve = curve.loc[
+                    np.isfinite(curve[time_column])
+                    & np.isfinite(curve[magnitude_column])
+                    & curve["band"].isin((band1, band2))
+                ].copy()
+                curve["phase_from_peak"] = curve[time_column] - peak_time
+                for band in (band1, band2):
+                    subset = curve.loc[curve["band"] == band].sort_values(
+                        "phase_from_peak"
+                    )
+                    if subset.empty:
+                        continue
+                    ax.plot(
+                        subset["phase_from_peak"], subset[magnitude_column],
+                        color=colours[band], marker=markers[band], markersize=3.0,
+                        linewidth=1.0, label=band,
+                    )
+                reference = curve.loc[curve["band"] == reference_band].copy()
+                if not reference.empty and np.isfinite(discrete_time):
+                    nearest = (
+                        reference[time_column] - discrete_time
+                    ).abs().idxmin()
+                    ax.scatter(
+                        [float(reference.loc[nearest, time_column]) - peak_time],
+                        [float(reference.loc[nearest, magnitude_column])],
+                        marker="D", s=44, facecolors="none", edgecolors="black",
+                        linewidths=1.1, zorder=5, label="selected saved minimum",
+                    )
+            ax.axvline(
+                0.0, color="black", linestyle="--", linewidth=1.1,
+                label=rf"adopted $t_{{\rm peak,{reference_band}}}$",
+            )
+            ax.invert_yaxis()
+            ax.grid(alpha=0.18)
+            ax.set_xlabel(rf"$t-t_{{\rm peak,{reference_band}}}$ [days]")
+            ax.set_ylabel("magnitude [mag]")
+            status = str(record.get("status", ""))
+            proxy = "boundary proxy" if bool(
+                record.get("peak_is_boundary_proxy", False)
+            ) else "interior peak"
+            ax.text(
+                0.02, 0.04, f"{event_id}\n{status}; {proxy}",
+                transform=ax.transAxes, ha="left", va="bottom", fontsize=8,
+            )
+            handles, labels = ax.get_legend_handles_labels()
+            unique = dict(zip(labels, handles))
+            ax.legend(unique.values(), unique.keys(), frameon=False, fontsize=7)
+        for ax in axes.ravel()[len(page):]:
+            ax.set_visible(False)
+        fig.tight_layout()
+        page_number = page_start // panels_per_page + 1
+        fig.savefig(
+            output / f"{population_name}_peak_validation_{page_number:02d}.png",
+            dpi=220, bbox_inches="tight",
+        )
+        plt.close(fig)
+
+
+def save_kne_peak_validation(
+    source: SyntheticPopulationSource,
+    metadata: pd.DataFrame,
+    training_mask: np.ndarray,
+    support: np.ndarray,
+    peak_diagnostics: pd.DataFrame,
+    output: Path,
+    args: argparse.Namespace,
+    band1: str,
+    band2: str,
+) -> None:
+    """Reload a small random KNe sample and audit the adopted band peaks."""
+    event_ids = metadata["event_id"].astype(str).tolist()
+    selection = select_peak_validation_events(
+        event_ids, training_mask, np.sum(support, axis=1), peak_diagnostics,
+        args.peak_validation_sample_size, args.peak_validation_seed,
+    )
+    selected_ids = selection.get("event_id", pd.Series(dtype=str)).tolist()
+    curves: dict[str, pd.DataFrame] = {}
+    if selected_ids:
+        for event_id, raw in source.iter_events(
+            selected_ids, (band1, band2), (args.photometric_system,)
+        ):
+            event_id = canonical_event_id(event_id)
+            curve = _normalise_lightcurve(raw)
+            curves[event_id] = curve.loc[
+                curve["photometric_system"].eq(args.photometric_system)
+            ].copy()
+    save_peak_validation_pages(
+        curves, selection, output / "peak_validation", "kne",
+        args.peak_reference_band, band1, band2,
+        "peak_time_days_since_merger", "discrete_peak_time_days_since_merger",
+        "t_days", "magnitude",
+    )
+
+
 def interpolate_band_linear(
     curve: pd.DataFrame,
     band: str,
@@ -1308,6 +1498,8 @@ def default_configuration() -> argparse.Namespace:
         t_min=0.4, t_max=26.0, bin_width=0.4,
         time_reference_mode="merger", peak_reference_band=None,
         peak_min_prominence_mag=0.05,
+        peak_validation_enabled=True, peak_validation_sample_size=20,
+        peak_validation_seed=20261027,
         tail_percentiles="0.02,0.05,0.1,0.25,0.5,0.53,1,2.5,5,10,16,20,25,30,35,40,42,44,45,46,47,48,49,50",
         n_boot=1000, bootstrap_threshold_mag=0.1, minimum_events=30,
         minimum_tail_events=20.0, train_fraction=0.70,
@@ -1379,6 +1571,23 @@ def interactive(args: argparse.Namespace) -> argparse.Namespace:
             "Minimum interior-peak prominence [mag]",
             str(args.peak_min_prominence_mag),
         ))
+        peak_validation_mode = prompt_choice(
+            "Visual validation of measured peak times",
+            [
+                ("enable", "Plot a random sample of envelope contributors"),
+                ("skip", "Do not create peak-validation plots"),
+            ],
+            "enable" if args.peak_validation_enabled else "skip",
+        )
+        args.peak_validation_enabled = peak_validation_mode == "enable"
+        if args.peak_validation_enabled:
+            args.peak_validation_sample_size = int(prompt_text(
+                "Objects plotted per population (KNe and SNe Ia)",
+                str(args.peak_validation_sample_size),
+            ))
+            args.peak_validation_seed = int(prompt_text(
+                "Peak-validation random seed", str(args.peak_validation_seed)
+            ))
     args.population_latitude_selection = prompt_choice(
         "Galactic-latitude selection for the KNe population",
         [
@@ -2269,6 +2478,31 @@ def prepare_snia_population(
     split_map = split.set_index("event_id")["split"].to_dict()
     train = np.array([split_map[event_id] == "train" for event_id in event_ids])
     split.to_csv(output / "snia_event_split.csv", index=False)
+    if (
+        args.time_reference_mode == "band_peak"
+        and args.peak_validation_enabled
+    ):
+        selection = select_peak_validation_events(
+            event_ids,
+            train,
+            np.sum(np.isfinite(matrices["mw_corrected"]), axis=1),
+            peak_diagnostics,
+            args.peak_validation_sample_size,
+            args.peak_validation_seed + 1,
+        )
+        selected_ids = set(
+            selection.get("event_id", pd.Series(dtype=str)).astype(str)
+        )
+        curves = {
+            canonical_event_id(event_id): curve.copy()
+            for event_id, curve in measurements.groupby("event_id", sort=False)
+            if canonical_event_id(event_id) in selected_ids
+        }
+        save_peak_validation_pages(
+            curves, selection, output / "peak_validation", "snia",
+            args.peak_reference_band, band1, band2,
+            "peak_mjd", "discrete_peak_mjd", "mjd", peak_magnitude_column,
+        )
     print(
         f"SN Ia: {n_events:,} objects projected onto KNe sky positions; "
         f"magnitude={args.snia_magnitude_column}; input MW mode="
@@ -3167,6 +3401,13 @@ def validate_analysis_arguments(
             )
         if args.peak_min_prominence_mag < 0:
             raise ValueError("peak-min-prominence-mag must be non-negative")
+        if (
+            args.peak_validation_enabled
+            and args.peak_validation_sample_size < 1
+        ):
+            raise ValueError(
+                "peak-validation-sample-size must be at least 1"
+            )
         if args.at2017gfo_file is not None:
             raise ValueError(
                 "AT2017gfo comparison is currently defined relative to merger. "
@@ -3618,6 +3859,14 @@ def _run_single_system(
     selection_support = np.isfinite(selection_int1) & np.isfinite(selection_int2)
     intrinsic_color = int1 - int2
     extincted_color = ext1 - ext2
+    if (
+        args.time_reference_mode == "band_peak"
+        and args.peak_validation_enabled
+    ):
+        save_kne_peak_validation(
+            synthetic_source, metadata, train, support,
+            population.peak_diagnostics, output, args, band1, band2,
+        )
     tails = parse_floats(args.tail_percentiles)
     for fallback in (25, 30, 35, 40, 42, 44, 45, 46, 47, 48, 49, 50):
         if fallback not in tails:
@@ -3850,6 +4099,32 @@ def _run_single_system(
         "peak_minimum_prominence_mag": (
             args.peak_min_prominence_mag
             if args.time_reference_mode == "band_peak" else None
+        ),
+        "peak_validation_enabled": (
+            args.peak_validation_enabled
+            if args.time_reference_mode == "band_peak" else False
+        ),
+        "peak_validation_sample_size_per_population": (
+            args.peak_validation_sample_size
+            if args.time_reference_mode == "band_peak"
+            and args.peak_validation_enabled else 0
+        ),
+        "peak_validation_seed_kne": (
+            args.peak_validation_seed
+            if args.time_reference_mode == "band_peak"
+            and args.peak_validation_enabled else None
+        ),
+        "peak_validation_seed_snia": (
+            args.peak_validation_seed + 1
+            if args.time_reference_mode == "band_peak"
+            and args.peak_validation_enabled
+            and args.snia_parquet is not None else None
+        ),
+        "peak_validation_eligibility": (
+            "training-split object with an accepted peak reference and at "
+            "least one finite colour bin used by the envelope calculation"
+            if args.time_reference_mode == "band_peak"
+            and args.peak_validation_enabled else None
         ),
         "peak_definition": (
             "most prominent significant interior local magnitude minimum; for "
