@@ -12,8 +12,11 @@ beyond the measured population support.
 
 The map is a conditional population summary, not a deterministic relation:
 all physical parameters not shown on the axes remain distributed according to
-the simulated   Cells with too few available colours are masked.
+the simulated population. Cells with too few available colours are masked.
 Comparison modes produce matched no-m5 and m5 outputs from the same events.
+They also save a global depth-selection diagnostic showing the colour
+percentiles before and after the m5 cut, their median difference, and the
+fraction of model-supported colours retained by the cut at each time.
 Any exact OpSim m5 percentile can be read from a table or calculated from raw
 ``opsim_visits_field*.csv`` files.
 """
@@ -694,6 +697,109 @@ def count_normalization(maximum: int, scale: str):
     return Normalize(vmin=0, vmax=max(1, maximum))
 
 
+def colour_selection_bias_table(
+    colour: np.ndarray,
+    model_supported: np.ndarray,
+    depth_supported: np.ndarray,
+    time_edges: np.ndarray,
+    times: np.ndarray,
+) -> pd.DataFrame:
+    """Summarise the matched colour population before and after the m5 cut."""
+    rows = []
+    for index, time in enumerate(times):
+        finite = np.isfinite(colour[:, index])
+        model_mask = model_supported[:, index] & finite
+        depth_mask = depth_supported[:, index] & finite
+        model_values = colour[model_mask, index]
+        depth_values = colour[depth_mask, index]
+
+        def percentiles(values: np.ndarray) -> tuple[float, float, float]:
+            if not len(values):
+                return np.nan, np.nan, np.nan
+            return tuple(np.quantile(values, (.16, .50, .84)))
+
+        no_m5_p16, no_m5_p50, no_m5_p84 = percentiles(model_values)
+        m5_p16, m5_p50, m5_p84 = percentiles(depth_values)
+        n_model = int(model_mask.sum())
+        n_m5 = int(depth_mask.sum())
+        rows.append({
+            "t_low_days": float(time_edges[index]),
+            "t_high_days": float(time_edges[index + 1]),
+            "t_center_days": float(time),
+            "N_model_supported": n_model,
+            "N_m5_selected": n_m5,
+            "m5_retained_fraction": n_m5 / n_model if n_model else np.nan,
+            "no_m5_colour_p16": no_m5_p16,
+            "no_m5_colour_p50": no_m5_p50,
+            "no_m5_colour_p84": no_m5_p84,
+            "m5_colour_p16": m5_p16,
+            "m5_colour_p50": m5_p50,
+            "m5_colour_p84": m5_p84,
+            "median_shift_m5_minus_no_m5": m5_p50 - no_m5_p50,
+        })
+    return pd.DataFrame(rows)
+
+
+def save_colour_selection_bias(
+    output: Path,
+    table: pd.DataFrame,
+    colour_pair: str,
+) -> None:
+    """Save the global colour shift induced solely by the matched m5 cut."""
+    safe_pair = colour_pair.replace("-", "_")
+    table.to_csv(
+        output / f"{safe_pair}_m5_selection_bias_vs_time.csv", index=False
+    )
+
+    time = table["t_center_days"].to_numpy(float)
+    no_m5_p16 = table["no_m5_colour_p16"].to_numpy(float)
+    no_m5_p50 = table["no_m5_colour_p50"].to_numpy(float)
+    no_m5_p84 = table["no_m5_colour_p84"].to_numpy(float)
+    m5_p16 = table["m5_colour_p16"].to_numpy(float)
+    m5_p50 = table["m5_colour_p50"].to_numpy(float)
+    m5_p84 = table["m5_colour_p84"].to_numpy(float)
+    shift = table["median_shift_m5_minus_no_m5"].to_numpy(float)
+    fig, axes = plt.subplots(
+        2, 1, figsize=(8.0, 6.8), sharex=True,
+        gridspec_kw={"height_ratios": [1.55, 1.0]},
+    )
+    colour_no_m5 = "#333333"
+    colour_m5 = "#0072B2"
+
+    axes[0].fill_between(
+        time, no_m5_p16, no_m5_p84, color=colour_no_m5, alpha=.14,
+        linewidth=0,
+    )
+    axes[0].plot(
+        time, no_m5_p50, marker="o", color=colour_no_m5,
+        label="without $m_5$ cut",
+    )
+    axes[0].fill_between(
+        time, m5_p16, m5_p84, color=colour_m5, alpha=.17, linewidth=0,
+    )
+    axes[0].plot(
+        time, m5_p50, marker="o", color=colour_m5,
+        label="with $m_5$ cut",
+    )
+    axes[0].set_ylabel(f"{colour_pair} [mag]")
+    axes[0].legend(frameon=False)
+
+    axes[1].axhline(0.0, color="0.6", linewidth=.9)
+    axes[1].plot(time, shift, marker="o", color="#D55E00")
+    axes[1].set_ylabel(
+        "Median shift [mag]\n" + r"$m_5$ minus no $m_5$"
+    )
+    axes[1].set_xlabel(r"$t-t_{\rm merger}$ [days]")
+
+    for axis in axes:
+        axis.grid(axis="y", alpha=.22)
+    fig.tight_layout()
+    stem = f"{safe_pair}_m5_selection_bias_vs_time"
+    fig.savefig(output / f"{stem}.png", dpi=220, bbox_inches="tight")
+    fig.savefig(output / f"{stem}.pdf", bbox_inches="tight")
+    plt.close(fig)
+
+
 # -----------------------------------------------------------------------------
 # FIGURE GENERATION AND OUTPUT TABLES
 # -----------------------------------------------------------------------------
@@ -997,6 +1103,26 @@ def run_analysis(args: argparse.Namespace) -> None:
 
     summaries = []
     comparison = len(availability) > 1
+    selection_bias_table = None
+    if comparison:
+        selection_bias_table = colour_selection_bias_table(
+            colour,
+            model_supported,
+            depth_supported,
+            time_edges,
+            times,
+        )
+        selection_bias_table.insert(0, "comparison_stage", requested_stage)
+        selection_bias_table.insert(1, "colour_pair", args.color_pair)
+        selection_bias_table.insert(
+            2, "photometric_system", args.photometric_system
+        )
+        selection_bias_table.insert(3, "m5_percentile", args.m5_percentile)
+        for band in bands:
+            selection_bias_table[f"m5_{band}"] = depths[band]
+        save_colour_selection_bias(
+            output, selection_bias_table, args.color_pair
+        )
     for stage, available in availability.items():
         stage_output = output / stage if comparison else output
         stage_output.mkdir(parents=True, exist_ok=True)
@@ -1118,6 +1244,14 @@ def run_analysis(args: argparse.Namespace) -> None:
         "heatmap_count_reference": "full analysed population, shared across times and stages",
         "cell_spread": "cell-wise colour p16 and p84 saved in grid CSV",
         "contour_field": "support-aware Gaussian-smoothed cell-wise median colour",
+        "selection_bias_diagnostic": (
+            f"{args.color_pair.replace('-', '_')}_m5_selection_bias_vs_time"
+            if comparison else None
+        ),
+        "selection_bias_definition": (
+            "matched m5-selected minus model-supported global colour median"
+            if comparison else None
+        ),
         "marginalisation": "all unplotted parameters follow the simulated population",
         "interpolation": "saved magnitude linear in log10(observer time); no extrapolation",
         "summary_sha256": hashlib.sha256((root / "summary.csv").read_bytes()).hexdigest(),
