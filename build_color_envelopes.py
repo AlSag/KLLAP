@@ -127,7 +127,7 @@ def percentile_diagnostics(
     if n_boot < 0:
         raise ValueError("Bootstrap repetitions must be non-negative")
     if n_boot > 0:
-        return _percentile_diagnostics_with_bootstrap(
+        diagnostics, _ = _percentile_diagnostics_with_bootstrap(
             values,
             lower_grid,
             n_boot,
@@ -135,10 +135,15 @@ def percentile_diagnostics(
             minimum_tail_events,
             rng,
         )
+        return diagnostics, select_adaptive_percentile_interval(
+            diagnostics, len(values), lower_grid
+        )
 
     finite_values = np.asarray(values, dtype=float)
     finite_values = finite_values[np.isfinite(finite_values)]
-    lower = sorted(set(float(q) for q in lower_grid if 0.0 < q <= 50.0))
+    lower = list(dict.fromkeys(
+        float(q) for q in lower_grid if 0.0 < q <= 50.0
+    ))
     percentiles = sorted(set(lower + [100.0 - q for q in lower] + [50.0]))
     if not len(finite_values) or not percentiles:
         return pd.DataFrame(), None
@@ -165,33 +170,78 @@ def percentile_diagnostics(
         })
 
     diagnostics = pd.DataFrame(rows)
-    by_percentile = diagnostics.set_index("percentile")
-    median_valid = bool(by_percentile.loc[50.0, "percentile_valid"])
-    valid_pairs = [
-        q for q in lower
-        if median_valid
-        and bool(by_percentile.loc[q, "percentile_valid"])
-        and bool(by_percentile.loc[100.0 - q, "percentile_valid"])
-    ]
-    if not valid_pairs:
-        return diagnostics, None
+    return diagnostics, select_adaptive_percentile_interval(
+        diagnostics, n_values, lower
+    )
 
-    q_low = min(valid_pairs)
-    q_high = 100.0 - q_low
-    selected = {
-        "low_percentile": q_low,
-        "high_percentile": q_high,
-        "color_min": float(by_percentile.loc[q_low, "value"]),
-        "color_median": float(by_percentile.loc[50.0, "value"]),
-        "color_max": float(by_percentile.loc[q_high, "value"]),
-        "low_bootstrap_half_width_68": np.nan,
-        "median_bootstrap_half_width_68": np.nan,
-        "high_bootstrap_half_width_68": np.nan,
-        "expected_lower_tail_events": float(n_values * q_low / 100.0),
-        "expected_upper_tail_events": float(n_values * q_low / 100.0),
-        "nominal_coverage_percent": float(q_high - q_low),
-    }
-    return diagnostics, selected
+
+def select_adaptive_percentile_interval(
+    diagnostics: pd.DataFrame,
+    n_values: int,
+    lower_sequence: list[float],
+) -> dict[str, float | str | bool] | None:
+    """Select the first valid interval in the requested hierarchy.
+
+    For the default sequence, each time bin is tested in this exact order:
+    p16--p84, p25--p75, p30--p70, p40--p60, then the median alone. A wider
+    interval is therefore always preferred when it passes every active
+    validity criterion. The median fallback is accepted only when p50 itself
+    passes those criteria.
+    """
+    if diagnostics.empty:
+        return None
+
+    by_percentile = diagnostics.set_index("percentile")
+    if 50.0 not in by_percentile.index:
+        return None
+    median = by_percentile.loc[50.0]
+    if not bool(median["percentile_valid"]):
+        return None
+
+    sequence = list(dict.fromkeys(
+        float(q) for q in lower_sequence if 0.0 < float(q) <= 50.0
+    ))
+    if 50.0 not in sequence:
+        sequence.append(50.0)
+
+    def half_width(row: pd.Series) -> float:
+        value = row.get("bootstrap_half_width_68", np.nan)
+        return float(value) if pd.notna(value) else np.nan
+
+    for rank, q_low in enumerate(sequence, start=1):
+        q_high = 100.0 - q_low
+        if q_low == 50.0:
+            low = high = median
+            definition = "median_only"
+        else:
+            if q_low not in by_percentile.index or q_high not in by_percentile.index:
+                continue
+            low = by_percentile.loc[q_low]
+            high = by_percentile.loc[q_high]
+            if not (
+                bool(low["percentile_valid"])
+                and bool(high["percentile_valid"])
+            ):
+                continue
+            definition = f"p{q_low:g}-p{q_high:g}"
+
+        return {
+            "low_percentile": q_low,
+            "high_percentile": q_high,
+            "color_min": float(low["value"]),
+            "color_median": float(median["value"]),
+            "color_max": float(high["value"]),
+            "low_bootstrap_half_width_68": half_width(low),
+            "median_bootstrap_half_width_68": half_width(median),
+            "high_bootstrap_half_width_68": half_width(high),
+            "expected_lower_tail_events": float(n_values * q_low / 100.0),
+            "expected_upper_tail_events": float(n_values * q_low / 100.0),
+            "nominal_coverage_percent": float(q_high - q_low),
+            "envelope_definition": definition,
+            "adaptive_selection_rank": rank,
+            "median_only": bool(q_low == 50.0),
+        }
+    return None
 
 def draw_population(
     ax: plt.Axes,
@@ -244,19 +294,69 @@ def draw_population(
         return
 
 
+ADAPTIVE_ENVELOPE_STYLES = {
+    "p16-p84": ("#4477aa", "16th–84th percentiles (central 68%)"),
+    "p25-p75": ("#66ccee", "25th–75th percentiles (central 50%)"),
+    "p30-p70": ("#eecc66", "30th–70th percentiles (central 40%)"),
+    "p40-p60": ("#aa3377", "40th–60th percentiles (central 20%)"),
+    "median_only": ("#cc3311", "Median only"),
+}
+
+
+def envelope_definition_from_row(row: object) -> str:
+    """Return the adaptive-envelope label, including for older rule tables."""
+    definition = getattr(row, "envelope_definition", None)
+    if isinstance(definition, str) and definition in ADAPTIVE_ENVELOPE_STYLES:
+        return definition
+    q_low = float(getattr(row, "low_percentile", 16.0))
+    q_high = float(getattr(row, "high_percentile", 100.0 - q_low))
+    if np.isclose(q_low, 50.0) and np.isclose(q_high, 50.0):
+        return "median_only"
+    candidate = f"p{q_low:g}-p{q_high:g}"
+    return candidate if candidate in ADAPTIVE_ENVELOPE_STYLES else "p16-p84"
+
+
+def adaptive_envelope_legend_handles(
+    *rule_tables: pd.DataFrame,
+) -> list[object]:
+    """Build a compact legend containing only interval types actually used."""
+    present: set[str] = set()
+    for rules in rule_tables:
+        if rules is None or rules.empty:
+            continue
+        present.update(
+            envelope_definition_from_row(row) for row in rules.itertuples()
+        )
+    handles: list[object] = []
+    for definition, (color, label) in ADAPTIVE_ENVELOPE_STYLES.items():
+        if definition not in present:
+            continue
+        if definition == "median_only":
+            handles.append(Line2D([0], [0], color=color, lw=2.0, label=label))
+        else:
+            handles.append(Patch(
+                facecolor=color, edgecolor=color, alpha=0.28, label=label,
+            ))
+    return handles
+
+
 def draw_envelope(ax: plt.Axes, rules: pd.DataFrame) -> None:
     for row in rules.itertuples():
         x = [row.t_min_days, row.t_max_days]
+        definition = envelope_definition_from_row(row)
+        color = ADAPTIVE_ENVELOPE_STYLES[definition][0]
+        median_only = definition == "median_only"
         ax.fill_between(
             x,
             [row.color_min, row.color_min],
             [row.color_max, row.color_max],
-            color="#4c78a8",
-            alpha=0.24,
+            color=color,
+            alpha=0.0 if median_only else 0.28,
         )
-        ax.plot(x, [row.color_min] * 2, color="#2f5f98", lw=1.0)
-        ax.plot(x, [row.color_max] * 2, color="#2f5f98", lw=1.0)
-        ax.plot(x, [row.color_median] * 2, color="#d55e00", lw=1.25)
+        if not median_only:
+            ax.plot(x, [row.color_min] * 2, color=color, lw=1.0)
+            ax.plot(x, [row.color_max] * 2, color=color, lw=1.0)
+        ax.plot(x, [row.color_median] * 2, color=color, lw=1.45)
 
 
 def time_axis_label(time_reference_mode: str, peak_reference_band: str | None) -> str:
@@ -349,13 +449,26 @@ def draw_comparison_envelope(
 ) -> None:
     for row in rules.itertuples():
         x = [row.t_min_days, row.t_max_days]
+        definition = envelope_definition_from_row(row)
+        interval_color = ADAPTIVE_ENVELOPE_STYLES[definition][0]
+        median_only = definition == "median_only"
         ax.fill_between(
             x, [row.color_min] * 2, [row.color_max] * 2,
-            color=color, alpha=alpha,
+            color=interval_color, alpha=0.0 if median_only else alpha,
         )
-        ax.plot(x, [row.color_min] * 2, color=color, lw=0.9, linestyle=linestyle)
-        ax.plot(x, [row.color_max] * 2, color=color, lw=0.9, linestyle=linestyle)
-        ax.plot(x, [row.color_median] * 2, color=color, lw=1.4, linestyle=linestyle)
+        if not median_only:
+            ax.plot(
+                x, [row.color_min] * 2, color=interval_color,
+                lw=0.9, linestyle=linestyle,
+            )
+            ax.plot(
+                x, [row.color_max] * 2, color=interval_color,
+                lw=0.9, linestyle=linestyle,
+            )
+        ax.plot(
+            x, [row.color_median] * 2, color=interval_color,
+            lw=1.45, linestyle=linestyle,
+        )
 
 
 def comparison_ylim(
@@ -460,8 +573,12 @@ def save_snia_population_plots(
         if limits is not None:
             ax.set_ylim(*limits)
         ax.legend(handles=[
-            Line2D([0], [0], color="#d97706", lw=1.6, label="SN Ia envelope")
-        ], frameon=False)
+            Line2D(
+                [0], [0], color="#333333", lw=1.6,
+                label="SN Ia envelope",
+            ),
+            *adaptive_envelope_legend_handles(rules),
+        ], frameon=False, fontsize=8)
         fig.savefig(
             output / f"snia_population_with_envelope_{envelope_name}.png",
             dpi=220, bbox_inches="tight",
@@ -520,10 +637,17 @@ def save_kne_snia_overlay_plots(
         if limits is not None:
             ax.set_ylim(*limits)
         ax.legend(handles=[
-            Line2D([0], [0], color="#2f5f98", lw=1.7, label="KNe envelope"),
-            Line2D([0], [0], color="#d97706", lw=1.7, linestyle="--", label="SN Ia envelope"),
-            Patch(facecolor="#2ca02c", alpha=0.26, label="Envelope intersection"),
-        ], frameon=False, fontsize=8)
+            Line2D([0], [0], color="#333333", lw=1.7, label="KNe envelope"),
+            Line2D(
+                [0], [0], color="#333333", lw=1.7, linestyle="--",
+                label="SN Ia envelope",
+            ),
+            *adaptive_envelope_legend_handles(kne_rules, snia_rules),
+            Patch(
+                facecolor="#2ca02c", alpha=0.26,
+                label="Envelope intersection",
+            ),
+        ], frameon=False, fontsize=7.5, ncol=2)
         fig.savefig(
             output / f"{stem}_{envelope_name}.png",
             dpi=220, bbox_inches="tight",
@@ -607,7 +731,19 @@ def save_at2017gfo_overlay(
             low, high = np.min(values), np.max(values)
             padding = max(0.1, 0.06 * max(high - low, 0.1))
             ax.set_ylim(low - padding, high + padding)
-    ax.legend(frameon=False, fontsize=8)
+    handles, labels = ax.get_legend_handles_labels()
+    ax.legend(
+        handles=[*handles, *adaptive_envelope_legend_handles(rules)],
+        labels=[
+            *labels,
+            *[
+                handle.get_label()
+                for handle in adaptive_envelope_legend_handles(rules)
+            ],
+        ],
+        frameon=False,
+        fontsize=8,
+    )
     fig.savefig(path, dpi=220, bbox_inches="tight")
     plt.close(fig)
 
@@ -810,6 +946,12 @@ def save_stage_plots(
                 high = max(high, float(np.max(finite_rule_colors)))
             padding = max(0.1, 0.05 * (high - low))
             ax.set_ylim(low - padding, high + padding)
+        if rules is not None and not rules.empty:
+            ax.legend(
+                handles=adaptive_envelope_legend_handles(rules),
+                frameon=False,
+                fontsize=8,
+            )
         fig.savefig(stage_dir / filename, dpi=220, bbox_inches="tight")
         plt.close(fig)
 
@@ -878,6 +1020,13 @@ def save_stage_plots(
                     handlelength=1.6,
                     columnspacing=1.0,
                 )
+            if rules is not None and not rules.empty:
+                ax.legend(
+                    handles=adaptive_envelope_legend_handles(rules),
+                    loc="upper right",
+                    frameon=False,
+                    fontsize=7.2,
+                )
             fig.savefig(stage_dir / filename, dpi=220, bbox_inches="tight")
             plt.close(fig)
 
@@ -928,15 +1077,19 @@ def save_dual_system_comparison_plots(
                 color, label = system_style[system]
                 for row in rules.itertuples():
                     x = [row.t_min_days, row.t_max_days]
+                    definition = envelope_definition_from_row(row)
+                    interval_color = ADAPTIVE_ENVELOPE_STYLES[definition][0]
+                    median_only = definition == "median_only"
                     ax.fill_between(
                         x,
                         [row.color_min, row.color_min],
                         [row.color_max, row.color_max],
-                        color=color,
-                        alpha=0.14,
+                        color=interval_color,
+                        alpha=0.0 if median_only else 0.18,
                     )
-                    ax.plot(x, [row.color_min] * 2, color=color, lw=0.9)
-                    ax.plot(x, [row.color_max] * 2, color=color, lw=0.9)
+                    if not median_only:
+                        ax.plot(x, [row.color_min] * 2, color=color, lw=0.9)
+                        ax.plot(x, [row.color_max] * 2, color=color, lw=0.9)
                     ax.plot(
                         x, [row.color_median] * 2, color=color, lw=1.35,
                         linestyle="-" if system == systems[0] else "--",
@@ -950,6 +1103,10 @@ def save_dual_system_comparison_plots(
                     linestyle="-" if system == systems[0] else "--",
                     label=label,
                 ))
+
+            handles.extend(adaptive_envelope_legend_handles(
+                *rules_by_system.values()
+            ))
 
             at_points = pd.DataFrame()
             if at2017gfo_enabled and "ps1" in systems:
@@ -987,7 +1144,7 @@ def save_dual_system_comparison_plots(
                     low, high = float(values.min()), float(values.max())
                     padding = max(0.1, 0.06 * max(high - low, 0.1))
                     ax.set_ylim(low - padding, high + padding)
-            ax.legend(handles=handles, frameon=False, fontsize=8)
+            ax.legend(handles=handles, frameon=False, fontsize=7.5, ncol=2)
             comparison_prefix = "_".join(system.upper() for system in systems)
             fig.savefig(
                 output
@@ -1775,7 +1932,7 @@ def default_configuration() -> argparse.Namespace:
         peak_min_prominence_mag=0.05,
         peak_validation_enabled=True, peak_validation_sample_size=20,
         peak_validation_seed=20261027,
-        tail_percentiles="0.02,0.05,0.1,0.25,0.5,0.53,1,2.5,5,10,16,20,25,30,35,40,42,44,45,46,47,48,49,50",
+        tail_percentiles="16,25,30,40,50",
         n_boot=1000, bootstrap_threshold_mag=0.1, minimum_events=30,
         minimum_tail_events=20.0, train_fraction=0.70,
         validation_fraction=0.15, seed=12345, max_events=0,
@@ -1890,6 +2047,10 @@ def interactive(args: argparse.Namespace) -> argparse.Namespace:
     args.t_min = float(prompt_text(first_edge_label, str(args.t_min)))
     args.t_max = float(prompt_text(last_edge_label, str(args.t_max)))
     args.bin_width = float(prompt_text("Fixed bin width [days]", str(args.bin_width)))
+    args.tail_percentiles = prompt_text(
+        "Adaptive percentile sequence (50 = median only)",
+        args.tail_percentiles,
+    )
     bootstrap_mode = prompt_choice(
         "Bootstrap validation of percentile bounds",
         [
@@ -4198,10 +4359,21 @@ def _run_single_system(
             synthetic_source, metadata, train, support,
             population.peak_diagnostics, output, args, band1, band2,
         )
-    tails = parse_floats(args.tail_percentiles)
-    for fallback in (25, 30, 35, 40, 42, 44, 45, 46, 47, 48, 49, 50):
-        if fallback not in tails:
-            tails.append(float(fallback))
+    tails = list(dict.fromkeys(
+        float(q) for q in parse_floats(args.tail_percentiles)
+        if 0.0 < float(q) <= 50.0
+    ))
+    if not tails:
+        raise ValueError(
+            "The adaptive percentile sequence must contain values in (0, 50]"
+        )
+    if any(right <= left for left, right in zip(tails, tails[1:])):
+        raise ValueError(
+            "Enter the adaptive percentile sequence from widest to narrowest, "
+            "for example 16,25,30,40,50"
+        )
+    if 50.0 not in tails:
+        tails.append(50.0)
 
     snia_population: dict[str, object] = {}
     if args.snia_parquet is not None:
@@ -4541,6 +4713,16 @@ def _run_single_system(
             if args.photometric_system == "ztf" else None
         ),
         "tail_percentile_grid": sorted(set(tails)),
+        "adaptive_percentile_sequence": tails,
+        "adaptive_percentile_selection": (
+            "first statistically valid interval in the listed order, "
+            "evaluated independently in every time bin; p50-p50 is stored "
+            "as median_only"
+        ),
+        "adaptive_percentile_plot_styles": {
+            definition: {"color": color, "legend_label": label}
+            for definition, (color, label) in ADAPTIVE_ENVELOPE_STYLES.items()
+        },
         "median_is_stored_and_plotted": True,
         "population_plot_is_binned": False,
         "population_plot_includes_m5_rejected_points": True,
