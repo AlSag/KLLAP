@@ -11,6 +11,8 @@ from kne_m5 import M5_SCENARIOS
 ROOT = Path(__file__).resolve().parents[1]
 
 PUBLIC_COMMANDS = (
+    "compute_color_filter_efficiency.py",
+    "snia_parquet_to_simu_input.py",
     "get_opsim_baseline.py",
     "generate_kne_lightcurves.py",
     "build_color_envelopes.py",
@@ -49,10 +51,7 @@ class RepositoryArchitectureTest(unittest.TestCase):
         self.assertEqual(
             STAGES,
             (
-                "intrinsic_no_m5_no_mw",
-                "no_m5_with_mw",
-                "m5_no_mw",
-                "m5_with_mw",
+                "no_m5", "m5",
             ),
         )
         self.assertEqual(

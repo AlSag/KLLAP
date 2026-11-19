@@ -20,6 +20,41 @@ seeds, distance treatment, OpSim context, storage settings and model metadata.
 Generated products include ``summary.csv``, ``run_info.txt``, performance
 metadata, and either per-event CSV files or sharded Parquet populations.
 
+For synthetic curves in BOOM format, choose LSST,
+"Synthetic OpSim RA/Dec/MJD only", and enable "Additional BOOM CSVs".
+This writes ``boom_input/lightcurve_0000.csv`` etc. and ``summary.csv`` even
+when scientific storage is Parquet only. Two experiments are available:
+complete exports keep every finite model point and apply no depth selection;
+m5-limited exports keep only detections (mag <= m5). Both modes calculate
+uncertainties with the Ivezić model using the configured m5 values.
+Events without detections have no BOOM CSV or BOOM summary row; they remain in
+the scientific population and root summary. The default population target is a
+fixed number of injected physical KNe, which preserves the parent population and
+measures m5 visibility. An optional conditional benchmark instead injects extra
+events until a requested number of non-empty BOOM light curves is reached. BOOM
+files are renumbered contiguously from zero, while the root summary preserves each
+original injection index. CSV sample size does not restrict the BOOM export.
+mag_err ALWAYS means a magnitude uncertainty in these CSVs.
+Both exports use configurable fixed m5 values in the Ivezić error model. The
+complete export does not use m5 as a detection threshold. Neither mode adds
+random noise, and both use the synthetic cadence rather than OpSim visits.
+Finite synthetic points fainter than m5 stay in the scientific CSV/Parquet,
+where build_color_envelopes.py can classify them as upper limits for analysis.
+Enabling this export sets synthetic_depth_cut=none to preserve those points.
+Invalid model points are never interpreted as non-detections.
+BOOM keeps one point per time_mjd: the default 30-second staggering of
+simultaneous bands prevents those points from being discarded.
+For an exceptionally short interval at the edge of the resampled model grid,
+the step is reduced locally so that it cannot cross the next synthetic epoch.
+Use 0 only when preserving model timestamps for a consumer that supports
+simultaneous bands.
+When plots are enabled, ``png/lightcurve_boom_0000.png`` etc. show the exported
+detections with magnitude errors. The synthetic and
+numerical-floor plots remain model diagnostics.
+To plot an existing export without rerunning FIESTA:
+``python generate_kne_lightcurves.py --plot-boom-input runs/RUN/boom_input``
+The optional ``--max-events 20`` limits this plotting-only command (0 = all).
+
 The scientific environment must provide NumPy, pandas, Matplotlib, JAX,
 Astropy, ``rubin_sim`` and FIESTA.  OpSim products are prepared by running
 ``python get_opsim_baseline.py`` first.
@@ -30,7 +65,6 @@ Astropy, ``rubin_sim`` and FIESTA.  OpSim products are prepared by running
 # reference used for the lineage audit is:
 # https://github.com/nuclear-multimessenger-astronomy/fiestaEM/blob/7bec6b39392a47f6e937f8f7a237b8742bc334ae/examples/generate_lightcurves.py
 # See THIRD_PARTY_NOTICES.md and CITATION.cff for license and citation details.
-
 
 
 # =============================================================================
@@ -92,14 +126,13 @@ from datetime import datetime
 
 try:
     from rubin_sim.phot_utils import (
-        DustValues,
         PhotometricParameters,
         calc_mag_error_m5,
         calc_snr_m5,
         rubin_bandpasses,
     )
 except ModuleNotFoundError:
-    DustValues = PhotometricParameters = None
+    PhotometricParameters = None
     calc_mag_error_m5 = calc_snr_m5 = rubin_bandpasses = None
 
 from kne_pipeline_common import (
@@ -123,59 +156,13 @@ from kne_pipeline_common import (
 # SCIENTIFIC CALCULATIONS AND TABLE TRANSFORMATIONS
 # ============================================================================
 
-import numpy as np
-import pandas as pd
-
 
 RUBIN_BANDS = tuple("ugrizy")
 
 
-def _ensure_mw_extinction_columns(
-    visits: pd.DataFrame,
-    dust_coefficients: dict[str, float],
-) -> pd.DataFrame:
-    """Return visits with E(B-V), per-band extinction, and row extinction."""
-    v = visits.copy()
-    if "ebv_mw" not in v.columns:
-        for candidate in ("ebv", "E_BV", "EBV", "sfd_ebv"):
-            if candidate in v.columns:
-                v["ebv_mw"] = pd.to_numeric(v[candidate], errors="coerce")
-                break
-    if "ebv_mw" not in v.columns:
-        v["ebv_mw"] = np.nan
-    v["ebv_mw"] = pd.to_numeric(v["ebv_mw"], errors="coerce")
-
-    coefficients = {
-        band: float(dust_coefficients[band]) for band in RUBIN_BANDS
-    }
-    for band, coefficient in coefficients.items():
-        if f"R_{band}_mw" not in v.columns:
-            v[f"R_{band}_mw"] = coefficient
-        if f"A_{band}_mw" not in v.columns:
-            v[f"A_{band}_mw"] = v["ebv_mw"] * coefficient
-
-    if "R_mw" not in v.columns:
-        v["R_mw"] = v["band"].astype(str).map(coefficients)
-    if "A_mw" not in v.columns:
-        v["A_mw"] = v["band"].astype(str).map(coefficients) * v["ebv_mw"]
-    return v
-
-
-def _get_event_mw_extinction_summary(
-    visits: pd.DataFrame,
-    dust_coefficients: dict[str, float],
-) -> dict[str, object]:
-    """Summarize E(B-V) and Rubin extinction for one selected field/event."""
-    v = _ensure_mw_extinction_columns(visits, dust_coefficients)
-    ebv_values = pd.to_numeric(
-        v.get("ebv_mw", pd.Series(np.nan, index=v.index)), errors="coerce"
-    ).to_numpy(float)
-    ebv = (
-        float(np.nanmedian(ebv_values))
-        if np.any(np.isfinite(ebv_values))
-        else np.nan
-    )
-    summary: dict[str, object] = {"ebv_mw": ebv}
+def summarize_field(v: pd.DataFrame) -> dict[str, object]:
+    """Read sky coordinates and target name from the selected field."""
+    summary = {}
     for column in ("fieldRA", "fieldDec"):
         values = pd.to_numeric(
             v.get(column, pd.Series(np.nan, index=v.index)), errors="coerce"
@@ -186,19 +173,6 @@ def _get_event_mw_extinction_summary(
     target_values = v.get("target_name", pd.Series("", index=v.index))
     target_values = target_values.dropna().astype(str)
     summary["target_name"] = target_values.iloc[0] if len(target_values) else ""
-
-    for band in RUBIN_BANDS:
-        coefficient = float(dust_coefficients[band])
-        summary[f"R_{band}_mw"] = coefficient
-        column = f"A_{band}_mw"
-        values = pd.to_numeric(
-            v.get(column, pd.Series(np.nan, index=v.index)), errors="coerce"
-        ).to_numpy(float)
-        summary[column] = (
-            float(np.nanmedian(values))
-            if np.any(np.isfinite(values))
-            else coefficient * ebv if np.isfinite(ebv) else np.nan
-        )
     return summary
 
 
@@ -253,20 +227,6 @@ def _apply_synthetic_m5_median_cut(
     return out
 
 
-def _keep_only_mw_extincted_synthetic_magnitude(
-    measurements: pd.DataFrame,
-) -> pd.DataFrame:
-    """Replace the saved magnitude by its MW-extincted value."""
-    if "mag_mw_extincted" not in measurements.columns:
-        raise ValueError(
-            "MW-extincted synthetic output requires finite A_band values from "
-            "the selected OpSim field"
-        )
-    out = measurements.copy()
-    out["mag"] = pd.to_numeric(out["mag_mw_extincted"], errors="coerce")
-    return out.drop(columns=["mag_mw_extincted"])
-
-
 def _derive_sky_seed(
     intrinsic_seed: int,
     latitude_mode: str,
@@ -295,12 +255,80 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
-import numpy as np
-import pandas as pd
 
 
 plt.rcParams["text.usetex"] = False
 plt.rcParams["font.family"] = "DejaVu Sans"
+
+
+def plot_boom_measurements(measurements, outfile):
+    """Plot BOOM detections with magnitude errors; omit legacy blank-mag rows."""
+    required = {"t_days", "band", "mag", "mag_err"}
+    missing = required - set(measurements.columns)
+    if missing:
+        raise ValueError(f"Cannot plot BOOM CSV: missing columns {sorted(missing)}")
+    table = measurements.copy()
+    for name in ("t_days", "mag", "mag_err"):
+        table[name] = pd.to_numeric(table[name], errors="raise")
+    table = table.loc[np.isfinite(table["t_days"]) & np.isfinite(table["mag_err"])
+                      & np.isfinite(table["mag"]) & (table["mag_err"] >= 0)]
+    if table.empty:
+        return False
+    fig, ax = plt.subplots(figsize=(10, 5.5), constrained_layout=True)
+    handles = []
+    has_detection = False
+    for band in "ugrizy":
+        rows = table.loc[table["band"] == band].sort_values("t_days")
+        color = BASE_BAND_COLORS[band]
+        detections = rows.loc[np.isfinite(rows["mag"]) & (rows["mag_err"] >= 0)]
+        if detections.empty:
+            continue
+        handles.append(Line2D([], [], color=color, marker="o", linestyle="none", label=f"LSST {band}"))
+        if not detections.empty:
+            ax.errorbar(detections["t_days"], detections["mag"], yerr=detections["mag_err"],
+                        fmt="o", linestyle="none", color=color, markersize=3,
+                        elinewidth=0.9, capsize=2, zorder=3)
+            has_detection = True
+    if not handles:
+        plt.close(fig)
+        return False
+    if has_detection:
+        handles.append(Line2D([], [], color="black", marker="o", linestyle="none",
+                              label="Detection (1-sigma errors)"))
+    if (table["t_days"] > 0).all():
+        ax.set_xscale("log")
+    ax.set_xlabel("Time since merger [days]")
+    ax.set_ylabel("AB magnitude")
+    ax.invert_yaxis()
+    ax.margins(y=0.12)
+    ax.grid(True, which="major", alpha=0.25)
+    ax.grid(True, which="minor", alpha=0.10)
+    ax.tick_params(which="both", direction="in", top=True, right=True)
+    ax.legend(handles=handles, ncol=4, loc="lower center", bbox_to_anchor=(0.5, 1.01),
+              frameon=False, fontsize=9)
+    fig.savefig(outfile, bbox_inches="tight", dpi=200)
+    plt.close(fig)
+    return True
+
+
+def replot_boom_input(input_dir, max_events=0):
+    """Read existing exported CSVs; no model evaluation or modification of data."""
+    if max_events < 0:
+        raise ValueError("max_events must be >= 0")
+    input_dir = Path(input_dir).expanduser().resolve()
+    paths = sorted(input_dir.glob("lightcurve_*.csv"))
+    if not paths:
+        raise FileNotFoundError(f"No lightcurve_*.csv in {input_dir}")
+    plot_dir = input_dir.parent / "png" if input_dir.name == "boom_input" else input_dir / "png"
+    plot_dir.mkdir(parents=True, exist_ok=True)
+    written = 0
+    for path in paths:
+        if max_events and written >= max_events:
+            break
+        suffix = path.stem.removeprefix("lightcurve_")
+        rows = pd.read_csv(path, float_precision="round_trip")
+        written += int(plot_boom_measurements(rows, plot_dir / f"lightcurve_boom_{suffix}.png"))
+    print(f"Saved {written} BOOM plots in {plot_dir}")
 
 
 def _plot_synthetic_only(
@@ -420,7 +448,7 @@ def _plot_saved_synthetic_measurements(
 
     ax.set_xscale("log")
     ax.set_xlabel("Time since merger [days]")
-    ax.set_ylabel("AB magnitude (including Milky-Way extinction)")
+    ax.set_ylabel("AB magnitude")
     ax.invert_yaxis()
     ax.grid(True, which="major", alpha=0.25)
     ax.grid(True, which="minor", alpha=0.10)
@@ -489,7 +517,7 @@ def _plot_numerical_floor_diagnostic(
     )
     ax.set_xscale("log")
     ax.set_xlabel("Time since merger [days]")
-    ax.set_ylabel("AB magnitude (before Milky-Way extinction)")
+    ax.set_ylabel("AB magnitude")
     ax.invert_yaxis()
     ax.grid(True, which="major", alpha=0.25)
     ax.grid(True, which="minor", alpha=0.10)
@@ -755,22 +783,16 @@ def _plot_lsstlike_only(
 # LIGHT-CURVE MODEL BACKENDS
 # ============================================================================
 
-import argparse
-import hashlib
 import importlib
 import inspect
 import math
 from importlib.metadata import PackageNotFoundError, version
-from pathlib import Path
 
-import numpy as np
 
 MODEL_NAMES = ("Bu2026_MLP", "Bu2019_MLP", "MetzgerModel", "MetzgerFullModel")
 ANALYTICAL_MODELS = frozenset(("MetzgerModel", "MetzgerFullModel"))
 METZGER_PARAMETERS = ("log10_mej", "log10_vej", "beta", "log10_kappa_r")
 AUDITED_FIESTA_COMMIT = "6ba093cc13cb768a089b07768e550a6a46b737ca"
-
-
 
 
 def metzger_prior_bounds(args):
@@ -894,18 +916,126 @@ def saved_observer_times(times, params, model_name):
     return times
 
 # ============================================================================
-# USER-FRIENDLY TERMINAL INTERFACE
+# BOOM EXPORT AND TERMINAL CONFIGURATION
 # ============================================================================
 
-import argparse
-import json
-import secrets
-import sys
-from pathlib import Path
 
-import numpy as np
+# ----------------------------------------------------------------------------
+# BOOM photometry and export
+# ----------------------------------------------------------------------------
+
+# Assumed single-visit depths, matching the user's BOOM CSV convention. These
+# are configurable simulation inputs, not the actual depth of an OpSim visit.
+BOOM_M5_DEFAULT = {"u": 23.7, "g": 24.8, "r": 24.4, "i": 23.9, "z": 23.3, "y": 22.3}
+BOOM_GAMMA = {"u": 0.038, "g": 0.039, "r": 0.039, "i": 0.039, "z": 0.039, "y": 0.039}
+BOOM_COLUMNS = ["objectid", "candidate_id", "time_mjd", "t_days", "band", "mag", "mag_err"]
 
 
+def synthetic_to_boom_csv(measurements, event_index, m5_by_band,
+                          sigma_sys=0.005, duplicate_shift_seconds=30.0,
+                          export_mode="m5-detected"):
+    """Convert ONE event's LSST model table to the supplied BOOM CSV format.
+
+    Ivezić et al. (2019), ApJ 873, 111, equations 4-5 / Table 2:
+    https://faculty.washington.edu/ivezic/Publications/Document-5462.pdf
+    sigma_mag^2 = sigma_sys^2 + (0.04-gamma)*x + gamma*x^2;
+    x = 10**(0.4*(mag-m5)). No random noise is drawn.
+
+    ``export_mode='complete'`` keeps every finite model point and uses m5 only
+    in the Ivezić uncertainty. ``export_mode='m5-detected'`` additionally uses
+    mag <= m5 as a selection. Fainter points are excluded only in the second mode.
+    mag and mag_err are always finite; mag_err is ALWAYS an uncertainty.
+    If present, photometric_system selects LSST; other systems are untouched.
+    BOOM keeps one point per time_mjd; staggering preserves different
+    simultaneous bands. The requested step is shortened locally when necessary to
+    remain strictly before the next original epoch. This is an export
+    convention only: it does not represent actual OpSim visits.
+    """
+    if not np.isfinite(sigma_sys) or sigma_sys < 0:
+        raise ValueError("sigma_sys must be finite and >= 0")
+    if export_mode not in {"complete", "m5-detected"}:
+        raise ValueError("export_mode must be 'complete' or 'm5-detected'")
+    if not np.isfinite(duplicate_shift_seconds) or duplicate_shift_seconds < 0:
+        raise ValueError("duplicate_shift_seconds must be finite and >= 0")
+    if measurements.empty:
+        return pd.DataFrame(columns=BOOM_COLUMNS)
+    required = {"time_mjd", "t_days", "band", "mag"}
+    missing = required - set(measurements.columns)
+    if missing:
+        raise ValueError(f"BOOM synthetic export: missing columns {sorted(missing)}")
+    rows = measurements.copy()
+    if "photometric_system" in rows:
+        rows = rows.loc[rows["photometric_system"] == "lsst"].copy()
+    for name in ("time_mjd", "t_days", "mag"):
+        rows[name] = pd.to_numeric(rows[name], errors="raise")
+    rows = rows.loc[np.isfinite(rows[["time_mjd", "t_days", "mag"]]).all(axis=1)]
+    rows = rows.sort_values("time_mjd", kind="stable").reset_index(drop=True)
+    if rows.empty:
+        return pd.DataFrame(columns=BOOM_COLUMNS)
+    depths = rows["band"].map(m5_by_band)
+    gamma = rows["band"].map(BOOM_GAMMA)
+    if not np.isfinite(depths).all() or gamma.isna().any():
+        raise ValueError(
+            "BOOM export with Ivezić errors requires finite m5 values for all "
+            "LSST bands used"
+        )
+    if export_mode == "complete":
+        out = rows[["time_mjd", "t_days", "band", "mag"]].copy()
+    else:
+        detected = rows["mag"] <= depths
+        if not detected.any():
+            return pd.DataFrame(columns=BOOM_COLUMNS)
+        # Work only on rows that BOOM will receive. Faint rows must not create
+        # a false timestamp collision before they are discarded.
+        out = rows.loc[
+            detected, ["time_mjd", "t_days", "band", "mag"]
+        ].copy()
+    out_depths = out["band"].map(m5_by_band).astype(float)
+    out_gamma = out["band"].map(BOOM_GAMMA).astype(float)
+    x = 10.0 ** (0.4 * (out["mag"] - out_depths))
+    out["mag_err"] = np.sqrt(
+        sigma_sys**2 + (0.04-out_gamma)*x + out_gamma*x*x
+    )
+
+    if duplicate_shift_seconds > 0:
+        original_times = out["time_mjd"].to_numpy(dtype=float)
+        adjusted_times = original_times.copy()
+        offsets = np.zeros(len(out), dtype=float)
+        unique_times, starts, counts = np.unique(
+            original_times, return_index=True, return_counts=True
+        )
+        requested_step_days = duplicate_shift_seconds / 86400.0
+        for group_index, (start, count) in enumerate(zip(starts, counts)):
+            if count <= 1:
+                continue
+            step_days = requested_step_days
+            if group_index + 1 < len(unique_times):
+                gap_days = unique_times[group_index + 1] - unique_times[group_index]
+                # Dividing by count, rather than count-1, leaves a positive
+                # margin before the following unshifted epoch.
+                step_days = min(step_days, gap_days / count)
+            group_offsets = np.arange(count, dtype=float) * step_days
+            stop = start + count
+            adjusted_times[start:stop] += group_offsets
+            offsets[start:stop] = group_offsets
+        out["time_mjd"] = adjusted_times
+        out["t_days"] = out["t_days"].to_numpy(dtype=float) + offsets
+        if out["time_mjd"].duplicated().any() or not out["time_mjd"].is_monotonic_increasing:
+            raise RuntimeError(
+                "Internal BOOM timestamp allocation failed to create unique "
+                "chronological detection times"
+            )
+
+    out = out.reset_index(drop=True)
+    out["objectid"] = pd.Series(pd.NA, index=out.index, dtype="Int64")
+    out.at[0, "objectid"] = int(event_index)
+    out["candidate_id"] = [f"{int(event_index):04d}_{j}" for j in range(1, len(out)+1)]
+    return out[BOOM_COLUMNS]
+
+
+# ----------------------------------------------------------------------------
+# Terminal configuration
+# ----------------------------------------------------------------------------
 
 def default_runtime_configuration() -> argparse.Namespace:
     """Return documented defaults before the interactive questions."""
@@ -926,7 +1056,15 @@ def default_runtime_configuration() -> argparse.Namespace:
         output_mode="detected-pairs",
         min_detections=1,
         synthetic_cadence_days=0.0,
+        synthetic_schema="model",
         synthetic_depth_cut="none",
+        boom_synthetic_export=False,
+        boom_export_mode="complete",
+        boom_target_nonempty_events=False,
+        boom_max_injection_factor=20.0,
+        boom_m5_by_band=dict(BOOM_M5_DEFAULT),
+        boom_sigma_sys=0.005,
+        boom_duplicate_shift_seconds=30.0,
         storage_format="csv",
         parquet_events_per_shard=500,
         parquet_compression="zstd",
@@ -961,339 +1099,417 @@ def default_runtime_configuration() -> argparse.Namespace:
     )
 
 
-
-
 def configure_runtime() -> argparse.Namespace:
     """Collect and validate a complete configuration in the terminal."""
     args = default_runtime_configuration()
-    # This VM-oriented generator stores only MW-extincted synthetic magnitudes.
-    args.synthetic_schema = "compact-extincted"
     # The public workflow is deliberately interactive: scientific automation
     # calls run_generation(Namespace(...)) directly instead of invoking hidden
     # terminal flags in a subprocess.
-    if True:
-        args.run_name = prompt_text("Readable run name", args.run_name)
-        args.model = prompt_choice(
-            "Kilonova light-curve model",
-            [
-                ("Bu2026_MLP", "FIESTA Bu2026_MLP (LSST, PS1 and ZTF)"),
-                ("Bu2019_MLP", "FIESTA Bu2019_MLP (LSST, PS1 and ZTF)"),
-                ("MetzgerModel", "FIESTA MetzgerModel (semi-analytical, NMMA-style)"),
-                ("MetzgerFullModel", "FIESTA MetzgerFullModel (semi-analytical, Redback-style)"),
-            ],
-            args.model,
+    args.run_name = prompt_text("Readable run name", args.run_name)
+    args.model = prompt_choice(
+        "Kilonova light-curve model",
+        [
+            ("Bu2026_MLP", "FIESTA Bu2026_MLP (LSST, PS1 and ZTF)"),
+            ("Bu2019_MLP", "FIESTA Bu2019_MLP (LSST, PS1 and ZTF)"),
+            ("MetzgerModel", "FIESTA MetzgerModel (semi-analytical, NMMA-style)"),
+            ("MetzgerFullModel", "FIESTA MetzgerFullModel (semi-analytical, Redback-style)"),
+        ],
+        args.model,
+    )
+    if args.model == "Bu2019_MLP":
+        surrogate_path = prompt_text(
+            "Local FIESTA surrogate directory (empty = automatic download)",
+            str(args.fiesta_surrogate_dir or ""),
+        ).strip()
+        args.fiesta_surrogate_dir = (
+            Path(surrogate_path) if surrogate_path else None
         )
-        if args.model == "Bu2019_MLP":
-            surrogate_path = prompt_text(
-                "Local FIESTA surrogate directory (empty = automatic download)",
-                str(args.fiesta_surrogate_dir or ""),
-            ).strip()
-            args.fiesta_surrogate_dir = (
-                Path(surrogate_path) if surrogate_path else None
-            )
-        if args.model in ANALYTICAL_MODELS:
-            print("Metzger population priors: uniform in the listed variables.")
-            for attribute, label in (
-                ("metzger_log10_mej_range", "log10(M_ej / Msun)"),
-                ("metzger_log10_vej_range", "log10(v_min / c)"),
-                ("metzger_beta_range", "Velocity-profile exponent beta"),
-                ("metzger_log10_kappa_range", "log10(kappa_r / (cm^2/g))"),
-            ):
-                value = getattr(args, attribute)
-                entered = prompt_text(label + " range (MIN MAX)", f"{value[0]} {value[1]}")
-                limits = [float(v) for v in entered.replace(",", " ").split()]
-                if len(limits) != 2:
-                    raise ValueError(label + " requires MIN MAX")
-                setattr(args, attribute, limits)
-            args.analytical_t_min_days = float(prompt_text(
-                "First source-frame integration time [days]", str(args.analytical_t_min_days)))
-            args.analytical_t_max_days = float(prompt_text(
-                "Last source-frame integration time [days]", str(args.analytical_t_max_days)))
-            args.analytical_n_times = int(prompt_text(
-                "Logarithmic integration time points (not the saved cadence)", str(args.analytical_n_times)))
-            if args.model == "MetzgerFullModel":
-                args.metzger_vmax = float(prompt_text(
-                    "Maximum shell velocity [fraction of c]", str(args.metzger_vmax)))
-                precursor = prompt_choice("Neutron precursor", [("yes", "Include"), ("no", "Disable")],
-                                          "yes" if args.metzger_neutron_precursor else "no")
-                args.metzger_neutron_precursor = precursor == "yes"
-        args.parameter_source = prompt_choice(
-            "Physical-parameter population",
-            ([("broad", "Broad uniform parameter ranges"), ("posterior", "FIESTA posterior (.npz or AT2017gfo.tar)")]
-             if args.model == "Bu2026_MLP" else [("broad", "Broad uniform parameter ranges")]),
-            args.parameter_source,
+    if args.model in ANALYTICAL_MODELS:
+        print("Metzger population priors: uniform in the listed variables.")
+        for attribute, label in (
+            ("metzger_log10_mej_range", "log10(M_ej / Msun)"),
+            ("metzger_log10_vej_range", "log10(v_min / c)"),
+            ("metzger_beta_range", "Velocity-profile exponent beta"),
+            ("metzger_log10_kappa_range", "log10(kappa_r / (cm^2/g))"),
+        ):
+            value = getattr(args, attribute)
+            entered = prompt_text(label + " range (MIN MAX)", f"{value[0]} {value[1]}")
+            limits = [float(v) for v in entered.replace(",", " ").split()]
+            if len(limits) != 2:
+                raise ValueError(label + " requires MIN MAX")
+            setattr(args, attribute, limits)
+        args.analytical_t_min_days = float(prompt_text(
+            "First source-frame integration time [days]", str(args.analytical_t_min_days)))
+        args.analytical_t_max_days = float(prompt_text(
+            "Last source-frame integration time [days]", str(args.analytical_t_max_days)))
+        args.analytical_n_times = int(prompt_text(
+            "Logarithmic integration time points (not the saved cadence)", str(args.analytical_n_times)))
+        if args.model == "MetzgerFullModel":
+            args.metzger_vmax = float(prompt_text(
+                "Maximum shell velocity [fraction of c]", str(args.metzger_vmax)))
+            precursor = prompt_choice("Neutron precursor", [("yes", "Include"), ("no", "Disable")],
+                                      "yes" if args.metzger_neutron_precursor else "no")
+            args.metzger_neutron_precursor = precursor == "yes"
+    args.parameter_source = prompt_choice(
+        "Physical-parameter population",
+        ([("broad", "Broad uniform parameter ranges"), ("posterior", "FIESTA posterior (.npz or AT2017gfo.tar)")]
+         if args.model == "Bu2026_MLP" else [("broad", "Broad uniform parameter ranges")]),
+        args.parameter_source,
+    )
+    if args.parameter_source == "posterior":
+        args.posterior_file = Path(prompt_text("Posterior file", str(args.posterior_file or "AT2017gfo.tar")))
+        args.posterior_inclination = prompt_choice(
+            "Inclination treatment",
+            [("posterior", "Keep inclination from each posterior row"), ("isotropic", "AT2017gfo-like ejecta, new isotropic inclination")],
+            args.posterior_inclination,
         )
-        if args.parameter_source == "posterior":
-            args.posterior_file = Path(prompt_text("Posterior file", str(args.posterior_file or "AT2017gfo.tar")))
-            args.posterior_inclination = prompt_choice(
-                "Inclination treatment",
-                [("posterior", "Keep inclination from each posterior row"), ("isotropic", "AT2017gfo-like ejecta, new isotropic inclination")],
-                args.posterior_inclination,
-            )
-        args.filter_system = prompt_choice(
-            "Photometric filter system",
+    args.filter_system = prompt_choice(
+        "Photometric filter system",
+        [
+            ("lsst+ps1", "LSST ugrizy + PS1 grizy for the same events"),
+            ("lsst+ztf", "LSST ugrizy + ZTF gri for the same events"),
+            ("lsst", "LSST ugrizy only"),
+            ("ps1", "PS1 grizy only (synthetic products; no Rubin m5)"),
+            ("ztf", "ZTF gri only (synthetic products; ZTF depth applied later)"),
+        ],
+        args.filter_system,
+    )
+    if args.filter_system in {"ps1", "ztf"}:
+        # Rubin OpSim visits and m5 values cannot be applied to a PS1-only
+        # model evaluation. We retain the OpSim sky position, merger MJD
+        # and E(B-V) metadata, but save only synthetic PS1 products.
+        args.output_mode = "synthetic-mjd"
+        print(
+            f"{args.filter_system.upper()}-only mode: scientific product "
+            "selection is fixed to 'Synthetic OpSim RA/Dec/MJD only'. "
+            "Rubin LSST-like products require LSST model magnitudes."
+        )
+    else:
+        args.output_mode = prompt_choice(
+            "Scientific event-product selection",
             [
-                ("lsst+ps1", "LSST ugrizy + PS1 grizy for the same events"),
-                ("lsst+ztf", "LSST ugrizy + ZTF gri for the same events"),
-                ("lsst", "LSST ugrizy only"),
-                ("ps1", "PS1 grizy only (synthetic products; no Rubin m5)"),
-                ("ztf", "ZTF gri only (synthetic products; ZTF depth applied later)"),
+                (
+                    "all-synthetic-lsstlike-detected",
+                    "All synthetic + LSST-like only for detected events",
+                ),
+                (
+                    "detected-pairs",
+                    "Synthetic OpSim MJD + LSST-like, detected events only",
+                ),
+                (
+                    "lsstlike-detected",
+                    "LSST-like only, detected events only",
+                ),
+                (
+                    "synthetic-mjd",
+                    "Synthetic OpSim RA/Dec/MJD only",
+                ),
             ],
-            args.filter_system,
+            args.output_mode,
+        )
+    if args.output_mode in {
+        "all-synthetic-lsstlike-detected",
+        "detected-pairs",
+        "synthetic-mjd",
+    }:
+        args.synthetic_cadence_days = float(
+            prompt_text(
+                "Saved synthetic cadence [days] (0 = native FIESTA grid)",
+                str(args.synthetic_cadence_days),
+            )
         )
         if args.filter_system in {"ps1", "ztf"}:
-            # Rubin OpSim visits and m5 values cannot be applied to a PS1-only
-            # model evaluation. We retain the OpSim sky position, merger MJD
-            # and E(B-V) metadata, but save only synthetic PS1 products.
-            args.output_mode = "synthetic-mjd"
+            args.synthetic_depth_cut = "none"
             print(
-                f"{args.filter_system.upper()}-only mode: scientific product "
-                "selection is fixed to 'Synthetic OpSim RA/Dec/MJD only'. "
-                "Rubin LSST-like products require LSST model magnitudes."
+                "Synthetic depth cut: none (survey depth is applied by "
+                "build_color_envelopes.py, not during generation)."
             )
         else:
-            args.output_mode = prompt_choice(
-                "Scientific event-product selection",
+            args.synthetic_depth_cut = prompt_choice(
+                "Synthetic depth cut",
                 [
+                    ("none", "Keep every finite synthetic model point"),
                     (
-                        "all-synthetic-lsstlike-detected",
-                        "All synthetic + LSST-like only for detected events",
-                    ),
-                    (
-                        "detected-pairs",
-                        "Synthetic OpSim MJD + LSST-like, detected events only",
-                    ),
-                    (
-                        "lsstlike-detected",
-                        "LSST-like only, detected events only",
-                    ),
-                    (
-                        "synthetic-mjd",
-                        "Synthetic OpSim RA/Dec/MJD only",
+                        "m5-median",
+                        "Keep points brighter than the median OpSim m5 of their band",
                     ),
                 ],
-                args.output_mode,
+                args.synthetic_depth_cut,
             )
-        if args.output_mode in {
-            "all-synthetic-lsstlike-detected",
-            "detected-pairs",
-            "synthetic-mjd",
-        }:
-            args.synthetic_cadence_days = float(
-                prompt_text(
-                    "Saved synthetic cadence [days] (0 = native FIESTA grid)",
-                    str(args.synthetic_cadence_days),
-                )
+    else:
+        args.synthetic_cadence_days = 0.0
+        args.synthetic_depth_cut = "none"
+    if args.filter_system not in {"ps1", "ztf"} and args.output_mode != "lsstlike-detected":
+        args.boom_synthetic_export = prompt_choice(
+            "Additional BOOM-format CSVs",
+            [("no", "No additional export"),
+             ("yes", "Export synthetic LSST points to boom_input/")],
+            "yes" if args.boom_synthetic_export else "no",
+        ) == "yes"
+        if args.boom_synthetic_export:
+            print("No random noise is added; each finite synthetic epoch is an assumed observation.")
+            args.synthetic_depth_cut = "none"
+            args.boom_export_mode = prompt_choice(
+                "BOOM photometry experiment",
+                [
+                    (
+                        "complete",
+                        "Complete truth-level sample: all finite points, no m5 cut",
+                    ),
+                    (
+                        "m5-detected",
+                        "Depth-limited sample: mag <= m5 with Ivezic errors",
+                    ),
+                ],
+                args.boom_export_mode,
             )
-            if args.filter_system in {"ps1", "ztf"}:
-                args.synthetic_depth_cut = "none"
+            for band in "ugrizy":
+                args.boom_m5_by_band[band] = float(prompt_text(
+                    f"Assumed single-visit m5 in {band} for Ivezic errors",
+                    str(args.boom_m5_by_band[band]),
+                ))
+            if args.boom_export_mode == "complete":
+                args.boom_target_nonempty_events = False
                 print(
-                    "Synthetic depth cut: none (survey depth is applied by "
-                    "build_color_envelopes.py, not during generation)."
+                    "m5 is used only in the Ivezic error model; no m5 "
+                    "threshold is applied to the BOOM sample."
                 )
             else:
-                args.synthetic_depth_cut = prompt_choice(
-                    "Synthetic depth cut",
+                args.boom_target_nonempty_events = prompt_choice(
+                    "Population size used for the BOOM experiment",
                     [
-                        ("none", "Keep every finite synthetic model point"),
                         (
-                            "m5-median",
-                            "Keep points brighter than the median OpSim m5 of their band",
+                            "injected",
+                            "Fixed injected KNe population (end-to-end efficiency)",
+                        ),
+                        (
+                            "nonempty",
+                            "Fixed non-empty BOOM sample (conditional filter benchmark)",
                         ),
                     ],
-                    args.synthetic_depth_cut,
-                )
-        else:
-            args.synthetic_cadence_days = 0.0
-            args.synthetic_depth_cut = "none"
-        args.storage_format = prompt_choice(
-            "Scientific table storage",
-            [
-                ("csv", "One legacy CSV per eligible event"),
-                ("parquet", "Sharded Parquet datasets only"),
-                ("both", "Sharded Parquet + a legacy CSV event sample"),
-            ],
-            args.storage_format,
-        )
-        if args.storage_format in {"parquet", "both"}:
-            args.parquet_events_per_shard = int(prompt_text(
-                "Events per Parquet shard",
-                str(args.parquet_events_per_shard),
+                    "nonempty" if args.boom_target_nonempty_events else "injected",
+                ) == "nonempty"
+            print("BOOM keeps one point per time_mjd: keep a positive shift for BOOM input.")
+            print("The requested step is reduced locally if a model-grid edge is closer.")
+            args.boom_duplicate_shift_seconds = float(prompt_text(
+                "BOOM shift between simultaneous bands [seconds] (0 = preserve model epochs)",
+                str(args.boom_duplicate_shift_seconds),
             ))
-            args.parquet_compression = prompt_choice(
-                "Parquet compression",
-                [
-                    ("zstd", "Zstandard: compact and fast [recommended]"),
-                    ("snappy", "Snappy: fastest, less compact"),
-                    ("gzip", "Gzip: compact, slower"),
-                    ("none", "No compression"),
-                ],
-                args.parquet_compression,
-            )
-        if args.storage_format in {"csv", "both"}:
-            args.csv_sample_size = int(prompt_text(
-                "Random injected events eligible for individual CSVs (0 = all)",
-                str(args.csv_sample_size),
-            ))
-        args.opsim_cache_size = int(prompt_text(
-            "OpSim field tables kept in memory",
-            str(args.opsim_cache_size),
+    args.storage_format = prompt_choice(
+        "Scientific table storage",
+        [
+            ("csv", "One legacy CSV per eligible event"),
+            ("parquet", "Sharded Parquet datasets only"),
+            ("both", "Sharded Parquet + a legacy CSV event sample"),
+        ],
+        args.storage_format,
+    )
+    if args.storage_format in {"parquet", "both"}:
+        args.parquet_events_per_shard = int(prompt_text(
+            "Events per Parquet shard",
+            str(args.parquet_events_per_shard),
         ))
-        args.surrogate_batch_size = int(prompt_text(
-            "Requested surrogate batch size (automatic validated fallback)",
-            str(args.surrogate_batch_size),
+        args.parquet_compression = prompt_choice(
+            "Parquet compression",
+            [
+                ("zstd", "Zstandard: compact and fast [recommended]"),
+                ("snappy", "Snappy: fastest, less compact"),
+                ("gzip", "Gzip: compact, slower"),
+                ("none", "No compression"),
+            ],
+            args.parquet_compression,
+        )
+    if args.storage_format in {"csv", "both"}:
+        args.csv_sample_size = int(prompt_text(
+            "Random injected events eligible for individual CSVs (0 = all)",
+            str(args.csv_sample_size),
         ))
-        args.plot_mode = prompt_choice(
-            "Diagnostic light-curve plots",
-            [
-                ("none", "Do not create PNG plots"),
-                (
-                    "saved",
-                    "Plot each saved synthetic and/or LSST-like product",
-                ),
-            ],
-            args.plot_mode,
-        )
-        if args.plot_mode == "saved":
-            args.max_plot_events = int(
-                prompt_text(
-                    "Maximum saved events plotted per product (0 = all)",
-                    str(args.max_plot_events),
-                )
-            )
-        args.distance_mode = prompt_choice(
-            "Luminosity-distance treatment",
-            [
-                ("comoving-volume", "Direct draw uniform in comoving volume"),
-                ("fixed", "Fixed luminosity distance"),
-            ],
-            args.distance_mode,
-        )
-        if args.distance_mode == "fixed":
-            args.fixed_distance_mpc = float(
-                prompt_text("Fixed luminosity distance [Mpc]", str(args.fixed_distance_mpc))
-            )
-        if args.model == "Bu2026_MLP":
-            args.numerical_floor_absolute_mag = float(
-                prompt_text(
-                    "Bu2026 numerical floor in absolute magnitude",
-                    str(args.numerical_floor_absolute_mag),
-                )
-            )
-            args.numerical_floor_margin_mag = float(
-                prompt_text(
-                    "Safety margin before numerical floor [mag]",
-                    str(args.numerical_floor_margin_mag),
-                )
-            )
-        args.opsim_dir = Path(prompt_text("OpSim export directory", str(args.opsim_dir)))
-        args.galactic_latitude_mode = prompt_choice(
-            "OpSim-field Galactic-latitude selection",
-            [
-                ("all", "All available Galactic latitudes"),
-                ("high", "High latitude: |b| >= threshold"),
-                ("low", "Low latitude: |b| < threshold"),
-                ("bin", "Disjoint interval: min <= |b| < max"),
-            ],
-            args.galactic_latitude_mode,
-        )
-        if args.galactic_latitude_mode in {"low", "high"}:
-            args.galactic_latitude_threshold_deg = float(
-                prompt_text(
-                    "Absolute Galactic-latitude threshold [deg]",
-                    str(args.galactic_latitude_threshold_deg),
-                )
-            )
-        elif args.galactic_latitude_mode == "bin":
-            args.galactic_latitude_min_deg = float(
-                prompt_text(
-                    "Inclusive lower |b| edge [deg]",
-                    str(args.galactic_latitude_min_deg),
-                )
-            )
-            args.galactic_latitude_max_deg = float(
-                prompt_text(
-                    "Exclusive upper |b| edge [deg]",
-                    str(args.galactic_latitude_max_deg),
-                )
-            )
-        if args.output_mode in {
-            "all-synthetic-lsstlike-detected",
-            "detected-pairs",
-            "lsstlike-detected",
-        }:
-            args.min_detections = int(
-                prompt_text("Minimum number of LSST-like detections", str(args.min_detections))
-            )
-        args.n_samples = int(prompt_text("Number of simulated events", str(args.n_samples)))
-        args.pairing_mode = prompt_choice(
-            "Intrinsic-population pairing",
-            [
-                (
-                    "none",
-                    "Independent population (legacy behaviour)",
-                ),
-                (
-                    "create",
-                    "Create a reusable intrinsic KNe catalogue",
-                ),
-                (
-                    "reuse",
-                    "Reuse an intrinsic KNe catalogue for a paired sky run",
-                ),
-            ],
-            args.pairing_mode,
-        )
-        if args.pairing_mode != "none":
-            args.intrinsic_catalog = Path(
-                prompt_text(
-                    "Shared intrinsic catalogue",
-                    str(args.intrinsic_catalog or "paired_intrinsic_population.csv"),
-                )
-            )
-        if args.pairing_mode == "reuse" and args.distance_mode == "fixed":
-            args.catalog_distance_policy = prompt_choice(
-                "Distance used when reusing the intrinsic catalogue",
-                [("current-fixed", "Use the fixed distance entered for this run"),
-                 ("stored", "Keep the distance and redshift stored in the catalogue")],
-                args.catalog_distance_policy,
-            )
-        args.n_realizations = int(
-            prompt_text(
-                "Number of independent population realizations",
-                str(args.n_realizations),
-            )
-        )
-        seed_text = prompt_text(
+    args.opsim_cache_size = int(prompt_text(
+        "OpSim field tables kept in memory",
+        str(args.opsim_cache_size),
+    ))
+    args.surrogate_batch_size = int(prompt_text(
+        "Requested surrogate batch size (automatic validated fallback)",
+        str(args.surrogate_batch_size),
+    ))
+    args.plot_mode = prompt_choice(
+        "Diagnostic light-curve plots",
+        [
+            ("none", "Do not create PNG plots"),
             (
-                "Master intrinsic-population seed (integer)"
-                if args.n_realizations > 1
-                else "Intrinsic-population seed (integer)"
-                if args.pairing_mode != "none"
-                else "Random seed (integer)"
+                "saved",
+                "Plot each saved synthetic and/or LSST-like product",
             ),
-            str(args.seed if args.seed is not None else secrets.randbits(32)),
+        ],
+        args.plot_mode,
+    )
+    if args.plot_mode == "saved":
+        args.max_plot_events = int(
+            prompt_text(
+                "Maximum saved events plotted per product (0 = all)",
+                str(args.max_plot_events),
+            )
         )
-        args.seed = int(seed_text)
-        if args.pairing_mode != "none":
-            default_sky_seed = derive_sky_seed(
-                args.seed,
-                args.galactic_latitude_mode,
-                args.galactic_latitude_threshold_deg,
-                args.galactic_latitude_max_deg,
+    args.distance_mode = prompt_choice(
+        "Luminosity-distance treatment",
+        [
+            ("comoving-volume", "Direct draw uniform in comoving volume"),
+            ("fixed", "Fixed luminosity distance"),
+        ],
+        args.distance_mode,
+    )
+    if args.distance_mode == "fixed":
+        args.fixed_distance_mpc = float(
+            prompt_text("Fixed luminosity distance [Mpc]", str(args.fixed_distance_mpc))
+        )
+    if args.model == "Bu2026_MLP":
+        args.numerical_floor_absolute_mag = float(
+            prompt_text(
+                "Bu2026 numerical floor in absolute magnitude",
+                str(args.numerical_floor_absolute_mag),
             )
-            args.sky_seed = int(
-                prompt_text(
-                    "Sky/noise seed (same = paired sky; different = new sky)",
-                    str(
-                        args.sky_seed
-                        if args.sky_seed is not None
-                        else default_sky_seed
-                    ),
-                )
+        )
+        args.numerical_floor_margin_mag = float(
+            prompt_text(
+                "Safety margin before numerical floor [mag]",
+                str(args.numerical_floor_margin_mag),
             )
+        )
+    args.opsim_dir = Path(prompt_text("OpSim export directory", str(args.opsim_dir)))
+    args.galactic_latitude_mode = prompt_choice(
+        "OpSim-field Galactic-latitude selection",
+        [
+            ("all", "All available Galactic latitudes"),
+            ("high", "High latitude: |b| >= threshold"),
+            ("low", "Low latitude: |b| < threshold"),
+            ("bin", "Disjoint interval: min <= |b| < max"),
+        ],
+        args.galactic_latitude_mode,
+    )
+    if args.galactic_latitude_mode in {"low", "high"}:
+        args.galactic_latitude_threshold_deg = float(
+            prompt_text(
+                "Absolute Galactic-latitude threshold [deg]",
+                str(args.galactic_latitude_threshold_deg),
+            )
+        )
+    elif args.galactic_latitude_mode == "bin":
+        args.galactic_latitude_min_deg = float(
+            prompt_text(
+                "Inclusive lower |b| edge [deg]",
+                str(args.galactic_latitude_min_deg),
+            )
+        )
+        args.galactic_latitude_max_deg = float(
+            prompt_text(
+                "Exclusive upper |b| edge [deg]",
+                str(args.galactic_latitude_max_deg),
+            )
+        )
+    if args.output_mode in {
+        "all-synthetic-lsstlike-detected",
+        "detected-pairs",
+        "lsstlike-detected",
+    }:
+        args.min_detections = int(
+            prompt_text("Minimum number of LSST-like detections", str(args.min_detections))
+        )
+    if args.boom_synthetic_export and args.boom_target_nonempty_events:
+        args.n_samples = int(prompt_text(
+            "Number of non-empty BOOM light curves to export",
+            str(args.n_samples),
+        ))
+        print(
+            "Additional physical KNe will be injected when an event has no "
+            "detection after the m5 cut."
+        )
+    else:
+        args.n_samples = int(prompt_text(
+            "Number of simulated events", str(args.n_samples)
+        ))
+    args.pairing_mode = prompt_choice(
+        "Intrinsic-population pairing",
+        [
+            (
+                "none",
+                "Independent population (legacy behaviour)",
+            ),
+            (
+                "create",
+                "Create a reusable intrinsic KNe catalogue",
+            ),
+            (
+                "reuse",
+                "Reuse an intrinsic KNe catalogue for a paired sky run",
+            ),
+        ],
+        args.pairing_mode,
+    )
+    if args.pairing_mode != "none":
+        args.intrinsic_catalog = Path(
+            prompt_text(
+                "Shared intrinsic catalogue",
+                str(args.intrinsic_catalog or "paired_intrinsic_population.csv"),
+            )
+        )
+    if args.pairing_mode == "reuse" and args.distance_mode == "fixed":
+        args.catalog_distance_policy = prompt_choice(
+            "Distance used when reusing the intrinsic catalogue",
+            [("current-fixed", "Use the fixed distance entered for this run"),
+             ("stored", "Keep the distance and redshift stored in the catalogue")],
+            args.catalog_distance_policy,
+        )
+    args.n_realizations = int(
+        prompt_text(
+            "Number of independent population realizations",
+            str(args.n_realizations),
+        )
+    )
+    seed_text = prompt_text(
+        (
+            "Master intrinsic-population seed (integer)"
+            if args.n_realizations > 1
+            else "Intrinsic-population seed (integer)"
+            if args.pairing_mode != "none"
+            else "Random seed (integer)"
+        ),
+        str(args.seed if args.seed is not None else secrets.randbits(32)),
+    )
+    args.seed = int(seed_text)
+    if args.pairing_mode != "none":
+        default_sky_seed = derive_sky_seed(
+            args.seed,
+            args.galactic_latitude_mode,
+            args.galactic_latitude_threshold_deg,
+            args.galactic_latitude_max_deg,
+        )
+        args.sky_seed = int(
+            prompt_text(
+                "Sky/noise seed (same = paired sky; different = new sky)",
+                str(
+                    args.sky_seed
+                    if args.sky_seed is not None
+                    else default_sky_seed
+                ),
+            )
+        )
     if args.n_samples <= 0:
         raise ValueError("--n-samples must be positive")
+    if args.boom_max_injection_factor < 1:
+        raise ValueError("boom_max_injection_factor must be >= 1")
+    if args.boom_export_mode not in {"complete", "m5-detected"}:
+        raise ValueError("boom_export_mode must be complete or m5-detected")
+    if (
+        args.boom_synthetic_export
+        and args.boom_export_mode == "m5-detected"
+        and args.boom_target_nonempty_events
+        and args.pairing_mode != "none"
+    ):
+        raise ValueError(
+            "An exact non-empty BOOM target is incompatible with intrinsic "
+            "catalogue pairing because m5 selection would change catalogue "
+            "membership. Use independent-population mode for the BOOM sample."
+        )
     if args.n_realizations <= 0:
         raise ValueError("--n-realizations must be positive")
     if args.n_realizations > 1 and args.pairing_mode != "none":
@@ -1406,57 +1622,16 @@ BAND_TO_FIESTA = {
 }
 
 
-
-def get_rubin_dust_coefficients() -> dict[str, float]:
-    """Return one Rubin extinction coefficient for each ``ugrizy`` band.
-
-    ``DustValues.r_x`` is supplied by ``rubin_sim``.  The returned mapping is
-    used in ``A_band = R_band * E(B-V)``.  Both short keys (``g``) and prefixed
-    keys (``lsstg``) are accepted to remain compatible with rubin_sim releases;
-    a missing band is treated as a configuration error rather than silently
-    assigning an approximate coefficient.
-    """
-    dust = DustValues()
-    raw = getattr(dust, "r_x", None)
-    if raw is None:
-        raise RuntimeError("DustValues() has no attribute r_x")
-    out = {}
-    for b in "ugrizy":
-        if b in raw:
-            out[b] = float(raw[b])
-        elif f"lsst{b}" in raw:
-            out[b] = float(raw[f"lsst{b}"])
-        else:
-            raise KeyError(f"Could not find Rubin dust coefficient for band {b!r} in DustValues.r_x keys={list(raw)}")
-    return out
-
-
-def ensure_mw_extinction_columns(visits: pd.DataFrame) -> pd.DataFrame:
-    """Ensure visit table has ebv_mw, per-row A_mw, and per-band A_*_mw columns.
-
-    Compact OpSim exports recover ``ebv_mw`` and per-band metadata from
-    ``opsim_fields_index.csv`` before this helper is called. Legacy verbose
-    visit files remain supported. Missing A values are derived from E(B-V)
-    and Rubin coefficients when possible.
-    """
-    return _ensure_mw_extinction_columns(visits, DUST_R_X)
-
-
-def get_event_mw_extinction_summary(visits: pd.DataFrame) -> dict[str, object]:
-    """Summarize E(B-V)_MW and Rubin A_band values for one selected field/event."""
-    return _get_event_mw_extinction_summary(visits, DUST_R_X)
-
 # Standard Rubin throughput curves and detector/exposure parameters used by
 # the m5-based photometric-noise model. They are initialized only for an
 # actual run so importing this module cannot start Rubin data loading.
 BP = None
 PHOT = None
-DUST_R_X = None
 
 
 def initialize_rubin_photometry() -> None:
     """Initialize the shared Rubin photometric objects for one process."""
-    global BP, PHOT, DUST_R_X
+    global BP, PHOT
     if BP is not None:
         return
     BP = rubin_bandpasses()
@@ -1464,9 +1639,6 @@ def initialize_rubin_photometry() -> None:
         band: PhotometricParameters(bandpass=band)
         for band in "ugrizy"
     }
-    DUST_R_X = get_rubin_dust_coefficients()
-    DUST_R_X_BY_SYSTEM["lsst"] = DUST_R_X
-    print("Rubin MW dust coefficients R_x =", DUST_R_X)
 
 
 def plot_synthetic_only(times, mag_dict, filters, filter_colors, mag_lim, outfile):
@@ -1514,7 +1686,6 @@ def plot_numerical_floor_diagnostic(
     )
 
 
-
 def plot_synthetic_and_lsstlike(times, mag_dict, obs, filters, filter_colors, mag_lim, outfile):
     """Overlay synthetic and LSST-like products for one event."""
     return _plot_synthetic_and_lsstlike(
@@ -1549,7 +1720,6 @@ def plot_lsstlike_only(
     )
 
 
-
 def apply_lsst_realism_to_fiesta(
     times_model,
     mag_model_dict,
@@ -1558,8 +1728,6 @@ def apply_lsst_realism_to_fiesta(
     det_snr=5.0,
     mag_truth_cap=None,
     rng=None,
-    *,
-    apply_mw_extinction_to_lsst_realism,
 ):
 
     """Project a dense FIESTA light curve through an OpSim visit sequence.
@@ -1575,8 +1743,7 @@ def apply_lsst_realism_to_fiesta(
     visits_df
         OpSim visit table. The compact ``MJD``, ``band``, ``m5`` schema and the
         legacy ``observationStartMJD``, ``band``, ``fiveSigmaDepth`` schema are
-        accepted. MW-extinction metadata must already have been restored from
-        ``opsim_fields_index.csv`` when absent from the visit table.
+        accepted.
     t0_mjd
         Merger time in MJD.  If omitted, the first visit time is used.
     det_snr
@@ -1591,7 +1758,7 @@ def apply_lsst_realism_to_fiesta(
     -------
     pandas.DataFrame
         One row per post-merger OpSim visit.  The table retains OpSim metadata
-        and adds ``t_days``, intrinsic/extincted truth, expected SNR,
+        and adds ``t_days``, model magnitude, expected SNR,
         ``mag_err``, realized SNR, ``detected``, ``mag_obs``, and ``mag_ulim``.
 
     Notes
@@ -1610,7 +1777,6 @@ def apply_lsst_realism_to_fiesta(
     # m5 is the per-visit 5-sigma point-source depth.  It compresses sky
     # brightness, seeing, airmass, and other observing conditions into one value.
     v = v.rename(columns={"fiveSigmaDepth": "m5"})
-    v = ensure_mw_extinction_columns(v)
 
     if t0_mjd is None:
         t0_mjd = float(v["observationStartMJD"].min())
@@ -1642,21 +1808,7 @@ def apply_lsst_realism_to_fiesta(
     if mag_truth_cap is not None:
         mag_true[mag_true > float(mag_truth_cap)] = np.nan
 
-    # Always keep the raw model magnitude. In compact-extincted mode, also
-    # save the Milky-Way-extincted truth and use it for LSST realism:
-    #   m_ext = m_no_mw + A_band.
-    v["mag_true_no_mw"] = mag_true
-    A_mw = pd.to_numeric(v.get("A_mw", np.nan), errors="coerce").to_numpy(float)
-    mag_true_mw = mag_true + A_mw
-    v["mw_extinction_applied_to_snr"] = bool(
-        apply_mw_extinction_to_lsst_realism
-    )
-
-    if apply_mw_extinction_to_lsst_realism:
-        v["mag_true_mw_extincted"] = mag_true_mw
-        v["mag_true"] = mag_true_mw
-    else:
-        v["mag_true"] = mag_true
+    v["mag_true"] = mag_true
 
     snr_exp = np.full(len(v), np.nan, dtype=float)
     mag_err = np.full(len(v), np.nan, dtype=float)
@@ -1766,13 +1918,6 @@ def apply_synthetic_m5_median_cut(
 ) -> pd.DataFrame:
     """Apply the inclusive median-depth cut and rebuild identifiers."""
     return _apply_synthetic_m5_median_cut(measurements, objectid, m5_medians)
-
-
-def keep_only_mw_extincted_synthetic_magnitude(
-    measurements: pd.DataFrame,
-) -> pd.DataFrame:
-    """Store the MW-extincted magnitude as the public magnitude column."""
-    return _keep_only_mw_extincted_synthetic_magnitude(measurements)
 
 
 class UniformComovingVolumeSampler:
@@ -1912,58 +2057,6 @@ FILTER_SYSTEM_CONFIG = {
     },
 }
 
-# Schlafly & Finkbeiner (2011), R_V=3.1 coefficients commonly used for PS1.
-# Rubin coefficients continue to come directly from rubin_sim.DustValues, so
-# each photometric system is extinguished in its own passbands.
-PS1_DUST_R_X = {
-    "g": 3.172,
-    "r": 2.271,
-    "i": 1.682,
-    "z": 1.322,
-    "y": 1.087,
-}
-
-# Broad-band R_x = A_x/E(B-V) coefficients adopted for ZTF.  As for every
-# broad-band coefficient, the exact value depends weakly on the assumed source
-# spectrum and extinction law.  The values used by a run are therefore written
-# explicitly to summary.csv and run_info.txt.
-ZTF_DUST_R_X = {
-    "g": 3.303,
-    "r": 2.285,
-    "i": 1.698,
-}
-
-DUST_R_X_BY_SYSTEM = {
-    "lsst": DUST_R_X,
-    "ps1": PS1_DUST_R_X,
-    "ztf": ZTF_DUST_R_X,
-}
-
-
-def add_multisystem_extinction_summary(
-    event_summary: dict[str, object],
-    filter_systems,
-) -> dict[str, object]:
-    """Add unambiguous per-system ``R`` and ``A`` values for one event.
-
-    The OpSim field index supplies ``E(B-V)`` and legacy Rubin ``A_g_mw``-like
-    columns.  Paired products additionally store ``A_lsst_g_mw`` and
-    ``A_ps1_g_mw`` or ``A_ztf_g_mw`` in ``summary.csv``. The long light-curve
-    table therefore
-    needs only ``photometric_system``, ``band`` and the already extinguished
-    magnitude; extinction metadata is not repeated at every epoch.
-    """
-    out = dict(event_summary)
-    ebv = float(out.get("ebv_mw", np.nan))
-    for system in filter_systems:
-        for band, coefficient in DUST_R_X_BY_SYSTEM[system].items():
-            coefficient = float(coefficient)
-            out[f"R_{system}_{band}_mw"] = coefficient
-            out[f"A_{system}_{band}_mw"] = (
-                coefficient * ebv if np.isfinite(ebv) else np.nan
-            )
-    return out
-
 BASE_BAND_COLORS = {
     "u": "#6a3d9a",
     "g": "#33a02c",
@@ -1986,8 +2079,8 @@ def derive_sky_seed(
     )
 
 
-# Compatibility exports: terminal configuration lives in a lightweight module
-# and importing it performs no model or Rubin initialization.
+# Runtime configuration and model initialization are explicit; importing this
+# module never starts a population calculation.
 
 
 def realization_seed_list(args: argparse.Namespace) -> list[int]:
@@ -2098,6 +2191,21 @@ def generate_realization_batch(args: argparse.Namespace, seeds: list[int]) -> Pa
 
 def run_generation(RUNTIME: argparse.Namespace) -> None:
     """Execute one fully configured population generation without prompting."""
+    SAVE_BOOM_SYNTHETIC = bool(getattr(RUNTIME, "boom_synthetic_export", False))
+    BOOM_EXPORT_MODE = str(getattr(RUNTIME, "boom_export_mode", "complete"))
+    BOOM_M5 = dict(getattr(RUNTIME, "boom_m5_by_band", BOOM_M5_DEFAULT))
+    BOOM_SIGMA_SYS = float(getattr(RUNTIME, "boom_sigma_sys", 0.005))
+    BOOM_SHIFT_SECONDS = float(getattr(RUNTIME, "boom_duplicate_shift_seconds", 30.0))
+    if SAVE_BOOM_SYNTHETIC:
+        RUNTIME.synthetic_depth_cut = "none"
+        if RUNTIME.filter_system in {"ps1", "ztf"} or RUNTIME.output_mode == "lsstlike-detected":
+            raise ValueError("BOOM synthetic export requires an LSST synthetic product")
+        if any(b not in BOOM_M5 or not np.isfinite(BOOM_M5[b]) for b in "ugrizy"):
+            raise ValueError("Provide a finite BOOM m5 for every LSST band")
+        synthetic_to_boom_csv(
+            pd.DataFrame(), 0, BOOM_M5, BOOM_SIGMA_SYS,
+            BOOM_SHIFT_SECONDS, BOOM_EXPORT_MODE,
+        )
     missing = [
         name
         for name, dependency in (
@@ -2140,7 +2248,6 @@ def run_generation(RUNTIME: argparse.Namespace) -> None:
     }
     print(f"Photometric filter system: {FILTER_SYSTEM_CONFIG[FILTER_SYSTEM]['label']}")
     print(f"Using filters: {FILTERS}")
-
 
 
     # =============================================================================
@@ -2200,18 +2307,6 @@ def run_generation(RUNTIME: argparse.Namespace) -> None:
     DET_SNR = 5.0
     LSSTLIKE_DAYS_AFTER_LAST_DETECTION = 10.0
 
-    # Milky Way foreground extinction handling.
-    # get_opsim_baseline.py stores ebv_mw and A_band once per field in the field index.
-    # compact-extincted is a coherent physical mode: dust is applied to the truth
-    # magnitude before LSST-like SNR, noise and detection are calculated.
-    APPLY_MW_EXTINCTION_TO_LSST_REALISM = SYNTHETIC_SCHEMA == "compact-extincted"
-    # The currently available foreground-extinction coefficients below are Rubin
-    # coefficients. Do not apply them to PS1 filters. In compact mode, A_band is
-    # stored once per event in summary.csv and no redundant extincted columns are
-    # written. For extinction-corrected observations, compare to intrinsic columns.
-    SAVE_MW_EXTINCTED_SYNTHETIC_COLUMNS = (
-        SYNTHETIC_SCHEMA == "compact-extincted"
-    )
 
     # t0 is the merger time in absolute MJD.
     # We convert OpSim visit times to "time since trigger" via t_days = MJD - t0.
@@ -2250,6 +2345,17 @@ def run_generation(RUNTIME: argparse.Namespace) -> None:
 
     # Simulation size
     N_SAMPLES = int(RUNTIME.n_samples)
+    BOOM_TARGET_NONEMPTY = bool(
+        RUNTIME.boom_synthetic_export
+        and RUNTIME.boom_export_mode == "m5-detected"
+        and RUNTIME.boom_target_nonempty_events
+    )
+    BOOM_MAX_INJECTION_FACTOR = float(RUNTIME.boom_max_injection_factor)
+    MAX_INJECTED_EVENTS = (
+        max(N_SAMPLES, int(np.ceil(N_SAMPLES * BOOM_MAX_INJECTION_FACTOR)))
+        if BOOM_TARGET_NONEMPTY
+        else N_SAMPLES
+    )
 
     # Paired-population design
     # ------------------------
@@ -2514,7 +2620,16 @@ def run_generation(RUNTIME: argparse.Namespace) -> None:
 
     fixed_params = {}
 
-    print(f"Generating {N_SAMPLES} lightcurves; physical parameter source={PARAMETER_SOURCE}...")
+    if BOOM_TARGET_NONEMPTY:
+        print(
+            f"Generating until {N_SAMPLES} non-empty BOOM light curves are "
+            f"available; physical parameter source={PARAMETER_SOURCE}..."
+        )
+    else:
+        print(
+            f"Generating {N_SAMPLES} lightcurves; "
+            f"physical parameter source={PARAMETER_SOURCE}..."
+        )
     print(f"Output mode: {OUTPUT_MODE}")
     print(f"Scientific table storage: {STORAGE_FORMAT}")
     print("Synthetic table layout: long-format (one row per time and band)")
@@ -2569,6 +2684,11 @@ def run_generation(RUNTIME: argparse.Namespace) -> None:
         "Individual CSV eligibility:",
         f"{len(CSV_EVENT_INDICES):,}/{N_SAMPLES:,} injected event IDs",
     )
+    if BOOM_TARGET_NONEMPTY:
+        print(
+            f"BOOM target: {N_SAMPLES:,} non-empty light curves; rejected "
+            f"injections are replaced (safety limit={MAX_INJECTED_EVENTS:,} injections)."
+        )
 
     # FIESTA posterior.npz stores one named 1-D array per parameter. Sampling a
     # common index preserves all posterior correlations. Systematic-error arrays in
@@ -2597,7 +2717,6 @@ def run_generation(RUNTIME: argparse.Namespace) -> None:
     key, subkey0 = jax.random.split(key)
     base_sample = prior.sample(subkey0, 1)
     base_params = {name: float(base_sample[name][0]) for name in prior.naming}
-
 
 
     # Optionally force one intrinsic parameter to a fixed value.  Inclination is
@@ -2662,11 +2781,30 @@ def run_generation(RUNTIME: argparse.Namespace) -> None:
                 raise RuntimeError(
                     "Posterior rows are unavailable while drawing a new catalogue"
                 )
-            posterior_index = int(POSTERIOR_INDICES[event_index])
-            params = dict(POSTERIOR_ROWS[event_index])
+            if event_index < len(POSTERIOR_ROWS):
+                posterior_index = int(POSTERIOR_INDICES[event_index])
+                params = dict(POSTERIOR_ROWS[event_index])
+            elif BOOM_TARGET_NONEMPTY:
+                # Refill draws are deterministic per injected event and preserve
+                # correlations by selecting one complete posterior row.
+                refill_rng = np.random.default_rng(
+                    (int(seed) ^ 0x424F4F4D) + int(event_index)
+                )
+                posterior_index = int(refill_rng.integers(0, n_posterior))
+                params = {
+                    name: float(values[posterior_index])
+                    for name, values in posterior_arrays.items()
+                }
+            else:
+                raise IndexError("Posterior event index exceeds the requested population")
             if POSTERIOR_INCLINATION == "isotropic":
                 params.pop("inclination_EM", None)
         elif VARY_ONE_PARAM:
+            if event_index >= len(vary_values):
+                raise RuntimeError(
+                    "Exact non-empty BOOM targeting is unavailable for the "
+                    "internal one-parameter sensitivity scan"
+                )
             params = dict(base_params)
             params[VARY_PARAM] = float(vary_values[event_index])
         else:
@@ -2894,6 +3032,10 @@ def run_generation(RUNTIME: argparse.Namespace) -> None:
     outdir = run_dir / "csv"
     parquetdir = run_dir / "parquet"
     pngdir = run_dir / "png"
+    boomdir = run_dir / "boom_input"
+    boom_summary_rows = []
+    if SAVE_BOOM_SYNTHETIC:
+        boomdir.mkdir(parents=True, exist_ok=False)
 
     if SAVE_CSV:
         outdir.mkdir(parents=True, exist_ok=False)
@@ -2967,9 +3109,7 @@ def run_generation(RUNTIME: argparse.Namespace) -> None:
         "synthetic_depth_cut": SYNTHETIC_DEPTH_CUT,
         "synthetic_m5_medians": SYNTHETIC_M5_MEDIANS or None,
         "synthetic_m5_medians_source": SYNTHETIC_M5_MEDIANS_SOURCE,
-        "synthetic_magnitude_saved_in_mag": (
-            "mw_extincted" if SAVE_MW_EXTINCTED_SYNTHETIC_COLUMNS else "intrinsic"
-        ),
+        "synthetic_magnitude_saved_in_mag": "model",
         "synthetic_depth_comparison_column": (
             "mag" if SYNTHETIC_DEPTH_CUT == "m5-median" else None
         ),
@@ -2986,11 +3126,15 @@ def run_generation(RUNTIME: argparse.Namespace) -> None:
             "M_floor - margin + 5*log10(D_L/Mpc) + 25"
             if APPLY_NUMERICAL_SUPPORT_CUT else None
         ),
-        "numerical_floor_cut_applied_before_mw_and_m5": (
+        "numerical_floor_cut_applied_before_m5": (
             APPLY_NUMERICAL_SUPPORT_CUT
         ),
         "plot_mode": RUNTIME.plot_mode,
         "max_plot_events_per_product": MAX_PLOT_EVENTS,
+        "requested_population_counting_unit": (
+            "nonempty_boom_lightcurves"
+            if BOOM_TARGET_NONEMPTY else "injected_physical_events"
+        ),
         "minimum_detections": (
             MIN_DETECTIONS
             if APPLY_LSST_REALISM
@@ -3006,6 +3150,11 @@ def run_generation(RUNTIME: argparse.Namespace) -> None:
             "sky_noise_seed": sky_seed,
             "name": RUN_NAME,
             "n_events": N_SAMPLES,
+            "n_events_requested": N_SAMPLES,
+            "requested_population_counting_unit": (
+                "nonempty_boom_lightcurves"
+                if BOOM_TARGET_NONEMPTY else "injected_physical_events"
+            ),
         },
         "model": {
             "surrogate": model.name,
@@ -3021,6 +3170,54 @@ def run_generation(RUNTIME: argparse.Namespace) -> None:
         "distance_and_orientation": distance_info,
         "output": output_info,
     }
+
+    if SAVE_BOOM_SYNTHETIC:
+        run_info_sections["boom_synthetic_export"] = {
+            "directory": str(boomdir),
+            "export_mode": BOOM_EXPORT_MODE,
+            "m5_by_band": BOOM_M5,
+            "gamma_by_band": BOOM_GAMMA,
+            "sigma_sys_mag": BOOM_SIGMA_SYS,
+            "selection_rule": (
+                "every finite model point; no m5 selection"
+                if BOOM_EXPORT_MODE == "complete"
+                else "finite model mag <= m5[band]"
+            ),
+            "error_model": (
+                "Ivezic et al. 2019 equations 4-5; m5 affects uncertainty "
+                "but is not a selection threshold"
+                if BOOM_EXPORT_MODE == "complete"
+                else "Ivezic et al. 2019 equations 4-5"
+            ),
+            "nondetection_encoding": (
+                "not applicable; depth selection disabled"
+                if BOOM_EXPORT_MODE == "complete"
+                else "not exported to BOOM; retained as synthetic magnitudes for envelope analysis"
+            ),
+            "random_noise_added": False,
+            "cadence": "synthetic grid; assumed observations, NOT actual OpSim visits",
+            "duplicate_shift_seconds": BOOM_SHIFT_SECONDS,
+            "event_selection": (
+                "inject exactly n_events_requested physical KNe and export every "
+                "event with finite numerical model support"
+                if BOOM_EXPORT_MODE == "complete"
+                else "inject until exactly n_events_requested synthetic products "
+                "have >=1 detection; conditional visibility-selected benchmark"
+                if BOOM_TARGET_NONEMPTY
+                else "inject exactly n_events_requested physical KNe; export "
+                "the subset with >=1 detection"
+            ),
+            "target_nonempty_lightcurves": (
+                N_SAMPLES if BOOM_TARGET_NONEMPTY else None
+            ),
+            "maximum_injection_factor": (
+                BOOM_MAX_INJECTION_FACTOR if BOOM_TARGET_NONEMPTY else None
+            ),
+            "numerical_support": "invalid/removed model points are NOT upper limits",
+            "reference": (
+                "Ivezic et al. 2019, ApJ 873, 111, equations 4-5, Table 2"
+            ),
+        }
 
     if USE_OPSIM_CONTEXT:
         run_info_sections["opsim_context"] = {
@@ -3040,24 +3237,11 @@ def run_generation(RUNTIME: argparse.Namespace) -> None:
     if APPLY_LSST_REALISM:
         run_info_sections["lsstlike_observations"] = {
             "detection_snr": DET_SNR,
-            "mw_extinction_applied": APPLY_MW_EXTINCTION_TO_LSST_REALISM,
             "window_anchor": "last_detection",
             "days_after_last_detection": LSSTLIKE_DAYS_AFTER_LAST_DETECTION,
             "rows_outside_finite_fiesta_truth_removed": True,
         }
 
-    if SAVE_MW_EXTINCTED_SYNTHETIC_COLUMNS:
-        run_info_sections["foreground_extinction"] = {
-            "relation": "A_band = R_band * E(B-V)",
-            "rubin_coefficients": DUST_R_X,
-            "ps1_coefficients_schlafly_finkbeiner_2011": (
-                PS1_DUST_R_X if "ps1" in FILTER_SYSTEMS else None
-            ),
-            "ztf_coefficients_rv3p1": (
-                ZTF_DUST_R_X if "ztf" in FILTER_SYSTEMS else None
-            ),
-            "summary_column_convention": "A_<system>_<band>_mw",
-        }
 
     if VARY_ONE_PARAM:
         run_info_sections["sensitivity_scan"] = {
@@ -3075,9 +3259,12 @@ def run_generation(RUNTIME: argparse.Namespace) -> None:
     )
 
     # =============================================================================
-    # MAIN LOOP: generate N_SAMPLES events
+    # MAIN LOOP: generate fixed-N injections or refill until the BOOM target
     # =============================================================================
 
+    # -------------------------------------------------------------------------
+    # OPTIMIZATION: OpSim cache (copies preserve event-level independence)
+    # -------------------------------------------------------------------------
     class OpsimVisitCache:
         """Small least-recently-used cache of fully prepared OpSim field tables.
 
@@ -3107,7 +3294,6 @@ def run_generation(RUNTIME: argparse.Namespace) -> None:
                 Path(path),
                 OPSIM_FIELDS_INDEX,
             )
-            table = ensure_mw_extinction_columns(table)
             if self.maxsize > 0:
                 self._tables[cache_key] = table
                 while len(self._tables) > self.maxsize:
@@ -3206,6 +3392,9 @@ def run_generation(RUNTIME: argparse.Namespace) -> None:
         }
 
 
+    # -------------------------------------------------------------------------
+    # OPTIMIZATION: validated surrogate batching, with scalar fallback
+    # -------------------------------------------------------------------------
     def _split_batched_array(values, batch_size, name, allow_shared=False):
         """Normalize a possible batch-first or batch-last surrogate array."""
         array = np.asarray(values)
@@ -3342,16 +3531,29 @@ def run_generation(RUNTIME: argparse.Namespace) -> None:
 
 
     def iter_event_predictions():
-        """Yield prepared event contexts and raw predictions in bounded batches."""
-        for start in range(0, N_SAMPLES, SURROGATE_BATCH_SIZE):
-            stop = min(start + SURROGATE_BATCH_SIZE, N_SAMPLES)
+        """Yield predictions until the injected or non-empty BOOM target is met."""
+        start = 0
+        while start < MAX_INJECTED_EVENTS:
+            if BOOM_TARGET_NONEMPTY and len(boom_summary_rows) >= N_SAMPLES:
+                return
+            stop = min(start + SURROGATE_BATCH_SIZE, MAX_INJECTED_EVENTS)
             contexts = [
                 prepare_event_parameter_context(event_index)
                 for event_index in range(start, stop)
             ]
             predictions = SURROGATE_PREDICTOR.predict_contexts(contexts)
             for context, prediction in zip(contexts, predictions):
+                if BOOM_TARGET_NONEMPTY and len(boom_summary_rows) >= N_SAMPLES:
+                    return
                 yield context, prediction
+            start = stop
+        if BOOM_TARGET_NONEMPTY and len(boom_summary_rows) < N_SAMPLES:
+            raise RuntimeError(
+                "Could not reach the requested non-empty BOOM population: "
+                f"{len(boom_summary_rows):,}/{N_SAMPLES:,} accepted after "
+                f"{MAX_INJECTED_EVENTS:,} injected events. Increase "
+                "boom_max_injection_factor or review the m5/distance settings."
+            )
 
 
     OPSIM_VISIT_CACHE = OpsimVisitCache(OPSIM_CACHE_SIZE)
@@ -3375,7 +3577,7 @@ def run_generation(RUNTIME: argparse.Namespace) -> None:
         posterior_index,
         field_idx,
         t0_mjd,
-        event_mw_extinction,
+        field_metadata,
         detection_evaluated,
         n_detected,
         t_first_det_days,
@@ -3439,38 +3641,24 @@ def run_generation(RUNTIME: argparse.Namespace) -> None:
             "Ye_wind": float(params.get("Ye_wind", np.nan)),
             "phi_deg": float(params.get("phi", np.nan)),
             "KNtheta_deg": float(np.degrees(params["inclination_EM"])),
-            "ebv_mw": float(event_mw_extinction.get("ebv_mw", np.nan)),
-            "fieldRA": float(event_mw_extinction.get("fieldRA", np.nan)),
-            "fieldDec": float(event_mw_extinction.get("fieldDec", np.nan)),
+            "fieldRA": float(field_metadata.get("fieldRA", np.nan)),
+            "fieldDec": float(field_metadata.get("fieldDec", np.nan)),
             "galactic_longitude_deg": float(
-                event_mw_extinction.get("galactic_longitude_deg", np.nan)
+                field_metadata.get("galactic_longitude_deg", np.nan)
             ),
             "galactic_latitude_deg": float(
-                event_mw_extinction.get("galactic_latitude_deg", np.nan)
+                field_metadata.get("galactic_latitude_deg", np.nan)
             ),
             "abs_galactic_latitude_deg": float(
-                event_mw_extinction.get("abs_galactic_latitude_deg", np.nan)
+                field_metadata.get("abs_galactic_latitude_deg", np.nan)
             ),
-            "target_name": str(event_mw_extinction.get("target_name", "")),
-            **{
-                f"R_{system}_{band}_mw": float(
-                    event_mw_extinction.get(f"R_{system}_{band}_mw", np.nan)
-                )
-                for system in FILTER_SYSTEMS
-                for band in FILTER_BY_SYSTEM[system]
-            },
-            **{
-                f"A_{system}_{band}_mw": float(
-                    event_mw_extinction.get(f"A_{system}_{band}_mw", np.nan)
-                )
-                for system in FILTER_SYSTEMS
-                for band in FILTER_BY_SYSTEM[system]
-            },
+            "target_name": str(field_metadata.get("target_name", "")),
         }
 
 
     summaries = []
     n_synthetic_plots = 0
+    n_boom_plots = 0
     n_lsstlike_plots = 0
 
     generation_started = time.perf_counter()
@@ -3501,19 +3689,11 @@ def run_generation(RUNTIME: argparse.Namespace) -> None:
         field_idx = np.nan
         t0 = np.nan
         visits = None
-        event_mw_extinction = {
-            "ebv_mw": np.nan,
+        field_metadata = {
             "fieldRA": np.nan,
             "fieldDec": np.nan,
             "target_name": "",
         }
-        for _band in "ugrizy":
-            event_mw_extinction[f"R_{_band}_mw"] = float(DUST_R_X[_band])
-            event_mw_extinction[f"A_{_band}_mw"] = np.nan
-        event_mw_extinction = add_multisystem_extinction_summary(
-            event_mw_extinction,
-            filter_systems=FILTER_SYSTEMS,
-        )
 
         detection_evaluated = False
         n_det = 0
@@ -3523,7 +3703,14 @@ def run_generation(RUNTIME: argparse.Namespace) -> None:
         lsstlike_window_anchor = np.nan
         lsstlike_window_end = np.nan
         lsstlike_window_anchor_found = False
-        csv_selected = i in CSV_EVENT_INDICES
+        csv_selected = (
+            i in CSV_EVENT_INDICES
+            or (
+                BOOM_TARGET_NONEMPTY
+                and SAVE_CSV
+                and CSV_SAMPLE_SIZE == 0
+            )
+        )
         save_synthetic_csv = OUTPUT_MODE in {
             "all-synthetic-lsstlike-detected",
             "synthetic-mjd",
@@ -3537,37 +3724,16 @@ def run_generation(RUNTIME: argparse.Namespace) -> None:
             selected_position = int(rng_i.integers(0, len(ELIGIBLE_OPSIM_FILES)))
             field_idx, selected_opsim_file = ELIGIBLE_OPSIM_FILES[selected_position]
             visits = OPSIM_VISIT_CACHE.get(selected_opsim_file)
-            event_mw_extinction = add_multisystem_extinction_summary(
-                get_event_mw_extinction_summary(visits),
-                filter_systems=FILTER_SYSTEMS,
-            )
-            ra_event = float(event_mw_extinction.get("fieldRA", np.nan))
-            dec_event = float(event_mw_extinction.get("fieldDec", np.nan))
+            field_metadata = summarize_field(visits)
+            ra_event = float(field_metadata.get("fieldRA", np.nan))
+            dec_event = float(field_metadata.get("fieldDec", np.nan))
             if np.isfinite(ra_event) and np.isfinite(dec_event):
                 gal_event = SkyCoord(
                     ra=ra_event * u.deg, dec=dec_event * u.deg, frame="icrs"
                 ).galactic
-                event_mw_extinction["galactic_longitude_deg"] = float(gal_event.l.deg)
-                event_mw_extinction["galactic_latitude_deg"] = float(gal_event.b.deg)
-                event_mw_extinction["abs_galactic_latitude_deg"] = abs(float(gal_event.b.deg))
-            if SYNTHETIC_SCHEMA == "compact-extincted":
-                missing_extinction = [
-                    f"{system}:{band}"
-                    for system in FILTER_SYSTEMS
-                    for band in FILTER_BY_SYSTEM[system]
-                    if not np.isfinite(
-                        event_mw_extinction.get(
-                            f"A_{system}_{band}_mw", np.nan
-                        )
-                    )
-                ]
-                if missing_extinction:
-                    raise ValueError(
-                        "compact-extincted requires finite Milky-Way extinction "
-                        f"for every selected band; missing A_band for {missing_extinction} "
-                        f"for {selected_opsim_file}. Use an OpSim export whose "
-                        "opsim_fields_index.csv contains ebv_mw/A_band columns."
-                    )
+                field_metadata["galactic_longitude_deg"] = float(gal_event.l.deg)
+                field_metadata["galactic_latitude_deg"] = float(gal_event.b.deg)
+                field_metadata["abs_galactic_latitude_deg"] = abs(float(gal_event.b.deg))
 
             mjd_values = pd.to_numeric(visits["observationStartMJD"], errors="coerce").to_numpy(float)
             mjd_values = mjd_values[np.isfinite(mjd_values)]
@@ -3587,8 +3753,8 @@ def run_generation(RUNTIME: argparse.Namespace) -> None:
                 "detected-pairs",
                 "synthetic-mjd",
             }:
-                ra = float(event_mw_extinction.get("fieldRA", np.nan))
-                dec = float(event_mw_extinction.get("fieldDec", np.nan))
+                ra = float(field_metadata.get("fieldRA", np.nan))
+                dec = float(field_metadata.get("fieldDec", np.nan))
                 if not (np.isfinite(ra) and np.isfinite(dec)):
                     raise ValueError(
                         "synthetic-mjd needs fieldRA/fieldDec either in each OpSim visit CSV "
@@ -3607,9 +3773,6 @@ def run_generation(RUNTIME: argparse.Namespace) -> None:
                 det_snr=DET_SNR,
                 mag_truth_cap=event_numerical_support_cut_mag,
                 rng=rng_i,
-                apply_mw_extinction_to_lsst_realism=(
-                    APPLY_MW_EXTINCTION_TO_LSST_REALISM
-                ),
             )
             (
                 obs,
@@ -3658,7 +3821,7 @@ def run_generation(RUNTIME: argparse.Namespace) -> None:
                     posterior_index=posterior_index,
                     field_idx=field_idx,
                     t0_mjd=t0,
-                    event_mw_extinction=event_mw_extinction,
+                    field_metadata=field_metadata,
                     detection_evaluated=detection_evaluated,
                     n_detected=n_det,
                     t_first_det_days=t_first,
@@ -3708,7 +3871,7 @@ def run_generation(RUNTIME: argparse.Namespace) -> None:
                     posterior_index=posterior_index,
                     field_idx=field_idx,
                     t0_mjd=t0,
-                    event_mw_extinction=event_mw_extinction,
+                    field_metadata=field_metadata,
                     detection_evaluated=False,
                     n_detected=0,
                     t_first_det_days=np.nan,
@@ -3752,16 +3915,6 @@ def run_generation(RUNTIME: argparse.Namespace) -> None:
         for photometric_system in FILTER_SYSTEMS:
             system_filter_by_band = FILTER_BY_SYSTEM[photometric_system]
             system_filters = list(system_filter_by_band.values())
-            mw_extinction_by_band = None
-            if SAVE_MW_EXTINCTED_SYNTHETIC_COLUMNS:
-                mw_extinction_by_band = {
-                    band: float(
-                        event_mw_extinction.get(
-                            f"A_{photometric_system}_{band}_mw", np.nan
-                        )
-                    )
-                    for band in system_filter_by_band
-                }
             system_table = build_synthetic_measurement_table(
                 objectid=objectid,
                 times_days=t,
@@ -3769,13 +3922,8 @@ def run_generation(RUNTIME: argparse.Namespace) -> None:
                 filters=system_filters,
                 filter_by_band=system_filter_by_band,
                 time_mjd=time_mjd,
-                mw_extinction_by_band=mw_extinction_by_band,
                 magnitude_limit=event_numerical_support_cut_mag,
             )
-            if SAVE_MW_EXTINCTED_SYNTHETIC_COLUMNS:
-                system_table = keep_only_mw_extincted_synthetic_magnitude(
-                    system_table
-                )
             system_table.insert(2, "photometric_system", photometric_system)
             system_tables.append(system_table)
 
@@ -3789,6 +3937,80 @@ def run_generation(RUNTIME: argparse.Namespace) -> None:
                 f"{objectid}_{measurement_index}"
                 for measurement_index in range(1, len(df) + 1)
             ]
+
+        if SAVE_BOOM_SYNTHETIC and save_synthetic_csv:
+            boom_event_index = len(boom_summary_rows)
+            boom_rows = synthetic_to_boom_csv(
+                df, boom_event_index, BOOM_M5, BOOM_SIGMA_SYS,
+                BOOM_SHIFT_SECONDS, BOOM_EXPORT_MODE,
+            )
+            if BOOM_EXPORT_MODE == "complete" and boom_rows.empty:
+                raise RuntimeError(
+                    "Complete truth-level BOOM export found no finite model "
+                    f"point for injected event {i}. The run is stopped rather "
+                    "than silently producing an incomplete test population."
+                )
+            summaries[-1]["boom_n_export_rows"] = len(boom_rows)
+            summaries[-1]["boom_n_detected"] = (
+                len(boom_rows) if BOOM_EXPORT_MODE == "m5-detected" else np.nan
+            )
+            summaries[-1]["boom_csv_saved"] = not boom_rows.empty
+            summaries[-1]["boom_event_index"] = (
+                int(boom_event_index) if not boom_rows.empty else np.nan
+            )
+            if not boom_rows.empty:
+                boom_rows.to_csv(
+                    boomdir / f"lightcurve_{boom_event_index:04d}.csv", index=False
+                )
+            boom_detected = boom_rows["mag"].notna()
+            boom_summary = dict(summaries[-1])
+            # Keep upstream OpSim-based selection statistics clearly separate.
+            for name in ("n_detected", "detected_any", "detection_evaluated",
+                         "t_first_det_days", "last_detection_time_since_merger_days",
+                         "t_first_nondet_days", "lsstlike_data_end_time_since_merger_days",
+                         "output_mode"):
+                boom_summary[f"upstream_{name}"] = boom_summary.get(name)
+            boom_summary.update({
+                "injected_event_index": int(i),
+                "boom_event_index": int(boom_event_index),
+                "objectid": int(boom_event_index),
+                "n_detected": (
+                    int(boom_detected.sum())
+                    if BOOM_EXPORT_MODE == "m5-detected" else np.nan
+                ),
+                "detected_any": (
+                    int(boom_detected.any())
+                    if BOOM_EXPORT_MODE == "m5-detected" else np.nan
+                ),
+                "detection_evaluated": BOOM_EXPORT_MODE == "m5-detected",
+                "n_export_rows": len(boom_rows),
+                "empty_lightcurve": boom_rows.empty,
+                "t_first_exported_days": boom_rows.loc[boom_detected, "t_days"].min(),
+                "t_last_exported_days": boom_rows.loc[boom_detected, "t_days"].max(),
+                "t_first_det_days": (
+                    boom_rows.loc[boom_detected, "t_days"].min()
+                    if BOOM_EXPORT_MODE == "m5-detected" else np.nan
+                ),
+                "last_detection_time_since_merger_days": (
+                    boom_rows.loc[boom_detected, "t_days"].max()
+                    if BOOM_EXPORT_MODE == "m5-detected" else np.nan
+                ),
+                "t_first_nondet_days": np.nan,
+                "lsstlike_data_end_time_since_merger_days": np.nan,
+                "output_mode": (
+                    "synthetic-boom-complete-truth"
+                    if BOOM_EXPORT_MODE == "complete"
+                    else "synthetic-boom-detections-only"
+                ),
+                "boom_csv_saved": True,
+            })
+            if not boom_rows.empty:
+                boom_summary_rows.append(boom_summary)
+            if SAVE_PNG_SYNTHETIC_ONLY and (MAX_PLOT_EVENTS == 0 or n_boom_plots < MAX_PLOT_EVENTS):
+                n_boom_plots += int(plot_boom_measurements(
+                    boom_rows,
+                    pngdir / f"lightcurve_boom_{boom_event_index:04d}.png",
+                ))
 
         if SYNTHETIC_DEPTH_CUT == "m5-median":
             df = apply_synthetic_m5_median_cut(
@@ -3849,6 +4071,22 @@ def run_generation(RUNTIME: argparse.Namespace) -> None:
 
     summary_df = pd.DataFrame(summaries)
     summary_df.to_csv(run_dir / "summary.csv", index=False)
+    if SAVE_BOOM_SYNTHETIC:
+        boom_summary_df = pd.DataFrame(boom_summary_rows)
+        if boom_summary_df.empty:
+            boom_summary_df = pd.DataFrame(columns=list(dict.fromkeys([
+                *summary_df.columns, "n_export_rows",
+                "empty_lightcurve", "boom_csv_saved",
+            ])))
+        boom_summary_df.to_csv(boomdir / "summary.csv", index=False)
+        if (
+            (BOOM_TARGET_NONEMPTY or BOOM_EXPORT_MODE == "complete")
+            and len(boom_summary_df) != N_SAMPLES
+        ):
+            raise RuntimeError(
+                "Internal BOOM population count mismatch: expected "
+                f"{N_SAMPLES:,}, wrote {len(boom_summary_df):,}"
+            )
     if SAVE_PARQUET:
         summary_df.to_parquet(
             run_dir / "summary.parquet",
@@ -3858,10 +4096,28 @@ def run_generation(RUNTIME: argparse.Namespace) -> None:
         )
 
     elapsed_seconds = time.perf_counter() - generation_started
+    n_injected = len(summary_df)
+    n_boom_nonempty = len(boom_summary_rows)
+    boom_nonempty_fraction = (
+        n_boom_nonempty / n_injected
+        if SAVE_BOOM_SYNTHETIC and n_injected else None
+    )
+    boom_visibility_efficiency = (
+        boom_nonempty_fraction
+        if BOOM_EXPORT_MODE == "m5-detected" else None
+    )
     performance = {
         "elapsed_seconds": elapsed_seconds,
         "events_requested": N_SAMPLES,
-        "events_per_second": N_SAMPLES / elapsed_seconds if elapsed_seconds > 0 else None,
+        "requested_population_counting_unit": (
+            "nonempty_boom_lightcurves"
+            if BOOM_TARGET_NONEMPTY else "injected_physical_events"
+        ),
+        "events_injected": n_injected,
+        "boom_nonempty_lightcurves": n_boom_nonempty if SAVE_BOOM_SYNTHETIC else None,
+        "boom_nonempty_export_fraction": boom_nonempty_fraction,
+        "boom_visibility_efficiency": boom_visibility_efficiency,
+        "events_per_second": n_injected / elapsed_seconds if elapsed_seconds > 0 else None,
         "surrogate_batch_size_requested": SURROGATE_BATCH_SIZE,
         "surrogate_vectorized_batch_used": bool(SURROGATE_PREDICTOR.batch_supported),
         "surrogate_batch_fallback_reason": SURROGATE_PREDICTOR.fallback_reason or None,
@@ -3871,6 +4127,14 @@ def run_generation(RUNTIME: argparse.Namespace) -> None:
         "opsim_cache_hits": OPSIM_VISIT_CACHE.hits,
         "opsim_cache_misses": OPSIM_VISIT_CACHE.misses,
     }
+    run_info_sections["run"]["n_events_injected"] = n_injected
+    if SAVE_BOOM_SYNTHETIC:
+        run_info_sections["boom_synthetic_export"].update({
+            "nonempty_lightcurves_written": n_boom_nonempty,
+            "injected_physical_events": n_injected,
+            "nonempty_export_fraction": boom_nonempty_fraction,
+            "visibility_efficiency_after_m5": boom_visibility_efficiency,
+        })
     (run_dir / "runtime_performance.json").write_text(
         json.dumps(performance, indent=2) + "\n"
     )
@@ -3880,6 +4144,56 @@ def run_generation(RUNTIME: argparse.Namespace) -> None:
     )
 
     print("Saved:", run_dir / "summary.csv")
+    if SAVE_BOOM_SYNTHETIC:
+        (boomdir / "run_info.txt").write_text(format_run_info_sections(run_info_sections))
+        boom_mode_readme = (
+            "Complete mode: every finite point is exported; m5 enters the "
+            "Ivezic mag_err calculation but is not a selection threshold.\n"
+            if BOOM_EXPORT_MODE == "complete"
+            else "Depth-limited mode: mag <= m5; mag_err is the Ivezic "
+            "1-sigma uncertainty.\n"
+        )
+        boom_population_readme = (
+            "The requested population size counts injected physical KNe; all "
+            "events with finite model support are exported.\n"
+            if BOOM_EXPORT_MODE == "complete"
+            else "The requested BOOM population size counts non-empty light "
+            "curves; extra injections replace empty events.\n"
+            if BOOM_TARGET_NONEMPTY
+            else "The requested population size counts injected physical KNe; "
+            "BOOM contains only the m5-visible subset.\n"
+        )
+        (boomdir / "README.txt").write_text(
+            "Synthetic LSST observations; no random noise added.\n"
+            + boom_mode_readme
+            +
+            "Cadence is synthetic, not actual OpSim visits. See run_info.txt for settings.\n"
+            "Timestamp staggering is an export convention, not a new model evaluation.\n"
+            "The requested step is reduced locally when required by a shorter adjacent model interval.\n"
+            "BOOM keeps one point per time_mjd; staggering preserves simultaneous bands.\n"
+            "When plotting is enabled, ../png/lightcurve_boom_*.png shows exported points with errors.\n"
+            + boom_population_readme
+            + "Injected-event count and export statistics are recorded in run_info.txt and runtime_performance.json.\n"
+            "The root summary and scientific CSV/Parquet retain the population for envelope analysis.\n"
+            "Use build_color_envelopes.py on that scientific population to analyse upper limits.\n"
+            "summary.csv counts refer to these CSVs; upstream_* retains original statistics.\n"
+            "Use this folder as the BOOM input data directory.\n"
+        )
+        print("Saved synthetic BOOM input:", boomdir, f"({len(boom_summary_rows)} events)")
+        if boom_summary_rows and BOOM_EXPORT_MODE == "m5-detected":
+            print("BOOM detections:", int(boom_summary_df["n_detected"].sum()))
+        if BOOM_EXPORT_MODE == "m5-detected":
+            print(
+                "BOOM m5 visibility:",
+                f"{n_boom_nonempty:,}/{n_injected:,} injected events = "
+                f"{100.0 * boom_visibility_efficiency:.2f}%",
+            )
+        else:
+            print(
+                "BOOM truth-level completeness:",
+                f"{n_boom_nonempty:,}/{n_injected:,} injected events = "
+                f"{100.0 * boom_nonempty_fraction:.2f}%",
+            )
     if PAIRING_MODE != "none":
         print(
             "Paired intrinsic population:",
@@ -3898,12 +4212,26 @@ def run_generation(RUNTIME: argparse.Namespace) -> None:
     if RUNTIME.plot_mode == "saved":
         print(
             "Saved diagnostic plots:",
-            f"synthetic={n_synthetic_plots}, LSST-like={n_lsstlike_plots}",
+            f"synthetic={n_synthetic_plots}, LSST-like={n_lsstlike_plots}, BOOM={n_boom_plots}",
             f"in {pngdir}",
         )
 
 def main() -> None:
     """Collect terminal choices, then execute one or several populations."""
+    if "--plot-boom-input" in sys.argv[1:]:
+        parser = argparse.ArgumentParser(description="Plot BOOM detections with magnitude errors")
+        parser.add_argument("--plot-boom-input", type=Path, required=True)
+        parser.add_argument("--max-events", type=int, default=0, help="Maximum plots (0 = all)")
+        options = parser.parse_args()
+        replot_boom_input(options.plot_boom_input, options.max_events)
+        return
+    if len(sys.argv) == 1 and prompt_choice(
+        "Workflow", [("generate", "Generate a population"), ("plot", "Plot existing BOOM CSVs")], "generate"
+    ) == "plot":
+        directory = Path(prompt_text("BOOM input directory", "boom_input"))
+        limit = int(prompt_text("Maximum plots (0 = all)", "20"))
+        replot_boom_input(directory, limit)
+        return
     runtime = configure_runtime()
     seeds = realization_seed_list(runtime)
     if runtime.n_realizations > 1:

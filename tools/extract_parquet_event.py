@@ -76,7 +76,11 @@ def extract_event(run_dir: Path, product: str, event_id: int) -> pd.DataFrame:
 
 
 def main() -> None:
-    args = build_parser().parse_args()
+    if __package__:
+        from .terminal_options import read_options
+    else:
+        from terminal_options import read_options
+    args = read_options(build_parser())
     frame = extract_event(args.run_dir, args.product, args.event_id)
     if not args.keep_event_id:
         frame = frame.drop(columns=["event_id"], errors="ignore")

@@ -72,9 +72,8 @@ def default_configuration() -> argparse.Namespace:
         distance_min_mpc=10.0, distance_max_mpc=600.0,
         synthetic_cadence_days=0.1, m5_scenario="best_p75",
         t_min=0.4, t_max=16.0, bin_width=0.4,
-        bootstrap_repetitions=2000, confidence_level=0.95,
         plateau_relative_tolerance=0.10, minimum_plateau_bins=3,
-        comparison_seed=20260930, output_dir=None,
+        output_dir=None,
         overwrite_final=False, dry_run=False,
     )
 
@@ -106,13 +105,6 @@ def interactive_configuration(args: argparse.Namespace) -> argparse.Namespace:
     args.t_min = float(prompt_text("Début de la fenêtre [jours]", args.t_min))
     args.t_max = float(prompt_text("Fin de la fenêtre [jours]", args.t_max))
     args.bin_width = float(prompt_text("Largeur des bins temporels [jours]", args.bin_width))
-    args.bootstrap_repetitions = int(prompt_text(
-        "Répétitions bootstrap", args.bootstrap_repetitions
-    ))
-    args.confidence_level = float(choose(
-        "Intervalle de confiance", [(0.68, "68 %"), (0.95, "95 %")],
-        args.confidence_level,
-    ))
     args.plateau_relative_tolerance = float(prompt_text(
         "Tolérance relative du plateau", args.plateau_relative_tolerance
     ))
@@ -369,8 +361,6 @@ def validate_configuration(args: argparse.Namespace, paths: dict[str, Path]) -> 
     args.bin_edges = edges
     if args.n_samples < 1:
         raise ValueError("Le nombre de KNe doit être positif")
-    if args.bootstrap_repetitions < 100:
-        raise ValueError("Utiliser au moins 100 répétitions bootstrap")
     if not 0 < args.plateau_relative_tolerance < 1:
         raise ValueError("La tolérance doit être comprise entre 0 et 1")
     if args.minimum_plateau_bins < 2 or args.minimum_plateau_bins >= len(edges) - 1:
@@ -395,14 +385,13 @@ def print_configuration(args: argparse.Namespace, paths: dict[str, Path]) -> Non
     print(f"  Distances        : {args.distance_min_mpc:g}–{args.distance_max_mpc:g} Mpc")
     print(f"  Couleur/fenêtre  : g-r, {args.t_min:g}–{args.t_max:g} j")
     print(f"  m5               : {args.m5_scenario}, seuil global commun")
-    print(f"  Bootstrap        : {args.bootstrap_repetitions:,}, intervalle {args.confidence_level:.0%}")
     print(f"  Sortie globale   : {paths['output']}")
 
 
 def generation_configuration(spec, paths, pairing_mode, args):
     from generate_kne_lightcurves import default_runtime_configuration
     runtime = default_runtime_configuration()
-    runtime.synthetic_schema = "compact-extincted"
+    runtime.synthetic_schema = "model"
     runtime.run_name = spec.run_name
     runtime.runs_root = paths["runs"]
     runtime.filter_system = "lsst"
@@ -457,11 +446,8 @@ def comparison_configuration(specs, output, args):
         for spec in specs
     ]
     config.output_dir = output
-    config.bootstrap_repetitions = args.bootstrap_repetitions
-    config.confidence_level = args.confidence_level
     config.plateau_relative_tolerance = args.plateau_relative_tolerance
     config.minimum_plateau_bins = args.minimum_plateau_bins
-    config.seed = args.comparison_seed
     config.overwrite = args.overwrite_final
     return config
 

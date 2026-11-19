@@ -49,14 +49,14 @@ class PlotModuleBoundaryTest(unittest.TestCase):
 
     def test_stage_directory_convention_is_preserved(self):
         self.assertEqual(
-            envelope_plots.stage_output_name("m5_no_mw", "best_p75"),
-            "m5_no_mw_best_p75",
+            envelope_plots.stage_output_name("m5", "best_p75"),
+            "m5_best_p75",
         )
         self.assertEqual(
             envelope_plots.stage_output_name(
-                "intrinsic_no_m5_no_mw", "best_p75"
+                "no_m5", "best_p75"
             ),
-            "intrinsic_no_m5_no_mw",
+            "no_m5",
         )
 
     def test_event_display_colours_are_order_stable(self):

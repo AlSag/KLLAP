@@ -33,7 +33,7 @@ Main consumers
 
 Product-extraction and plotting scripts
     Use run discovery, light-curve file discovery, CSV parsing, OpSim/m5 source
-    resolution, m5 summaries, and bootstrap statistics as needed.
+    resolution, m5 summaries, and descriptive statistics as needed.
 
 Navigation
 ----------
@@ -310,7 +310,6 @@ def build_synthetic_measurement_table(
     filter_by_band: Mapping[str, str],
     *,
     time_mjd: Sequence[float] | np.ndarray | None = None,
-    mw_extinction_by_band: Mapping[str, float] | None = None,
     magnitude_limit: float | None = None,
 ) -> pd.DataFrame:
     """Build the long synthetic table written for one event.
@@ -334,9 +333,6 @@ def build_synthetic_measurement_table(
         such as ``"lsstg"``.
     time_mjd
         Optional absolute MJD array with the same length as ``times_days``.
-    mw_extinction_by_band
-        Optional mapping from short band name to ``A_band``.  When supplied,
-        the table includes ``mag_mw_extincted = mag + A_band``.
     magnitude_limit
         Optional faint-magnitude cap.  Intrinsic magnitudes numerically larger
         than this value are discarded before candidate identifiers are made.
@@ -345,7 +341,7 @@ def build_synthetic_measurement_table(
     -------
     pandas.DataFrame
         Columns are ``objectid``, ``candidate_id``, optional ``time_mjd``,
-        ``t_days``, ``band``, ``mag``, and optional ``mag_mw_extincted``.
+        ``t_days``, ``band``, and ``mag``.
         Rows are ordered by time and then by ``filters``.  ``objectid`` is
         written only in the first row because event metadata live once in
         ``summary.csv``.  Every retained measurement receives a unique
@@ -395,15 +391,6 @@ def build_synthetic_measurement_table(
     measurement_data["t_days"] = np.repeat(times, n_filters)
     measurement_data["band"] = np.tile(bands, n_times)
     measurement_data["mag"] = np.column_stack(magnitude_columns).reshape(-1)
-
-    if mw_extinction_by_band is not None:
-        extinction = np.tile(
-            [float(mw_extinction_by_band.get(band, np.nan)) for band in bands],
-            n_times,
-        )
-        measurement_data["mag_mw_extincted"] = (
-            measurement_data["mag"] + extinction
-        )
 
     measurements = pd.DataFrame(measurement_data)
     measurements = measurements[np.isfinite(measurements["mag"])].reset_index(
@@ -1219,25 +1206,3 @@ def discover_m5_quantile_table(
 # 10. STATISTICAL HELPERS
 # Primary users: downstream plotting and distribution-summary scripts.
 # =============================================================================
-
-def bootstrap_percentiles_unweighted(
-    values: np.ndarray,
-    percentiles: Sequence[float],
-    n_boot: int,
-    rng: np.random.Generator,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Estimate percentiles and their 16--84% bootstrap half-widths."""
-    values = np.asarray(values, dtype=float)
-    values = values[np.isfinite(values)]
-    if len(values) == 0:
-        empty = np.full(len(percentiles), np.nan)
-        return empty, empty
-    estimate = np.percentile(values, percentiles)
-    if n_boot <= 0 or len(values) < 2:
-        return estimate, np.full(len(percentiles), np.nan)
-    boot = np.empty((int(n_boot), len(percentiles)), dtype=float)
-    for index in range(int(n_boot)):
-        draw = values[rng.integers(0, len(values), size=len(values))]
-        boot[index] = np.percentile(draw, percentiles)
-    low, high = np.percentile(boot, [16, 84], axis=0)
-    return estimate, 0.5 * (high - low)

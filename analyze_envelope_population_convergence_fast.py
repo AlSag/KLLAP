@@ -2,7 +2,7 @@
 """Single-load convergence analysis for KNe colour envelopes.
 
 This self-contained workflow reads the saved population once, constructs
-reproducible nested subsets and optionally evaluates bootstrap robustness for
+reproducible nested subsets and evaluates empirical percentiles for
 every requested population size.  It contains three explicitly labelled scientific
 paths: fixed-percentile shape/extent convergence, the former adaptive-envelope
 comparison, and the legacy last-valid-bin analysis.  Calculation, aggregation,
@@ -30,7 +30,6 @@ import build_color_envelopes as builder
 import kne_envelope_core as envelope_core
 from kne_population_io import SyntheticPopulationSource, prepare_metadata
 from dynamic_color_cut_common import (
-    assign_event_splits,
     canonical_event_id,
     interpolate_band,
     parse_floats,
@@ -41,14 +40,10 @@ from dynamic_color_cut_common import (
 # SHARED CONVERGENCE PARSING, AGGREGATION AND PLOTTING
 # ============================================================================
 
-import argparse
-from pathlib import Path
 
 import matplotlib.pyplot as plt
-import numpy as np
-import pandas as pd
 
-from kne_envelope_core import M5_STAGES, STAGES
+from kne_envelope_core import M5_STAGES, STAGES, percentile_diagnostics
 from kne_m5 import M5_SCENARIOS
 
 
@@ -73,88 +68,6 @@ def split_colour_pair(pair: str) -> tuple[str, str]:
     if len(pieces) != 2 or not all(pieces) or pieces[0] == pieces[1]:
         raise ValueError("Colour pair must look like g-r, g-i or r-i")
     return pieces[0], pieces[1]
-
-
-def percentile_diagnostics(
-    values: np.ndarray,
-    lower_grid: list[float],
-    bootstrap: bool,
-    n_boot: int,
-    bootstrap_threshold: float,
-    minimum_tail_events: float,
-    rng: np.random.Generator,
-) -> tuple[pd.DataFrame, dict[str, float] | None]:
-    """Validate percentiles with optional event bootstrap.
-
-    With bootstrap enabled, this delegates to the canonical envelope helper.
-    Without bootstrap, no resampling is performed: percentile validity is
-    determined only from the expected support in the nearest tail.  The NaN
-    bootstrap columns are retained so output tables keep the same schema.
-    """
-    if bootstrap:
-        diagnostics, selected = envelope_core.percentile_diagnostics(
-            values,
-            lower_grid,
-            n_boot,
-            bootstrap_threshold,
-            minimum_tail_events,
-            rng,
-        )
-        diagnostics = diagnostics.copy()
-        diagnostics["bootstrap_enabled"] = True
-        return diagnostics, selected
-
-    values = np.asarray(values, dtype=float)
-    values = values[np.isfinite(values)]
-    lower = sorted(set(float(q) for q in lower_grid if 0.0 < q <= 50.0))
-    percentiles = sorted(set(lower + [100.0 - q for q in lower] + [50.0]))
-    estimates = np.percentile(values, percentiles)
-    n_values = len(values)
-    rows = []
-    for q, value in zip(percentiles, estimates):
-        expected_tail = n_values * min(q, 100.0 - q) / 100.0
-        tail_valid = bool(expected_tail >= minimum_tail_events)
-        rows.append({
-            "percentile": q,
-            "value": float(value),
-            "bootstrap_p16": np.nan,
-            "bootstrap_p84": np.nan,
-            "bootstrap_half_width_68": np.nan,
-            "expected_nearest_tail_events": expected_tail,
-            # True means that this disabled criterion cannot reject the row.
-            "bootstrap_width_valid": True,
-            "tail_support_valid": tail_valid,
-            "percentile_valid": tail_valid,
-            "bootstrap_enabled": False,
-        })
-    diagnostics = pd.DataFrame(rows)
-    by_q = diagnostics.set_index("percentile")
-    median_valid = bool(by_q.loc[50.0, "percentile_valid"])
-    valid_pairs = [
-        q for q in lower
-        if median_valid
-        and bool(by_q.loc[q, "percentile_valid"])
-        and bool(by_q.loc[100.0 - q, "percentile_valid"])
-    ]
-    if not valid_pairs:
-        return diagnostics, None
-
-    q_low = min(valid_pairs)
-    q_high = 100.0 - q_low
-    selected = {
-        "low_percentile": q_low,
-        "high_percentile": q_high,
-        "color_min": float(by_q.loc[q_low, "value"]),
-        "color_median": float(by_q.loc[50.0, "value"]),
-        "color_max": float(by_q.loc[q_high, "value"]),
-        "low_bootstrap_half_width_68": np.nan,
-        "median_bootstrap_half_width_68": np.nan,
-        "high_bootstrap_half_width_68": np.nan,
-        "expected_lower_tail_events": float(n_values * q_low / 100.0),
-        "expected_upper_tail_events": float(n_values * q_low / 100.0),
-        "nominal_coverage_percent": float(q_high - q_low),
-    }
-    return diagnostics, selected
 
 
 def resolve_run_root(path: Path) -> Path:
@@ -213,7 +126,7 @@ def aggregate_results(
             "absolute_difference_from_reference_days", "median"
         ),
         last_low_percentile_median=("last_low_percentile", "median"),
-        N_train_last_bin_median=("N_train_last_bin", "median"),
+        N_available_last_bin_median=("N_available_last_bin", "median"),
     ).reset_index()
     reference_median = float(
         raw.loc[raw["N_requested"] == maximum_n, "last_valid_time_days"].median()
@@ -328,16 +241,10 @@ def save_plot(
 # ============================================================================
 
 import hashlib
-import json
-from pathlib import Path
 
 import matplotlib
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-import numpy as np
-import pandas as pd
 
-import kne_envelope_core as envelope_core
 
 COMPONENTS = ("color_min", "color_median", "color_max")
 PROFILE_VERSION = 2
@@ -383,55 +290,38 @@ def colour_errors(
 def envelope_profile(a, sample, arrays, indices, depths, bands, edges, centres,
                      reference=None):
     """Compute one full profile, delegating percentile validity to the builder."""
-    from dynamic_color_cut_common import assign_event_splits, parse_floats
+    from dynamic_color_cut_common import parse_floats
 
-    split = assign_event_splits(sample.event_id.astype(str).tolist(),
-                                a.train_fraction, a.validation_fraction, a.builder_seed)
-    train_indices = indices[split.split.to_numpy() == "train"]
-    key = (
-        "colour_extincted"
-        if a.stage in envelope_core.MW_EXTINCTED_STAGES
-        else "colour_intrinsic"
-    )
-    colours = arrays[key][train_indices]
-    available = (np.isfinite(arrays["colour_intrinsic"][train_indices])
-                 & np.isfinite(arrays["colour_extincted"][train_indices]))
+    colours = arrays["colour_intrinsic"][indices]
+    available = np.isfinite(colours)
     if a.stage in envelope_core.M5_STAGES:
-        keys = ("mag_sel_int_1", "mag_sel_int_2") if a.stage == "m5_no_mw" else (
-            "mag_sel_ext_1", "mag_sel_ext_2")
+        keys = ("mag_sel_int_1", "mag_sel_int_2")
         for name, band in zip(keys, bands):
-            mags = arrays[name][train_indices]
+            mags = arrays[name][indices]
             available &= np.isfinite(mags) & (mags <= depths[band])
     tails = parse_floats(a.tail_percentiles or envelope_core.DEFAULT_TAIL_GRID)
-    tails = sorted(set(tails + [25., 30., 35., 40., 42., 44., 45., 46., 47., 48., 49., 50.]))
     if reference is not None and a.bound_mode == "reference-percentiles":
         tails = sorted(set(tails + reference.loc[reference.valid, "low_percentile"].tolist()))
-    rng = np.random.default_rng(
-        a.builder_seed
-        + 1000 * envelope_core.STAGE_BOOTSTRAP_SEED_OFFSETS[a.stage]
-    )
     rows = []
     active = True
     reference_lookup = reference.set_index("bin_index") if reference is not None else None
     for b, centre in enumerate(centres):
         row = {"bin_index": b, "t_low_days": float(edges[b]),
                "t_high_days": float(edges[b + 1]), "t_center_days": float(centre),
-               "valid": False, "status": "after_first_invalid_bin", "N_train": 0,
+               "valid": False, "status": "after_first_invalid_bin", "N_available": 0,
                "low_percentile": np.nan, "high_percentile": np.nan,
                "color_min": np.nan, "color_median": np.nan, "color_max": np.nan}
         if not active:
             rows.append(row)
             continue
         values = colours[available[:, b], b].astype(float)
-        row["N_train"] = len(values)
-        if len(values) < a.minimum_events:
+        row["N_available"] = len(values)
+        if not len(values):
             row["status"] = "insufficient_events"
             active = False
             rows.append(row)
             continue
-        diagnostics, selected = percentile_diagnostics(
-            values, tails, getattr(a, "bootstrap", True), a.n_boot,
-            a.bootstrap_threshold_mag, a.minimum_tail_events, rng)
+        diagnostics, selected = percentile_diagnostics(values, tails)
         if (reference_lookup is not None and a.bound_mode == "reference-percentiles"
                 and bool(reference_lookup.loc[b, "valid"])):
             ref = reference_lookup.loc[b]
@@ -469,8 +359,8 @@ def compare_profiles(
         raise ValueError("Largest-N reference has no valid envelope bin")
     other = profile.set_index("bin_index").reindex(ref.bin_index)
     out = ref[["bin_index", "t_low_days", "t_high_days", "t_center_days"]].copy().reset_index(drop=True)
-    out["reference_N_train"] = ref.N_train.to_numpy()
-    out["sample_N_train"] = other.N_train.to_numpy()
+    out["reference_N_available"] = ref.N_available.to_numpy()
+    out["sample_N_available"] = other.N_available.to_numpy()
     supported = other.valid.eq(True).to_numpy(dtype=bool)
     out["sample_bin_valid"] = supported
     out["reference_low_percentile"] = ref.low_percentile.to_numpy()
@@ -641,18 +531,11 @@ def run_colour_convergence(a, root, sizes, bands, edges, centres):
         raise ValueError("relative-tolerance must be finite and positive")
     if not np.isfinite(a.absolute_tolerance_mag) or a.absolute_tolerance_mag <= 0:
         raise ValueError("absolute-tolerance-mag must be finite and positive")
-    if (a.minimum_events < 1 or a.minimum_tail_events < 0
-            or (getattr(a, "bootstrap", True)
-                and a.bootstrap_threshold_mag < 0)):
-        raise ValueError("Invalid event-count or bootstrap-validity limits")
-    if not (0 < a.train_fraction < 1 and 0 <= a.validation_fraction < 1
-            and a.train_fraction + a.validation_fraction < 1):
-        raise ValueError("Invalid train/validation fractions")
     output = a.output_dir.expanduser().resolve() if a.output_dir else (
         root / "analysis" /
         f"convergence_colours_{a.color_pair.replace('-', '_')}_"
         f"{a.photometric_system}_{a.stage}"
-        f"{'_no_bootstrap' if not getattr(a, 'bootstrap', True) else ''}")
+    )
     output.mkdir(parents=True, exist_ok=True)
     bargs = fast.make_builder_args(a, root)
     depths = (
@@ -770,18 +653,8 @@ def run_colour_convergence(a, root, sizes, bands, edges, centres):
 # FIXED-PERCENTILE SHAPE AND TEMPORAL-EXTENT CONVERGENCE
 # ============================================================================
 
-import hashlib
-import json
-from pathlib import Path
-
-import matplotlib
 
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-import numpy as np
-import pandas as pd
-
-import kne_envelope_core as envelope_core
 
 
 PROFILE_VERSION = 3
@@ -820,18 +693,6 @@ def atomic_csv(frame: pd.DataFrame, path: Path) -> None:
     temporary.replace(path)
 
 
-def _validity_status(row: pd.Series) -> str:
-    tail = bool(row["tail_support_valid"])
-    width = bool(row["bootstrap_width_valid"])
-    if tail and width:
-        return "valid"
-    if not tail and not width:
-        return "tail_and_bootstrap_invalid"
-    if not tail:
-        return "tail_support_invalid"
-    return "bootstrap_width_invalid"
-
-
 def _empty_estimator_row(base: dict, name: str, kind: str, q=np.nan,
                          status="insufficient_events") -> dict:
     return {
@@ -842,12 +703,7 @@ def _empty_estimator_row(base: dict, name: str, kind: str, q=np.nan,
         "value": np.nan,
         "valid": False,
         "status": status,
-        "bootstrap_p16": np.nan,
-        "bootstrap_p84": np.nan,
-        "bootstrap_half_width_68": np.nan,
         "expected_nearest_tail_events": np.nan,
-        "bootstrap_width_valid": False,
-        "tail_support_valid": False,
     }
 
 
@@ -859,22 +715,10 @@ def multiquantile_profile(a, sample, arrays, indices, depths, bands, edges,
     if len(sample) != len(indices):
         raise ValueError("sample and indices must contain the same events")
     analysis_indices = indices
-    colour_key = (
-        "colour_extincted"
-        if a.stage in envelope_core.MW_EXTINCTED_STAGES
-        else "colour_intrinsic"
-    )
-    colours = arrays[colour_key][analysis_indices]
-    available = (
-        np.isfinite(arrays["colour_intrinsic"][analysis_indices])
-        & np.isfinite(arrays["colour_extincted"][analysis_indices])
-    )
+    colours = arrays["colour_intrinsic"][analysis_indices]
+    available = np.isfinite(colours)
     if a.stage in envelope_core.M5_STAGES:
-        magnitude_keys = (
-            ("mag_sel_int_1", "mag_sel_int_2")
-            if a.stage == "m5_no_mw"
-            else ("mag_sel_ext_1", "mag_sel_ext_2")
-        )
+        magnitude_keys = ("mag_sel_int_1", "mag_sel_int_2")
         for key, band in zip(magnitude_keys, bands):
             magnitudes = arrays[key][analysis_indices]
             available &= np.isfinite(magnitudes) & (magnitudes <= depths[band])
@@ -882,9 +726,6 @@ def multiquantile_profile(a, sample, arrays, indices, depths, bands, edges,
     # The builder accepts lower-tail percentiles and automatically evaluates
     # their symmetric upper bounds plus p50.
     diagnostic_lower = [5.0, 16.0, 25.0, 50.0]
-    rng = np.random.default_rng(
-        a.builder_seed + 1000 * envelope_core.STAGE_BOOTSTRAP_SEED_OFFSETS[a.stage]
-    )
     rows: list[dict] = []
     for bin_index, centre in enumerate(centres):
         values = colours[available[:, bin_index], bin_index].astype(float)
@@ -895,7 +736,7 @@ def multiquantile_profile(a, sample, arrays, indices, depths, bands, edges,
             "t_center_days": float(centre),
             "N_available": int(len(values)),
         }
-        if len(values) < a.minimum_events:
+        if not len(values):
             for name, q in FIXED_ESTIMATORS.items():
                 rows.append(_empty_estimator_row(base, name, "fixed", q))
             continue
@@ -903,11 +744,6 @@ def multiquantile_profile(a, sample, arrays, indices, depths, bands, edges,
         diagnostics, _ = percentile_diagnostics(
             values,
             diagnostic_lower,
-            getattr(a, "bootstrap", True),
-            a.n_boot,
-            a.bootstrap_threshold_mag,
-            a.minimum_tail_events,
-            rng,
         )
         by_q = diagnostics.set_index("percentile")
         for name, q in FIXED_ESTIMATORS.items():
@@ -919,19 +755,10 @@ def multiquantile_profile(a, sample, arrays, indices, depths, bands, edges,
                 "percentile": float(q),
                 "value": float(diagnostic["value"]),
                 "valid": bool(diagnostic["percentile_valid"]),
-                "status": _validity_status(diagnostic),
-                "bootstrap_p16": float(diagnostic["bootstrap_p16"]),
-                "bootstrap_p84": float(diagnostic["bootstrap_p84"]),
-                "bootstrap_half_width_68": float(
-                    diagnostic["bootstrap_half_width_68"]
-                ),
+                "status": "valid",
                 "expected_nearest_tail_events": float(
                     diagnostic["expected_nearest_tail_events"]
                 ),
-                "bootstrap_width_valid": bool(
-                    diagnostic["bootstrap_width_valid"]
-                ),
-                "tail_support_valid": bool(diagnostic["tail_support_valid"]),
             })
 
     return pd.DataFrame(rows)
@@ -1420,7 +1247,7 @@ def _configuration(a, root, sizes, depths, fast, builder, common) -> dict:
             "resume", "output_dir", "fit_exponential",
             # These options belong to the two legacy modes and are ignored by
             # the fixed-percentile analysis.
-            "train_fraction", "validation_fraction", "tail_percentiles",
+            "tail_percentiles",
             "bound_mode", "allow_degenerate_envelope",
         }
     }
@@ -1435,11 +1262,7 @@ def _configuration(a, root, sizes, depths, fast, builder, common) -> dict:
         "population_usage": "100% of each selected subset; no split",
         "shape_definition": (
             "all requested percentile values in every fixed-window bin; "
-            + (
-                "both reference and sample must satisfy tail and bootstrap support"
-                if getattr(a, "bootstrap", True) else
-                "both reference and sample must satisfy tail support; bootstrap disabled"
-            )
+            "both reference and sample must have finite colours"
         ),
         "extent_definition": (
             "last upper edge in the initial consecutive sequence where every "
@@ -1482,16 +1305,10 @@ def run_multi_percentile_convergence(a, root, sizes, bands, edges, centres):
         )
     if not np.isfinite(a.absolute_tolerance_mag) or a.absolute_tolerance_mag <= 0:
         raise ValueError("absolute-tolerance-mag must be finite and positive")
-    if a.minimum_events < 1 or a.minimum_tail_events < 0:
-        raise ValueError("Invalid event-count validity limits")
-    if (getattr(a, "bootstrap", True)
-            and a.bootstrap_threshold_mag < 0):
-        raise ValueError("bootstrap-threshold-mag cannot be negative")
     output = a.output_dir.expanduser().resolve() if a.output_dir else (
         root / "analysis" /
         f"convergence_multiquantile_{a.color_pair.replace('-', '_')}_"
         f"{a.photometric_system}_{a.stage}"
-        f"{'_no_bootstrap' if not getattr(a, 'bootstrap', True) else ''}"
     )
     output.mkdir(parents=True, exist_ok=True)
     bargs = fast.make_builder_args(a, root)
@@ -1711,14 +1528,11 @@ def default_configuration() -> argparse.Namespace:
     """Return documented defaults before the interactive questions."""
     return argparse.Namespace(
         run_dir=Path("."), color_pair="g-r", photometric_system="lsst",
-        stage="m5_with_mw",
+        stage="m5",
         sample_sizes="1000,3000,10000,30000,50000,75000,100000,150000,200000",
         repetitions=10, subsample_seed=20261002, builder_seed=12345,
         t_min=0.4, t_max=16.0, bin_width=0.4,
-        bootstrap=True, n_boot=200,
-        minimum_events=30, minimum_tail_events=20.0,
-        bootstrap_threshold_mag=0.1, train_fraction=0.70,
-        validation_fraction=0.15, tail_percentiles=None,
+        tail_percentiles=None,
         m5_scenario="median_p50", threshold_scope="common_global",
         m5_quantile_table=None, ztf_depth_source="manual", ztf_m5_g=None,
         ztf_m5_r=None, ztf_m5_i=None, ztf_depth_quantile_table=None,
@@ -1750,31 +1564,10 @@ def interactive_configuration(args: argparse.Namespace) -> argparse.Namespace:
     args.t_min = float(prompt_text("First temporal-bin lower edge [days]", str(args.t_min)))
     args.t_max = float(prompt_text("Last temporal-bin upper edge [days]", str(args.t_max)))
     args.bin_width = float(prompt_text("Temporal-bin width [days]", str(args.bin_width)))
-    args.minimum_events = int(prompt_text("Minimum finite colours per bin", str(args.minimum_events)))
-    args.minimum_tail_events = float(prompt_text(
-        "Minimum expected events in each percentile tail",
-        str(args.minimum_tail_events),
-    ))
-    bootstrap_choice = prompt_choice(
-        "Bootstrap validation of percentiles",
-        [("yes", "Enable bootstrap"), ("no", "Do not bootstrap")],
-        "yes" if args.bootstrap else "no",
-    )
-    args.bootstrap = bootstrap_choice == "yes"
-    if args.bootstrap:
-        args.n_boot = int(prompt_text(
-            "Bootstrap repetitions per bin", str(max(args.n_boot, 1))
-        ))
-        args.bootstrap_threshold_mag = float(prompt_text(
-            "Maximum 68% bootstrap half-width [mag]",
-            str(args.bootstrap_threshold_mag),
-        ))
-    else:
-        args.n_boot = 0
     args.stability_metric = prompt_choice(
         "Convergence analysis",
         [("colour", "Fixed percentiles: shape and temporal extent"),
-         ("legacy-colour", "Adaptive envelope values"),
+         ("legacy-colour", "Fixed-interval envelope values (compatibility mode)"),
          ("last-edge", "Legacy last-valid-bin extent")],
         args.stability_metric,
     )
@@ -1833,8 +1626,6 @@ def interactive_configuration(args: argparse.Namespace) -> argparse.Namespace:
     return args
 
 
-
-
 def validate(a: argparse.Namespace) -> tuple[Path, list[int], tuple[str, str], np.ndarray, np.ndarray]:
     root = resolve_run_root(a.run_dir)
     sizes = parse_sample_sizes(a.sample_sizes)
@@ -1845,8 +1636,6 @@ def validate(a: argparse.Namespace) -> tuple[Path, list[int], tuple[str, str], n
         raise ValueError("Largest sample size exceeds the events in summary.csv")
     if a.repetitions < 1:
         raise ValueError("repetitions must be positive")
-    if getattr(a, "bootstrap", True) and a.n_boot < 1:
-        raise ValueError("n-boot must be positive when bootstrap is enabled")
     if a.bin_width <= 0 or a.t_max <= a.t_min or a.tolerance_days < 0:
         raise ValueError("Invalid time grid or tolerance")
     if not a.t_min < a.shape_t_max <= a.t_max:
@@ -1934,9 +1723,6 @@ def load_population_once(a: argparse.Namespace, root: Path, bands: tuple[str, st
     systems = tuple(dict.fromkeys((system, selection_system)))
     arrays = {
         "colour_intrinsic": np.full((n, nt), np.nan, np.float32),
-        "colour_extincted": np.full((n, nt), np.nan, np.float32),
-        "mag_sel_ext_1": np.full((n, nt), np.nan, np.float32),
-        "mag_sel_ext_2": np.full((n, nt), np.nan, np.float32),
         "mag_sel_int_1": np.full((n, nt), np.nan, np.float32),
         "mag_sel_int_2": np.full((n, nt), np.nan, np.float32),
     }
@@ -1969,16 +1755,9 @@ def load_population_once(a: argparse.Namespace, root: Path, bands: tuple[str, st
         m2 = interpolate_band(target, band2, centres)
         s1 = interpolate_band(select, band1, centres)
         s2 = interpolate_band(select, band2, centres)
-        a1 = envelope_core.event_extinction_mag(row, system, band1)
-        a2 = envelope_core.event_extinction_mag(row, system, band2)
-        sa1 = envelope_core.event_extinction_mag(row, selection_system, band1)
-        sa2 = envelope_core.event_extinction_mag(row, selection_system, band2)
-        arrays["colour_extincted"][i] = m1 - m2
-        arrays["colour_intrinsic"][i] = (m1 - a1) - (m2 - a2)
-        arrays["mag_sel_ext_1"][i] = s1
-        arrays["mag_sel_ext_2"][i] = s2
-        arrays["mag_sel_int_1"][i] = s1 - sa1
-        arrays["mag_sel_int_2"][i] = s2 - sa2
+        arrays["colour_intrinsic"][i] = m1 - m2
+        arrays["mag_sel_int_1"][i] = s1
+        arrays["mag_sel_int_2"][i] = s2
         if (i + 1) % interval == 0:
             print(f"  loaded rows for {i + 1:,}/{n:,} events")
     print(f"Finished loading: {len(seen):,}/{n:,} events with saved rows")
@@ -2011,68 +1790,40 @@ def select_loaded_metadata_subset(metadata: pd.DataFrame, maximum_events: int,
 
 
 def last_adaptive_edge(a: argparse.Namespace, sample: pd.DataFrame, arrays: dict[str, np.ndarray], indices: np.ndarray, depths: dict[str, float], bands: tuple[str, str], edges: np.ndarray, centres: np.ndarray) -> tuple[float, int, float, float, float]:
-    ids = sample.event_id.astype(str).tolist()
-    split = assign_event_splits(ids, a.train_fraction, a.validation_fraction, a.builder_seed)
-    train = split.split.to_numpy() == "train"
-    if a.stage in envelope_core.MW_EXTINCTED_STAGES:
-        colours = arrays["colour_extincted"][indices]
-    else:
-        colours = arrays["colour_intrinsic"][indices]
-    available = np.isfinite(arrays["colour_intrinsic"][indices]) & np.isfinite(arrays["colour_extincted"][indices])
+    colours = arrays["colour_intrinsic"][indices]
+    available = np.isfinite(colours)
     if a.stage in envelope_core.M5_STAGES:
-        if a.stage == "m5_no_mw":
-            one, two = "mag_sel_int_1", "mag_sel_int_2"
-        else:
-            one, two = "mag_sel_ext_1", "mag_sel_ext_2"
+        one, two = "mag_sel_int_1", "mag_sel_int_2"
         available &= np.isfinite(arrays[one][indices]) & np.isfinite(arrays[two][indices])
         available &= (arrays[one][indices] <= depths[bands[0]]) & (arrays[two][indices] <= depths[bands[1]])
     tails = parse_floats(a.tail_percentiles or envelope_core.DEFAULT_TAIL_GRID)
-    for fallback in (25, 30, 35, 40, 42, 44, 45, 46, 47, 48, 49, 50):
-        if fallback not in tails:
-            tails.append(float(fallback))
-    seed_offset = envelope_core.STAGE_BOOTSTRAP_SEED_OFFSETS[a.stage]
-    rng = np.random.default_rng(a.builder_seed + 1000 * seed_offset)
     count = 0
     low_q = high_q = np.nan
-    n_train_last = np.nan
+    n_available_last = np.nan
     for b, _ in enumerate(centres):
-        values = colours[train & available[:, b], b].astype(float)
-        if len(values) < a.minimum_events:
+        values = colours[available[:, b], b].astype(float)
+        if not len(values):
             break
-        _, selected = percentile_diagnostics(
-            values, tails, getattr(a, "bootstrap", True), a.n_boot,
-            a.bootstrap_threshold_mag,
-            a.minimum_tail_events, rng,
-        )
+        _, selected = percentile_diagnostics(values, tails)
         if selected is None:
             break
         count += 1
-        n_train_last = float(len(values))
+        n_available_last = float(len(values))
         low_q = float(selected["low_percentile"])
         high_q = float(selected["high_percentile"])
     if count == 0:
         return np.nan, 0, np.nan, np.nan, np.nan
-    return float(edges[count]), count, low_q, high_q, n_train_last
+    return float(edges[count]), count, low_q, high_q, n_available_last
 
 
 def configuration(a: argparse.Namespace, root: Path, sizes: list[int]) -> dict[str, object]:
     return {
-        "method": (
-            "single_load_in_memory_exact_builder_bootstrap_early_stop"
-            if getattr(a, "bootstrap", True) else
-            "single_load_in_memory_tail_support_early_stop_no_bootstrap"
-        ),
+        "method": "empirical_percentiles_on_nested_subsets",
         "run_dir": str(root), "color_pair": a.color_pair,
         "photometric_system": a.photometric_system, "stage": a.stage,
         "sample_sizes": sizes, "repetitions": a.repetitions,
         "subsample_seed": a.subsample_seed, "builder_seed": a.builder_seed,
         "t_min": a.t_min, "t_max": a.t_max, "bin_width": a.bin_width,
-        "bootstrap": getattr(a, "bootstrap", True),
-        "n_boot": a.n_boot, "minimum_events": a.minimum_events,
-        "minimum_tail_events": a.minimum_tail_events,
-        "bootstrap_threshold_mag": a.bootstrap_threshold_mag,
-        "train_fraction": a.train_fraction,
-        "validation_fraction": a.validation_fraction,
         "tail_percentiles": a.tail_percentiles,
         "m5_scenario": a.m5_scenario, "threshold_scope": a.threshold_scope,
         "tolerance_days": a.tolerance_days,
@@ -2095,7 +1846,6 @@ def main() -> None:
         root / "analysis" /
         f"convergence_fast_{a.color_pair.replace('-', '_')}_"
         f"{a.photometric_system}_{a.stage}"
-        f"{'_no_bootstrap' if not getattr(a, 'bootstrap', True) else ''}"
     )
     output.mkdir(parents=True, exist_ok=True)
     conf = configuration(a, root, sizes)
@@ -2126,13 +1876,13 @@ def main() -> None:
             print(f"[{counter}/{total}] repetition={rep + 1}/{a.repetitions}, N={size:,}")
             sample = select_loaded_metadata_subset(metadata, size, subset_seed)
             indices = np.asarray([position[eid] for eid in sample.event_id.astype(str)], dtype=int)
-            edge, n_bins, low_q, high_q, n_train = last_adaptive_edge(
+            edge, n_bins, low_q, high_q, n_available = last_adaptive_edge(
                 a, sample, arrays, indices, depths, bands, edges, centres
             )
             row = {
                 "repetition": rep, "subsample_seed": subset_seed,
                 "N_requested": size, "N_input_events": len(sample),
-                "N_train_last_bin": n_train, "stage": a.stage,
+                "N_available_last_bin": n_available, "stage": a.stage,
                 "last_valid_time_days": edge,
                 "N_consecutive_valid_bins": n_bins,
                 "last_low_percentile": low_q, "last_high_percentile": high_q,

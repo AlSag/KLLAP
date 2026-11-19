@@ -6,7 +6,6 @@ from pathlib import Path
 import numpy as np
 
 from build_color_envelopes import (
-    PS1_MW_R,
     at2017gfo_stage_colours,
     load_at2017gfo_bestfit_colour_curve,
 )
@@ -34,20 +33,6 @@ class AT2017gfoBestFitTest(unittest.TestCase):
         self.assertEqual(curve["source_filter_band1"].iloc[0], "ps1::r")
         self.assertEqual(parameters["luminosity_distance"], 40.7)
 
-        extincted = at2017gfo_stage_colours(
-            curve,
-            "no_m5_with_mw",
-            "r",
-            "i",
-            0.105,
-            "dereddened",
-            "ps1",
-        )
-        expected_shift = (PS1_MW_R["r"] - PS1_MW_R["i"]) * 0.105
-        np.testing.assert_allclose(
-            extincted["color"], curve["color_input"] + expected_shift
-        )
-
-
-if __name__ == "__main__":
-    unittest.main()
+        for stage in ("no_m5", "m5"):
+            actual = at2017gfo_stage_colours(curve, stage, "ps1")
+            np.testing.assert_allclose(actual["color"], curve["color_input"])

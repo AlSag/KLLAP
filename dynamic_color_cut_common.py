@@ -2,7 +2,7 @@
 """Shared helpers for dynamic KNe colour-envelope scripts.
 
 The executable scripts in the same directory import this module.  It contains
-only I/O, interpolation, colour matching, rule evaluation and bootstrap
+only I/O, interpolation, colour matching, rule evaluation and summary
 helpers; no analysis is launched when it is imported.
 """
 
@@ -233,62 +233,8 @@ def interpolate_band(frame: pd.DataFrame, band: str, times: np.ndarray) -> np.nd
     return output
 
 
-def assign_event_splits(
-    event_ids: Sequence[str], train_fraction: float, validation_fraction: float, seed: int
-) -> pd.DataFrame:
-    if not 0 < train_fraction < 1:
-        raise ValueError("train_fraction must be in (0, 1)")
-    if not 0 <= validation_fraction < 1 - train_fraction:
-        raise ValueError("validation_fraction must be >=0 and train+validation < 1")
-    ids = np.asarray([str(value) for value in event_ids], dtype=object)
-    rng = np.random.default_rng(seed)
-    shuffled = ids[rng.permutation(len(ids))]
-    n_train = int(np.floor(train_fraction * len(ids)))
-    n_validation = int(np.floor(validation_fraction * len(ids)))
-    mapping = {value: "test" for value in ids}
-    mapping.update({value: "train" for value in shuffled[:n_train]})
-    mapping.update({value: "validation" for value in shuffled[n_train:n_train+n_validation]})
-    return pd.DataFrame({
-        "event_id": ids,
-        "split": [mapping[value] for value in ids],
-        "split_seed": int(seed),
-        "train_fraction": float(train_fraction),
-        "validation_fraction": float(validation_fraction),
-        "test_fraction": float(1 - train_fraction - validation_fraction),
-    })
 
 
-def bootstrap_percentiles_batched(
-    values: np.ndarray,
-    percentiles: Sequence[float],
-    n_boot: int,
-    rng: np.random.Generator,
-    batch_size: int = 32,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Ordinary event bootstrap with bounded memory.
-
-    Returns the sample estimates, bootstrap P16/P84 and their half-width.
-    """
-    values = np.asarray(values, dtype=float)
-    values = values[np.isfinite(values)]
-    q = np.asarray(percentiles, dtype=float)
-    if len(values) == 0:
-        empty = np.full(len(q), np.nan)
-        return empty, empty, empty, empty
-    estimate = np.percentile(values, q)
-    if n_boot <= 0 or len(values) < 2:
-        empty = np.full(len(q), np.nan)
-        return estimate, empty, empty, empty
-    boot = np.empty((n_boot, len(q)), dtype=np.float32)
-    cursor = 0
-    while cursor < n_boot:
-        count = min(batch_size, n_boot - cursor)
-        indices = rng.integers(0, len(values), size=(count, len(values)))
-        draws = values[indices]
-        boot[cursor:cursor+count] = np.percentile(draws, q, axis=1).T
-        cursor += count
-    low, high = np.percentile(boot, [16, 84], axis=0)
-    return estimate, low, high, 0.5 * (high - low)
 
 
 def percentile_label(value: float) -> str:
@@ -416,15 +362,6 @@ def criterion_results(colors: pd.DataFrame) -> dict[str, dict[str, object]]:
     return result
 
 
-def binomial_bootstrap_interval(
-    successes: int, denominator: int, n_boot: int, rng: np.random.Generator
-) -> dict[str, float]:
-    if denominator <= 0:
-        return {key: np.nan for key in ("estimate", "p2p5", "p16", "p84", "p97p5")}
-    fraction = successes / denominator
-    draws = rng.binomial(denominator, fraction, size=n_boot) / denominator
-    p2, p16, p84, p97 = np.percentile(draws, [2.5, 16, 84, 97.5])
-    return {"estimate": fraction, "p2p5": p2, "p16": p16, "p84": p84, "p97p5": p97}
 
 
 def save_json(path: Path, payload: dict) -> None:

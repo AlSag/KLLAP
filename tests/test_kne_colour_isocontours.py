@@ -25,10 +25,10 @@ class ColourIsocontoursTest(unittest.TestCase):
         self.assertEqual(levels[2], 0.0)
 
     def test_grid_uses_cell_median_and_masks_insufficient_support(self):
-        x = np.array([0.2, 0.3, 0.7, 1.2, 1.3])
-        y = np.array([0.2, 0.3, 0.7, 0.2, 0.3])
-        colour = np.array([1.0, 3.0, 100.0, 4.0, 8.0])
-        available = np.ones(5, dtype=bool)
+        x = np.array([0.2, 0.3, 0.7, 1.2, 1.3, 1.4])
+        y = np.array([0.2, 0.3, 0.7, 0.2, 0.3, 1.1])
+        colour = np.array([1.0, 3.0, 100.0, 4.0, 8.0, 9.0])
+        available = np.ones(6, dtype=bool)
         edges = np.array([0.0, 1.0, 2.0])
 
         grid = parameter_colour_grid(
@@ -38,10 +38,11 @@ class ColourIsocontoursTest(unittest.TestCase):
             available,
             edges,
             edges,
-            minimum_cell_events=2,
             smooth_sigma=0.0,
         )
 
+        self.assertTrue(grid["supported"][1, 1])
+        self.assertEqual(grid["p50"][1, 1], 9.)
         self.assertEqual(grid["count"][0, 0], 3)
         self.assertEqual(grid["p50"][0, 0], 3.0)
         self.assertTrue(grid["supported"][0, 0])
@@ -64,7 +65,6 @@ class ColourIsocontoursTest(unittest.TestCase):
             available,
             edges,
             edges,
-            minimum_cell_events=2,
             smooth_sigma=2.0,
         )
 

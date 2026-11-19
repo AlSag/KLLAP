@@ -43,7 +43,7 @@ class EnvelopePopulationConvergenceTest(unittest.TestCase):
                         "repetition": repetition,
                         "last_valid_time_days": value,
                         "last_low_percentile": 2.0,
-                        "N_train_last_bin": sample_size * 0.7,
+                        "N_available_last_bin": sample_size,
                     }
                 )
         raw, summary, reference, threshold = aggregate_results(

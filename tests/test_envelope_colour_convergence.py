@@ -19,7 +19,7 @@ def profile(values, valid=None):
         "bin_index": np.arange(n), "t_low_days": .4 + np.arange(n) * .4,
         "t_high_days": .8 + np.arange(n) * .4, "t_center_days": .6 + np.arange(n) * .4,
         "valid": np.ones(n, bool) if valid is None else valid,
-        "N_train": np.full(n, 100), "low_percentile": np.full(n, 16.),
+        "N_available": np.full(n, 100), "low_percentile": np.full(n, 16.),
         "high_percentile": np.full(n, 84.), "color_min": values[:, 0],
         "color_median": values[:, 1], "color_max": values[:, 2]})
 
@@ -120,11 +120,8 @@ class ColourConvergenceTest(unittest.TestCase):
         n = 120
         sample = pd.DataFrame({"event_id": [str(i) for i in range(n)]})
         colors = np.column_stack((np.linspace(1., 2., n), np.linspace(2., 3., n))).astype(np.float32)
-        arrays = {"colour_intrinsic": colors, "colour_extincted": colors}
-        a = SimpleNamespace(train_fraction=.7, validation_fraction=.15, builder_seed=12345,
-                            stage="no_m5_with_mw", tail_percentiles="16", n_boot=20,
-                            bootstrap_threshold_mag=100., minimum_tail_events=1.,
-                            minimum_events=5, allow_degenerate_envelope=False, bound_mode="adaptive")
+        arrays = {"colour_intrinsic": colors}
+        a = SimpleNamespace(stage="no_m5", tail_percentiles="16", allow_degenerate_envelope=False, bound_mode="adaptive")
         edges = np.array([.4, .8, 1.2])
         centres = (edges[:-1] + edges[1:]) / 2
         ref = envelope_profile(a, sample, arrays, np.arange(n), {}, ("g", "r"), edges, centres)
@@ -137,11 +134,8 @@ class ColourConvergenceTest(unittest.TestCase):
         n = 60
         sample = pd.DataFrame({"event_id": [str(i) for i in range(n)]})
         values = np.linspace(1., 2., n).reshape(-1, 1).astype(np.float32)
-        a = SimpleNamespace(train_fraction=.7, validation_fraction=.15, builder_seed=12345,
-                            stage="no_m5_with_mw", tail_percentiles="50", n_boot=20,
-                            bootstrap_threshold_mag=100., minimum_tail_events=21.,
-                            minimum_events=5, allow_degenerate_envelope=False, bound_mode="adaptive")
-        arrays = {"colour_intrinsic": values, "colour_extincted": values}
+        a = SimpleNamespace(stage="no_m5", tail_percentiles="50", allow_degenerate_envelope=False, bound_mode="adaptive")
+        arrays = {"colour_intrinsic": values}
         args = (a, sample, arrays, np.arange(n), {}, ("g", "r"), np.array([.4, .8]), np.array([.6]))
         ref = envelope_profile(*args)
         self.assertFalse(ref.valid.iloc[0])

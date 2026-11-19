@@ -98,18 +98,9 @@ class MultiQuantileConvergenceTest(unittest.TestCase):
         values = np.linspace(-1., 1., n_events, dtype=np.float32)[:, None]
         arrays = {
             "colour_intrinsic": values.copy(),
-            "colour_extincted": values.copy(),
         }
         args = SimpleNamespace(
-            stage="intrinsic_no_m5_no_mw",
-            builder_seed=123,
-            n_boot=20,
-            bootstrap_threshold_mag=10.,
-            minimum_tail_events=1.,
-            minimum_events=5,
-            # These deliberately extreme values must have no effect.
-            train_fraction=.01,
-            validation_fraction=.98,
+            stage="no_m5",
         )
         profile = multiquantile_profile(
             args, sample, arrays, np.arange(n_events), {}, ("g", "r"),
