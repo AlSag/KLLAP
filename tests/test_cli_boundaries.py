@@ -61,7 +61,7 @@ class CliBoundaryTest(unittest.TestCase):
         self.assertEqual(generation.model, "Bu2026_MLP")
         self.assertEqual(envelope.color_pair, "g-r")
         self.assertEqual(realizations.times, "0.5,1.0,1.5,2.0")
-        self.assertEqual(isocontours.stage, "compare_no_mw")
+        self.assertEqual(isocontours.stage, "compare")
         self.assertEqual(latitude.m5_scenario, "median_p50")
         self.assertEqual(experiment.bin_edges, [0, 5, 10, 15, 20, 25, 30, 40, 50, 90])
 

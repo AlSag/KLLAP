@@ -67,7 +67,7 @@ def population_default_configuration() -> argparse.Namespace:
         t_max=16.0, bin_width=0.4, m5_quantile_table=None,
         m5_scenario="median_p50", threshold_scope="common_global",
         latitude_bin_width=5.0, threshold_min=5.0, threshold_max=70.0,
-        threshold_step=1.0, min_events_per_side=100,
+        threshold_step=1.0, min_events_per_side=1,
         plateau_tolerance=0.02, plateau_ratio_tolerance=0.10,
         plateau_min_thresholds=3,
     )
@@ -101,7 +101,6 @@ def population_interactive(args: argparse.Namespace) -> argparse.Namespace:
     args.threshold_min = ask("Premier seuil low/high [deg]", args.threshold_min, float)
     args.threshold_max = ask("Dernier seuil low/high [deg]", args.threshold_max, float)
     args.threshold_step = ask("Pas des seuils [deg]", args.threshold_step, float)
-    args.min_events_per_side = ask("Événements minimum de chaque côté", args.min_events_per_side, int)
     output = ask("Dossier de sortie (vide = automatique)", "")
     args.output_dir = Path(output) if output else None
     args.overwrite = yes_no("Écraser un dossier de sortie non vide", False)
@@ -111,7 +110,6 @@ def population_interactive(args: argparse.Namespace) -> argparse.Namespace:
 def comparison_default_configuration() -> argparse.Namespace:
     return argparse.Namespace(
         bins=None, output_dir=Path("analysis/latitude_bin_comparison"),
-        bootstrap_repetitions=2000, confidence_level=0.95,
         plateau_relative_tolerance=0.10, minimum_plateau_bins=3,
         seed=20260930, linear_y=False, overwrite=False,
     )
@@ -132,11 +130,6 @@ def comparison_interactive(args: argparse.Namespace) -> argparse.Namespace:
             "event_window_availability.csv",
         )
         args.bins.append([str(low), str(high), table])
-    args.bootstrap_repetitions = ask("Répétitions bootstrap", args.bootstrap_repetitions, int)
-    args.confidence_level = float(choose(
-        "Intervalle de confiance", [(0.68, "68 %"), (0.95, "95 %")],
-        args.confidence_level,
-    ))
     args.plateau_relative_tolerance = ask(
         "Tolérance relative du plateau", args.plateau_relative_tolerance, float
     )
@@ -151,9 +144,8 @@ def comparison_interactive(args: argparse.Namespace) -> argparse.Namespace:
 def plateau_default_configuration() -> argparse.Namespace:
     return argparse.Namespace(
         event_table=None, pair=None, thresholds="5,10,15,20,25,30,40,50",
-        bootstrap_mode="paired", bootstrap_repetitions=2000,
-        confidence=0.95, tolerance=0.10, minimum_plateau_points=3,
-        minimum_plateau_span=10.0, min_events=100, min_mw_losses=20,
+        tolerance=0.10, minimum_plateau_points=3,
+        minimum_plateau_span=10.0,
         proposed_cut=20.0, seed=20261007,
         output_dir=Path("analysis/low_high_plateau"), overwrite=False,
     )
@@ -180,10 +172,6 @@ def plateau_interactive(args: argparse.Namespace) -> argparse.Namespace:
             low = ask(f"CSV ou dossier low |b| < {cut:g}", "event_window_availability.csv")
             high = ask(f"CSV ou dossier high |b| >= {cut:g}", "event_window_availability.csv")
             args.pair.append([str(cut), low, high])
-        args.bootstrap_mode = "paired" if yes_no(
-            "Mêmes KNe et mêmes event_id dans tous les runs", True
-        ) else "independent"
-    args.bootstrap_repetitions = ask("Répétitions bootstrap", args.bootstrap_repetitions, int)
     args.tolerance = ask("Tolérance relative du plateau", args.tolerance, float)
     args.minimum_plateau_span = ask(
         "Étendue minimale après le début du plateau [deg]", args.minimum_plateau_span, float
@@ -199,10 +187,7 @@ def plateau_interactive(args: argparse.Namespace) -> argparse.Namespace:
 #!/usr/bin/env python3
 
 
-
-
 matplotlib.use("Agg")
-
 
 
 population_LSST_R = {
@@ -225,8 +210,6 @@ population_LABELS = {
     "additional_mw_given_m5": "Additional MW loss with m5",
     "combined": "m5 + MW (total)",
 }
-
-
 
 
 def population_canonical_id(value: object) -> str:
@@ -274,8 +257,23 @@ def population_load_events(root: Path, system: str) -> tuple[pd.DataFrame, tuple
     if not summary_path.is_file():
         raise FileNotFoundError(summary_path)
     summary = pd.read_csv(summary_path, dtype={"event_id": str})
-    if "event_id" not in summary or "ebv_mw" not in summary:
-        raise ValueError("summary.csv requires event_id and ebv_mw")
+    if "event_id" not in summary:
+        raise ValueError("summary.csv requires event_id")
+    # New generator products contain model magnitudes. Only this dedicated
+    # latitude experiment retrieves dust from the original field catalogue.
+    from dynamic_color_cut_common import run_info_value
+    schema = run_info_value(root, "synthetic_schema")
+    summary["model_photometry"] = schema == "model"
+    if schema == "model":
+        location = run_info_value(root, "opsim_dir_resolved")
+        if not location:
+            raise ValueError("Latitude loss analysis needs the original OpSim field index")
+        fields = pd.read_csv(Path(location) / "opsim_fields_index.csv",
+                             usecols=["field_index", "ebv_mw"])
+        summary = summary.drop(columns=["ebv_mw"], errors="ignore").merge(
+            fields, left_on="field_idx", right_on="field_index", how="left", validate="many_to_one")
+    elif "ebv_mw" not in summary:
+        raise ValueError("Legacy latitude analysis needs field reddening in summary.csv")
     latitude = next((column for column in population_LATITUDE_COLUMNS if column in summary), None)
     if latitude is None:
         raise ValueError(
@@ -415,10 +413,12 @@ def population_count_event_bins(
         seen_lsst_rows |= not selection_curve.empty
         colour_saved = [population_interpolate(colour_curve, band, centres) for band in bands]
         selection_saved = [population_interpolate(selection_curve, band, centres) for band in bands]
-        selection_intrinsic = [
-            mag - population_extinction(row, "lsst", band)
-            for mag, band in zip(selection_saved, bands)
-        ]
+        attenuation = [population_extinction(row, "lsst", band) for band in bands]
+        if row.get("model_photometry", False):
+            selection_intrinsic = selection_saved
+            selection_saved = [mag + delta for mag, delta in zip(selection_intrinsic, attenuation)]
+        else:
+            selection_intrinsic = [mag - delta for mag, delta in zip(selection_saved, attenuation)]
         supported = np.isfinite(colour_saved[0]) & np.isfinite(colour_saved[1])
         no_mw = (
             supported & np.isfinite(selection_intrinsic[0])
@@ -813,9 +813,6 @@ def run_population_analysis(args: argparse.Namespace) -> Path:
 #!/usr/bin/env python3
 
 
-
-
-
 comparison_REQUIRED_COLUMNS = {
     "event_id",
     "abs_b_deg",
@@ -851,8 +848,6 @@ class comparison_LatitudeBin:
     def label(self) -> str:
         closing = "]" if np.isclose(self.upper, 90.0) else "["
         return f"[{self.lower:g}, {self.upper:g}{closing}"
-
-
 
 
 def comparison_load_bin(lower_text: str, upper_text: str, path_text: str) -> comparison_LatitudeBin:
@@ -1006,55 +1001,6 @@ def comparison_plateau_threshold(
     return np.nan, np.nan, np.nan
 
 
-def comparison_paired_bootstrap(
-    outcomes: np.ndarray,
-    repetitions: int,
-    seed: int,
-    lower_edges: np.ndarray,
-    tolerance: float,
-    minimum_bins: int,
-) -> tuple[np.ndarray, np.ndarray]:
-    _, n_events, _ = outcomes.shape
-    rng = np.random.default_rng(seed)
-    ratios = np.full((repetitions, outcomes.shape[0], 3), np.nan, dtype=float)
-    thresholds = np.full(repetitions, np.nan, dtype=float)
-    for repetition in range(repetitions):
-        indices = rng.integers(0, n_events, size=n_events)
-        counts = outcomes[:, indices, :].sum(axis=1)
-        _, repetition_ratios = comparison_rates_and_ratios(counts)
-        ratios[repetition] = repetition_ratios
-        thresholds[repetition] = comparison_plateau_threshold(
-            lower_edges,
-            repetition_ratios[:, 1],
-            tolerance,
-            minimum_bins,
-        )[0]
-    return ratios, thresholds
-
-
-def comparison_confidence_bounds(samples: np.ndarray, confidence: float) -> tuple[np.ndarray, np.ndarray]:
-    alpha = (1.0 - confidence) / 2.0
-    with np.errstate(all="ignore"):
-        return (
-            np.nanquantile(samples, alpha, axis=0),
-            np.nanquantile(samples, 1.0 - alpha, axis=0),
-        )
-
-
-def comparison_threshold_summary(samples: np.ndarray, confidence: float) -> dict[str, float]:
-    finite = samples[np.isfinite(samples)]
-    success = len(finite) / len(samples)
-    if len(finite) == 0:
-        return {"median": np.nan, "low": np.nan, "high": np.nan, "success": success}
-    alpha = (1.0 - confidence) / 2.0
-    return {
-        "median": float(np.median(finite)),
-        "low": float(np.quantile(finite, alpha)),
-        "high": float(np.quantile(finite, 1.0 - alpha)),
-        "success": float(success),
-    }
-
-
 def comparison_interval_x_errors(bins: list[comparison_LatitudeBin]) -> np.ndarray:
     centres = np.array([item.centre for item in bins], dtype=float)
     lower = centres - np.array([item.lower for item in bins], dtype=float)
@@ -1065,11 +1011,7 @@ def comparison_interval_x_errors(bins: list[comparison_LatitudeBin]) -> np.ndarr
 def comparison_save_plot(
     bins: list[comparison_LatitudeBin],
     ratios: np.ndarray,
-    ci_low: np.ndarray,
-    ci_high: np.ndarray,
     observed_plateau: tuple[float, float, float],
-    bootstrap_plateau: dict[str, float],
-    confidence: float,
     tolerance: float,
     linear_y: bool,
     output: Path,
@@ -1079,13 +1021,8 @@ def comparison_save_plot(
     fig, ax = plt.subplots(figsize=(10.8, 6.5), constrained_layout=True)
     for component_index, component in enumerate(comparison_COMPONENTS):
         y = ratios[:, component_index]
-        lower = ci_low[:, component_index]
-        upper = ci_high[:, component_index]
         if not linear_y:
             y = np.where(y > 0, y, np.nan)
-            lower = np.where(lower > 0, lower, np.nan)
-            upper = np.where(upper > 0, upper, np.nan)
-        ax.fill_between(centres, lower, upper, color=comparison_COLORS[component], alpha=0.14)
         ax.errorbar(
             centres,
             y,
@@ -1100,13 +1037,6 @@ def comparison_save_plot(
     ax.axhline(1.0, color="#555555", ls=":", lw=1.3, label="Reference-bin loss rate")
     threshold, level, _ = observed_plateau
     if np.isfinite(threshold):
-        if np.isfinite(bootstrap_plateau["low"]):
-            ax.axvspan(
-                bootstrap_plateau["low"],
-                bootstrap_plateau["high"],
-                color="#16866b",
-                alpha=0.09,
-            )
         ax.axvline(
             threshold,
             color="#16866b",
@@ -1132,33 +1062,14 @@ def comparison_save_plot(
     )
     ax.grid(alpha=0.22, which="both")
     ax.legend(frameon=False, fontsize=8.3, ncol=1, loc="center right")
-    confidence_text = f"{confidence:.0%} paired-event bootstrap"
-    if np.isfinite(bootstrap_plateau["median"]):
-        plateau_text = (
-            f"bootstrap b*={bootstrap_plateau['median']:.1f} "
-            f"[{bootstrap_plateau['low']:.1f}, {bootstrap_plateau['high']:.1f}] deg; "
-            f"detected in {100 * bootstrap_plateau['success']:.1f}%"
-        )
-    else:
-        plateau_text = f"plateau not detected; {100 * bootstrap_plateau['success']:.1f}% bootstrap"
-    ax.text(
-        0.995,
-        0.012,
-        f"Bands: {confidence_text}. Tail tolerance: {100*tolerance:.0f}%. {plateau_text}",
-        transform=ax.transAxes,
-        ha="right",
-        va="bottom",
-        fontsize=7.8,
-        color="#555555",
-    )
     fig.savefig(output, dpi=220, bbox_inches="tight")
     plt.close(fig)
 
 
-def comparison_ratio_text(value: float, low: float, high: float) -> str:
+def comparison_ratio_text(value: float) -> str:
     if not np.isfinite(value):
         return "undefined"
-    return f"{100*value:.2f} [{100*low:.2f}, {100*high:.2f}]"
+    return f"{100*value:.2f}"
 
 
 def comparison_save_table(
@@ -1166,11 +1077,7 @@ def comparison_save_table(
     counts: np.ndarray,
     rates: np.ndarray,
     ratios: np.ndarray,
-    ci_low: np.ndarray,
-    ci_high: np.ndarray,
     observed_plateau: tuple[float, float, float],
-    bootstrap_plateau: dict[str, float],
-    confidence: float,
     tolerance: float,
     output: Path,
 ) -> None:
@@ -1189,10 +1096,10 @@ def comparison_save_table(
                 f"{counts[index, 0]:,}",
                 f"{counts[index, 2]:,}",
                 f"{100*rates[index, 1]:.2f}",
-                comparison_ratio_text(mw_ratio, ci_low[index, 1], ci_high[index, 1]),
+                comparison_ratio_text(mw_ratio),
                 f"{reduction:.2f}" if np.isfinite(reduction) else "undefined",
-                comparison_ratio_text(ratios[index, 0], ci_low[index, 0], ci_high[index, 0]),
-                comparison_ratio_text(ratios[index, 2], ci_low[index, 2], ci_high[index, 2]),
+                comparison_ratio_text(ratios[index, 0]),
+                comparison_ratio_text(ratios[index, 2]),
             ]
         )
         colours.append("#d8eee8" if "*" in label else ("#f4f6f8" if index % 2 else "#ffffff"))
@@ -1201,10 +1108,10 @@ def comparison_save_table(
         "N valid",
         "MW losses",
         "MW loss rate [%]",
-        f"MW R [{confidence:.0%} CI] %",
+        f"MW R %",
         "MW reduction [%]",
-        f"m5 R [{confidence:.0%} CI] %",
-        f"Total R [{confidence:.0%} CI] %",
+        f"m5 R %",
+        f"Total R %",
     ]
     height = max(4.0, 0.48 * len(rows) + 2.1)
     fig, ax = plt.subplots(figsize=(15.2, height), constrained_layout=True)
@@ -1241,18 +1148,6 @@ def comparison_save_table(
             f"No observed operational plateau satisfies the {100*tolerance:.0f}% "
             "all-subsequent-bins criterion."
         )
-    if np.isfinite(bootstrap_plateau["median"]):
-        bootstrap_text = (
-            f"Bootstrap b*: {bootstrap_plateau['median']:.2f} "
-            f"[{bootstrap_plateau['low']:.2f}, {bootstrap_plateau['high']:.2f}] deg "
-            f"({confidence:.0%}); detected in {100*bootstrap_plateau['success']:.1f}% "
-            "of paired-event resamples."
-        )
-    else:
-        bootstrap_text = (
-            f"Bootstrap plateau not robustly detected "
-            f"({100*bootstrap_plateau['success']:.1f}% of resamples)."
-        )
     fig.text(
         0.015,
         0.105,
@@ -1263,13 +1158,10 @@ def comparison_save_table(
         fontsize=8.5,
     )
     fig.text(0.015, 0.064, observed_text, ha="left", va="bottom", fontsize=8.5)
-    fig.text(0.015, 0.023, bootstrap_text, ha="left", va="bottom", fontsize=8.5)
     fig.savefig(output, dpi=220, bbox_inches="tight")
     plt.close(fig)
 
 def run_bin_comparison(args: argparse.Namespace) -> tuple[Path, Path]:
-    if args.bootstrap_repetitions < 100:
-        raise ValueError("Use at least 100 bootstrap repetitions")
     if not 0 < args.plateau_relative_tolerance < 1:
         raise ValueError("--plateau-relative-tolerance must lie in (0, 1)")
     if args.minimum_plateau_bins < 2:
@@ -1292,32 +1184,16 @@ def run_bin_comparison(args: argparse.Namespace) -> tuple[Path, Path]:
     rates, ratios = comparison_rates_and_ratios(counts)
     if not np.isfinite(ratios[:, 1]).all():
         raise ValueError("MW reference loss rate is zero; relative MW ratios are undefined")
-    bootstrap_ratios, bootstrap_thresholds = comparison_paired_bootstrap(
-        outcomes,
-        args.bootstrap_repetitions,
-        args.seed,
-        np.array([item.lower for item in bins]),
-        args.plateau_relative_tolerance,
-        args.minimum_plateau_bins,
-    )
-    ci_low, ci_high = comparison_confidence_bounds(bootstrap_ratios, args.confidence_level)
     observed_plateau = comparison_plateau_threshold(
         np.array([item.lower for item in bins]),
         ratios[:, 1],
         args.plateau_relative_tolerance,
         args.minimum_plateau_bins,
     )
-    bootstrap_plateau = comparison_threshold_summary(
-        bootstrap_thresholds, args.confidence_level
-    )
     comparison_save_plot(
         bins,
         ratios,
-        ci_low,
-        ci_high,
         observed_plateau,
-        bootstrap_plateau,
-        args.confidence_level,
         args.plateau_relative_tolerance,
         args.linear_y,
         plot_path,
@@ -1327,11 +1203,7 @@ def run_bin_comparison(args: argparse.Namespace) -> tuple[Path, Path]:
         counts,
         rates,
         ratios,
-        ci_low,
-        ci_high,
         observed_plateau,
-        bootstrap_plateau,
-        args.confidence_level,
         args.plateau_relative_tolerance,
         table_path,
     )
@@ -1340,17 +1212,6 @@ def run_bin_comparison(args: argparse.Namespace) -> tuple[Path, Path]:
         print(f"Observed operational plateau starts at: {observed_plateau[0]:g} deg")
     else:
         print("Observed operational plateau: not detected")
-    if np.isfinite(bootstrap_plateau["median"]):
-        print(
-            f"Bootstrap plateau: {bootstrap_plateau['median']:.2f} "
-            f"[{bootstrap_plateau['low']:.2f}, {bootstrap_plateau['high']:.2f}] deg; "
-            f"success={100*bootstrap_plateau['success']:.1f}%"
-        )
-    else:
-        print(
-            "Bootstrap plateau: not robustly detected; "
-            f"success={100*bootstrap_plateau['success']:.1f}%"
-        )
     print(f"Plot: {plot_path}")
     print(f"Table: {table_path}")
     return plot_path, table_path
@@ -1425,7 +1286,7 @@ def plateau_high_over_low(counts):
                      out=np.full_like(rates[..., 0], np.nan), where=rates[..., 0] > 0)
 
 
-def plateau_allsky_counts(text, cuts, repetitions, rng):
+def plateau_allsky_counts(text, cuts):
     df, outcomes, config = plateau_load_table(text)
     valid = outcomes[:, 0].astype(bool)
     removed = int((~valid).sum())
@@ -1433,8 +1294,6 @@ def plateau_allsky_counts(text, cuts, repetitions, rng):
     outcomes = outcomes[valid]
     if len(outcomes) == 0:
         raise ValueError("Aucune KNe avec couleur de reference")
-    # Aggregating into latitude x outcome categories is exactly an event
-    # bootstrap for these statistics and preserves overlap across all cuts.
     latitude_cell = np.searchsorted(cuts, latitude, side="right")
     outcome_cell = np.where(outcomes[:, 1] > 0, 0,
                             np.where(outcomes[:, 2] > 0, 1, 2))
@@ -1449,11 +1308,10 @@ def plateau_allsky_counts(text, cuts, repetitions, rng):
         return np.stack([sides.sum(axis=-1), sides[..., 0], sides[..., 1]], axis=-1)
 
     observed = convert(cells)
-    draws = rng.multinomial(int(cells.sum()), cells / cells.sum(), size=repetitions)
-    return observed, convert(draws), [config], f"Bootstrap evenements commun a tous les seuils; {removed} sans couleur exclus"
+    return observed, [config], f"{removed} événements sans couleur exclus"
 
 
-def plateau_pair_counts(raw_pairs, repetitions, rng, mode):
+def plateau_pair_counts(raw_pairs):
     pairs = sorted(raw_pairs, key=lambda row: float(row[0]))
     cuts = np.array([float(row[0]) for row in pairs])
     runs, configs = [], []
@@ -1469,34 +1327,7 @@ def plateau_pair_counts(raw_pairs, repetitions, rng, mode):
         runs.append(sides)
     plateau_consistent_configs(configs)
     observed = np.array([[out.sum(axis=0) for _, out in pair] for pair in runs])
-    boot = np.zeros((repetitions, len(cuts), 2, 3), dtype=int)
-    if mode == "paired":
-        ids = runs[0][0][0]
-        reference = set(ids)
-        aligned = []
-        for pair in runs:
-            aligned_pair = []
-            for side_ids, out in pair:
-                if set(side_ids) != reference:
-                    raise ValueError("Mode apparie : memes event_id requis dans tous les runs")
-                order = {identifier: i for i, identifier in enumerate(side_ids)}
-                aligned_pair.append(out[[order[identifier] for identifier in ids]])
-            aligned.append(aligned_pair)
-        for start in range(0, repetitions, 50):
-            stop = min(repetitions, start + 50)
-            indices = rng.integers(len(ids), size=(stop - start, len(ids)))
-            for j, pair in enumerate(aligned):
-                for side, out in enumerate(pair):
-                    boot[start:stop, j, side] = out[indices].sum(axis=1)
-        note = "Bootstrap apparie; event_id doit identifier la meme KNe synthetique dans tous les runs"
-    else:
-        for j, pair in enumerate(runs):
-            for side, (_, out) in enumerate(pair):
-                patterns, freq = np.unique(out, axis=0, return_counts=True)
-                draws = rng.multinomial(len(out), freq / freq.sum(), size=repetitions)
-                boot[:, j, side] = draws @ patterns
-        note = "Bootstrap independant; les runs doivent etre des simulations independantes"
-    return cuts, observed, boot, configs, note
+    return cuts, observed, configs, "Comptages par population et par seuil"
 
 
 def plateau_tail_deviation(q):
@@ -1509,10 +1340,8 @@ def plateau_tail_deviation(q):
     return np.where(valid, deviation, np.inf)
 
 
-def plateau_assess_plateau(cuts, q, q_boot, counts, args):
-    reliable = ((counts[..., 0] >= args.min_events).all(axis=1)
-                & (counts[..., 2] >= args.min_mw_losses).all(axis=1)
-                & np.isfinite(q))
+def plateau_assess_plateau(cuts, q, counts, args):
+    reliable = np.isfinite(q)
     rows = []
     selected = None
     for i, cut in enumerate(cuts):
@@ -1523,35 +1352,15 @@ def plateau_assess_plateau(cuts, q, q_boot, counts, args):
             continue
         if not reliable[i:].all():
             bad = i + int(np.flatnonzero(~reliable[i:])[0])
-            if (counts[bad, :, 0] < args.min_events).any():
-                reason = f"Effectif faible a {cuts[bad]:g} deg"
-            elif (counts[bad, :, 2] < args.min_mw_losses).any():
-                reason = f"Pertes rares a {cuts[bad]:g} deg"
-            else:
-                reason = f"Rapport indefini a {cuts[bad]:g} deg"
+            reason = f"Rapport indéfini à {cuts[bad]:g} deg"
             rows.append((reason, np.nan, np.nan))
             continue
         observed = float(plateau_tail_deviation(q[i:]))
-        deviations = plateau_tail_deviation(q_boot[:, i:])
-        # A one-sided percentile bound on this maximum uses the entire tail,
-        # rather than declaring stability from overlapping pointwise intervals.
-        ordered = np.sort(deviations)
-        upper = float(ordered[max(0, int(np.ceil(args.confidence * len(ordered))) - 1)])
-        accepted = observed <= args.tolerance and upper <= args.tolerance
-        rows.append(("Plateau compatible" if accepted else "Non confirme", observed, upper))
+        accepted = observed <= args.tolerance
+        rows.append(("Plateau compatible" if accepted else "Hors tolérance", observed, np.nan))
         if accepted and selected is None:
             selected = i
     return selected, rows
-
-
-def plateau_bootstrap_ci(q_boot, confidence):
-    alpha = (1 - confidence) / 2
-    lower, upper = [], []
-    for column in q_boot.T:
-        finite = column[np.isfinite(column)]
-        bounds = np.quantile(finite, [alpha, 1-alpha]) if len(finite) else [np.nan, np.nan]
-        lower.append(bounds[0]); upper.append(bounds[1])
-    return np.array(lower), np.array(upper)
 
 
 def plateau_summary_text(cuts, selected, args):
@@ -1561,7 +1370,7 @@ def plateau_summary_text(cuts, selected, args):
             f"(teste jusqu'a {cuts[-1]:g} deg)")
 
 
-def plateau_save_outputs(cuts, counts, q, lo, hi, selected, status, configs, note, args):
+def plateau_save_outputs(cuts, counts, q, selected, status, configs, note, args):
     output = args.output_dir.expanduser().resolve()
     plot = output / "kne_low_high_mw_plateau.png"
     table_path = output / "kne_low_high_mw_values.png"
@@ -1576,8 +1385,6 @@ def plateau_save_outputs(cuts, counts, q, lo, hi, selected, status, configs, not
     summary = plateau_summary_text(cuts, selected, args)
     fig, ax = plt.subplots(figsize=(10.4, 6.8))
     fig.subplots_adjust(left=0.12, right=0.97, bottom=0.25, top=0.96)
-    ax.fill_between(cuts, 100*lo, 100*hi, color="#e08616", alpha=.20,
-                    label=f"Intervalle bootstrap {args.confidence:.0%} (point par point)")
     ax.plot(cuts, 100*q, "o-", color="#b96007", lw=2.5,
             label="Pertes MW : taux high / taux low")
     if cuts[0] <= args.proposed_cut <= cuts[-1]:
@@ -1590,7 +1397,7 @@ def plateau_save_outputs(cuts, counts, q, lo, hi, selected, status, configs, not
                         color="#168066", alpha=.16, label="Zone de tolerance du plateau")
         ax.axvline(cuts[selected], color="#168066", lw=2,
                    label=f"Plateau operationnel : {cuts[selected]:g} deg")
-    if np.isfinite(hi).any() and np.nanmax(hi) >= .8:
+    if np.isfinite(q).any() and np.nanmax(q) >= .8:
         ax.axhline(100, color="gray", lw=1, ls=":")
     ax.set_ylim(bottom=0)
     ax.set_xlabel(r"Seuil $b_{\rm cut}$ [deg] : low $|b|<b_{\rm cut}$ ; high $|b|\geq b_{\rm cut}$")
@@ -1600,7 +1407,7 @@ def plateau_save_outputs(cuts, counts, q, lo, hi, selected, status, configs, not
     ax.legend(frameon=False, fontsize=9)
     fig.text(.12, .16, summary, fontsize=12, weight="bold", color="#168066" if selected is not None else "#4e5966")
     fig.text(.12, .115, "Q = 10 % : le taux de perte high vaut 10 % du taux low (90 % de moins).", fontsize=9)
-    fig.text(.12, .075, f"Plateau : tous les seuils suivants ; tolerance {args.tolerance:.0%} ; borne bootstrap {args.confidence:.0%}.", fontsize=9)
+    fig.text(.12, .075, f"Plateau : tous les seuils suivants ; tolerance {args.tolerance:.0%}.", fontsize=9)
     fig.text(.12, .035, details or "Perte MW supplementaire apres m5 ; denominateur = KNe avec couleur sans coupure.", fontsize=9, color="#555555")
     fig.savefig(plot, dpi=200)
     plt.close(fig)
@@ -1616,13 +1423,13 @@ def plateau_save_outputs(cuts, counts, q, lo, hi, selected, status, configs, not
         fh = lh/nh if nh else np.nan
         rows.append([f"{cut:g}", f"{ll:,}/{nl:,}", ratio(fl),
                      f"{lh:,}/{nh:,}", ratio(fh),
-                     f"{ratio(q[i])} [{ratio(lo[i])}, {ratio(hi[i])}]",
+                     ratio(q[i]),
                      ratio(1-q[i]), status[i][0]])
     fig, ax = plt.subplots(figsize=(16, max(5.4, 2.6 + .43*len(rows))))
     ax.axis("off")
     cols = ["Seuil [deg]", "Pertes MW low / N low", "Taux low [%]",
             "Pertes MW high / N high", "Taux high [%]",
-            f"Q high/low [%], IC {args.confidence:.0%}", "Baisse 1-Q [%]", "Plateau a partir d'ici"]
+            "Q high/low [%]", "Baisse 1-Q [%]", "Plateau a partir d'ici"]
     tab = ax.table(cellText=rows, colLabels=cols, cellLoc="center",
                    colWidths=[.065,.15,.09,.15,.09,.18,.095,.18], bbox=[0,.28,1,.70])
     tab.auto_set_font_size(False); tab.set_fontsize(8.5)
@@ -1636,7 +1443,7 @@ def plateau_save_outputs(cuts, counts, q, lo, hi, selected, status, configs, not
     fig.text(.06, .21, summary, fontsize=12, weight="bold")
     fig.text(.06, .16, "Une perte MW = couleur possible apres m5 sans poussiere, aucun bin couleur restant apres ajout de MW.", fontsize=9)
     fig.text(.06, .12, "N = KNe avec au moins un bin couleur avant m5 et MW. Les pertes deja dues a m5 ne sont pas comptees comme pertes MW.", fontsize=9)
-    fig.text(.06, .08, "Q = taux high / taux low. Les intervalles sont point par point ; le test de plateau porte sur toute la suite des seuils.", fontsize=9)
+    fig.text(.06, .08, "Q = taux high / taux low. Le test de plateau porte sur toute la suite des seuils.", fontsize=9)
     fig.text(.06, .04, details or note, fontsize=8.5, color="#555555")
     fig.savefig(table_path, dpi=180, bbox_inches="tight"); plt.close(fig)
     return plot, table_path
@@ -1651,22 +1458,20 @@ def plateau_parse_cuts(text):
 def run_plateau_analysis(args: argparse.Namespace) -> tuple[Path, Path]:
     if args.event_table is None and not args.pair:
         raise ValueError("Indiquer une table all-sky ou plusieurs paires low/high")
-    if args.bootstrap_repetitions < 100 or not 0 < args.tolerance < 1:
-        raise ValueError("Au moins 100 bootstraps et une tolérance dans ]0,1[ sont requis")
-    if args.min_events < 1 or args.min_mw_losses < 1 or args.minimum_plateau_points < 3 or args.minimum_plateau_span <= 0:
+    if not 0 < args.tolerance < 1:
+        raise ValueError("Tolerance must lie between zero and one")
+    if args.minimum_plateau_points < 3 or args.minimum_plateau_span <= 0:
         raise ValueError("Effectifs minimum positifs, au moins 3 points et une étendue positive requis")
-    rng = np.random.default_rng(args.seed)
     if args.event_table is not None:
         cuts = plateau_parse_cuts(args.thresholds)
-        counts, boot, configs, note = plateau_allsky_counts(args.event_table, cuts, args.bootstrap_repetitions, rng)
+        counts, configs, note = plateau_allsky_counts(args.event_table, cuts)
     else:
-        cuts, counts, boot, configs, note = plateau_pair_counts(args.pair, args.bootstrap_repetitions, rng, args.bootstrap_mode)
+        cuts, counts, configs, note = plateau_pair_counts(args.pair)
         if len(cuts) < 3 or len(set(cuts)) != len(cuts) or not ((cuts > 0) & (cuts < 90)).all():
             raise ValueError("Donner au moins 3 seuils distincts dans ]0,90[")
-    q = plateau_high_over_low(counts); q_boot = plateau_high_over_low(boot)
-    lo, hi = plateau_bootstrap_ci(q_boot, args.confidence)
-    selected, status = plateau_assess_plateau(cuts, q, q_boot, counts, args)
-    plot, table = plateau_save_outputs(cuts, counts, q, lo, hi, selected, status, configs, note, args)
+    q = plateau_high_over_low(counts)
+    selected, status = plateau_assess_plateau(cuts, q, counts, args)
+    plot, table = plateau_save_outputs(cuts, counts, q, selected, status, configs, note, args)
     print(plateau_summary_text(cuts, selected, args)); print(note)
     for i, cut in enumerate(cuts):
         print(f"{cut:g} deg : low {counts[i,0,2]}/{counts[i,0,0]}, high {counts[i,1,2]}/{counts[i,1,0]}, Q={q[i]:.4g} ; {status[i][0]}")

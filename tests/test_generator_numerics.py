@@ -12,9 +12,6 @@ from kne_pipeline_common import interpolate_magnitude_log_time
 from generate_kne_lightcurves import (
     _apply_synthetic_m5_median_cut as apply_synthetic_m5_median_cut,
     _derive_sky_seed as derive_sky_seed,
-    _ensure_mw_extinction_columns as ensure_mw_extinction_columns,
-    _get_event_mw_extinction_summary as get_event_mw_extinction_summary,
-    _keep_only_mw_extincted_synthetic_magnitude as keep_only_mw_extincted_synthetic_magnitude,
     _trim_lsstlike_after_last_detection as trim_lsstlike_after_last_detection,
     sample_distance_redshift_for_event,
     sample_inclination_for_event,
@@ -51,23 +48,12 @@ class MidpointRng:
 
 
 class GeneratorNumericsTest(unittest.TestCase):
-    def test_extinction_summary_calls_the_parameterized_core_helper(self):
-        visits = pd.DataFrame({
-            "band": ["g", "r"],
-            "ebv_mw": [0.1, 0.1],
-            "fieldRA": [10.0, 10.0],
-            "fieldDec": [-20.0, -20.0],
-        })
-        coefficients = {band: 1.0 for band in "ugrizy"}
+    def test_coordinates_do_not_require_dust_metadata(self):
+        from generate_kne_lightcurves import summarize_field
+        result = summarize_field(pd.DataFrame({"fieldRA":[20.], "fieldDec":[-30.]}))
+        self.assertEqual(result, {"fieldRA":20., "fieldDec":-30., "target_name":""})
 
-        summary = get_event_mw_extinction_summary(visits, coefficients)
-
-        self.assertAlmostEqual(summary["ebv_mw"], 0.1)
-        self.assertAlmostEqual(summary["A_g_mw"], 0.1)
-        self.assertAlmostEqual(summary["A_r_mw"], 0.1)
-
-    def test_lazy_rubin_initialization_updates_multisystem_coefficients(self):
-        coefficients = {band: float(index) for index, band in enumerate("ugrizy", 1)}
+    def test_lazy_rubin_initialization_loads_bandpasses(self):
 
         class PhotometricParameters:
             def __init__(self, bandpass):
@@ -77,17 +63,12 @@ class GeneratorNumericsTest(unittest.TestCase):
             "initialize_rubin_photometry",
             BP=None,
             PHOT=None,
-            DUST_R_X=None,
-            DUST_R_X_BY_SYSTEM={"lsst": None},
             rubin_bandpasses=lambda: {band: f"bp-{band}" for band in "ugrizy"},
             PhotometricParameters=PhotometricParameters,
-            get_rubin_dust_coefficients=lambda: coefficients,
         )
         with redirect_stdout(io.StringIO()):
             scope["initialize_rubin_photometry"]()
 
-        self.assertEqual(scope["DUST_R_X"], coefficients)
-        self.assertIs(scope["DUST_R_X_BY_SYSTEM"]["lsst"], coefficients)
         self.assertEqual(scope["PHOT"]["g"].bandpass, "g")
 
     def test_log_time_interpolation_has_no_extrapolation(self):
@@ -107,22 +88,6 @@ class GeneratorNumericsTest(unittest.TestCase):
         )
         np.testing.assert_allclose(result, [22.0], atol=1e-12)
 
-    def test_mw_extinction_is_computed_from_each_band_coefficient(self):
-        coefficients = {
-            "u": 4.0,
-            "g": 3.0,
-            "r": 2.0,
-            "i": 1.5,
-            "z": 1.2,
-            "y": 1.0,
-        }
-        visits = pd.DataFrame({"band": ["g", "r"], "ebv_mw": [0.1, 0.2]})
-        result = ensure_mw_extinction_columns(visits, coefficients)
-
-        np.testing.assert_allclose(result["R_mw"], [3.0, 2.0])
-        np.testing.assert_allclose(result["A_mw"], [0.3, 0.4])
-        np.testing.assert_allclose(result["A_g_mw"], [0.3, 0.6])
-        self.assertNotIn("A_mw", visits.columns)
 
     def test_m5_cut_is_inclusive_and_rebuilds_identifiers(self):
         measurements = pd.DataFrame(
@@ -142,15 +107,6 @@ class GeneratorNumericsTest(unittest.TestCase):
         self.assertEqual(result["objectid"].tolist(), ["event42"])
         self.assertEqual(result["candidate_id"].tolist(), ["event42_1"])
 
-    def test_saved_synthetic_magnitude_is_the_extincted_value(self):
-        measurements = pd.DataFrame(
-            {"mag": [20.0, 21.0], "mag_mw_extincted": [20.3, 21.4]}
-        )
-        result = keep_only_mw_extincted_synthetic_magnitude(measurements)
-
-        np.testing.assert_allclose(result["mag"], [20.3, 21.4])
-        self.assertNotIn("mag_mw_extincted", result.columns)
-        np.testing.assert_allclose(measurements["mag"], [20.0, 21.0])
 
     def test_last_detection_window_never_removes_a_detection(self):
         observations = pd.DataFrame(

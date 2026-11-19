@@ -9,7 +9,7 @@ Before a production analysis:
    assets;
 4. retain the Rubin OpSim database version and the generated OpSim export
    manifest;
-5. use explicit intrinsic, sky/noise, bootstrap, and plotting seeds;
+5. use explicit intrinsic, sky/noise, subset and plotting seeds;
 6. run a small CSV+Parquet validation population before a large Parquet run;
 7. run `python -m unittest discover -s tests -v`;
 8. archive configuration files, `run_info.txt`, manifests, and scientific

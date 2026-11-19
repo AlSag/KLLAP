@@ -1,7 +1,7 @@
 """Saved-population discovery and metadata selection for KNe analyses.
 
 This module owns storage access only. It does not calculate colours, apply
-depth thresholds, bootstrap percentiles, or create figures. Keeping it neutral
+depth thresholds, estimate percentiles, or create figures. Keeping it neutral
 prevents analysis commands from importing the envelope-builder command merely
 to read the same generated population.
 """
@@ -143,7 +143,7 @@ def prepare_metadata(
     if summary.empty:
         raise FileNotFoundError(f"Missing usable {run_root(args.run_dir) / 'summary.csv'}")
     required_columns = (
-        "ebv_mw", "inclination_EM", "luminosity_distance", "redshift",
+        "inclination_EM", "luminosity_distance", "redshift",
     )
     optional_physical_columns = (
         "log10_mej_dyn", "log10_mej_wind", "v_ej_dyn", "Ye_dyn",

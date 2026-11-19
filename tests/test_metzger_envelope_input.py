@@ -13,7 +13,7 @@ from build_color_envelopes import (
 
 class MetzgerEnvelopeInputTest(unittest.TestCase):
     def test_metzger_metadata_and_exit_parameters_are_retained(self):
-        row = dict(event_id="000000", model="MetzgerFullModel", ebv_mw=0.1,
+        row = dict(event_id="000000", model="MetzgerFullModel",
                    inclination_EM=0.5, luminosity_distance=40.7, redshift=0.009,
                    log10_mej=-2, log10_vej=-1, beta=3, log10_kappa_r=1,
                    log10_mej_dyn=np.nan, log10_mej_wind=np.nan)
@@ -35,16 +35,3 @@ class MetzgerEnvelopeInputTest(unittest.TestCase):
         self.assertAlmostEqual(exits["v_min_c"].iloc[0], 0.1)
         self.assertAlmostEqual(exits["kappa_r_cm2_g"].iloc[0], 10)
         self.assertFalse(exits["inclination_used_by_model"].iloc[0])
-
-    def test_required_foreground_metadata_is_still_enforced(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            pd.DataFrame([dict(event_id=0, model="MetzgerModel")]).to_csv(root / "summary.csv", index=False)
-            args = default_configuration()
-            args.run_dir = root
-            with self.assertRaisesRegex(ValueError, "ebv_mw"):
-                prepare_metadata(args, {canonical_event_id(0)})
-
-
-if __name__ == "__main__":
-    unittest.main()

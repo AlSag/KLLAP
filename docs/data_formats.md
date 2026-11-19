@@ -12,8 +12,9 @@ high/low Galactic-latitude subsets.
 ## KNe run
 
 Every injected event has one row in `summary.csv`, including its physical
-parameters, luminosity distance, redshift, sky assignment, and extinction
-metadata. Long-form synthetic and LSST-like light curves are stored either as
+parameters, luminosity distance, redshift and sky assignment. New runs use
+`synthetic_schema=model`; `mag` contains the saved model magnitude without
+foreground extinction. Long-form synthetic and LSST-like light curves are stored either as
 individual CSV files or sharded Parquet datasets. `run_info.txt` records the
 configuration and the absolute OpSim source used by downstream m5 discovery.
 

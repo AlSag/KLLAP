@@ -640,7 +640,11 @@ def save_light_curve_outputs(
 
 
 def main() -> Path:
-    args = build_parser().parse_args()
+    if __package__:
+        from .terminal_options import read_options
+    else:
+        from terminal_options import read_options
+    args = read_options(build_parser())
     path = args.input.expanduser().resolve()
     if not path.exists():
         raise FileNotFoundError(path)

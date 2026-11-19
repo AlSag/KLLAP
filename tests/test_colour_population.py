@@ -52,22 +52,22 @@ class ColourPopulationTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "bounds.csv"
             pd.DataFrame({
-                "stage": ["m5_no_mw", "m5_no_mw"],
+                "stage": ["m5", "m5"],
                 "t_min_days": [0.4, 1.0],
                 "t_max_days": [1.0, 2.0],
                 "color_min": [0.0, 0.5],
                 "color_max": [1.0, 1.5],
             }).to_csv(path, index=False)
-            bounds = read_bounds(path, np.array([1.0, 2.0, 3.0]), "m5_no_mw")
+            bounds = read_bounds(path, np.array([1.0, 2.0, 3.0]), "m5")
         np.testing.assert_allclose(bounds.color_min[:2], [0.5, 0.5])
         self.assertEqual(bounds.bounds_status.iloc[2], "missing_or_invalid")
 
-    def test_colour_loading_preserves_mw_and_depth_conventions(self):
+    def test_colour_loading_preserves_saved_magnitudes_and_depth_conventions(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             metadata = self.make_population(root)
             args = SimpleNamespace(
-                photometric_system="lsst", stage="m5_with_mw",
+                photometric_system="lsst", stage="m5",
                 time_frame="observer", color_pair="g-r",
             )
             colour, supported, available = load_event_colours(

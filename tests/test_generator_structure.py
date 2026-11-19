@@ -51,7 +51,7 @@ class GeneratorStructureTest(unittest.TestCase):
         functions = {
             node.name for node in self.tree.body if isinstance(node, ast.FunctionDef)
         }
-        self.assertIn("ensure_mw_extinction_columns", functions)
+        self.assertIn("summarize_field", functions)
         self.assertIn("plot_synthetic_only", functions)
         self.assertIn("configure_runtime", functions)
         self.assertIn("run_generation", functions)
@@ -106,7 +106,7 @@ class GeneratorStructureTest(unittest.TestCase):
                 "INCLINATION_SAMPLING", "INCLINATION_MIN_RAD",
                 "INCLINATION_MAX_RAD",
             },
-            "add_multisystem_extinction_summary": {"FILTER_SYSTEMS"},
+
         }
         functions = {
             node.name: node

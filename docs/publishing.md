@@ -7,7 +7,7 @@ before merging.
 ## Prepare the branch
 
 ```bash
-git switch -c repository-update-2026-10
+git switch -c review/photometry-population
 git status --short
 ```
 
@@ -63,7 +63,7 @@ excluded.
 ## Push and review
 
 ```bash
-git push -u origin repository-update-2026-10
+git push -u origin review/photometry-population
 ```
 
 Open a pull request into `main`, confirm the CI result, review the rendered
@@ -74,3 +74,20 @@ confirmed.
 Keep private keys outside the repository and use an SSH agent or Git credential
 manager. Large reproducibility products belong in an external data archive,
 with checksums and an immutable citation in the repository.
+
+## Apply the supplied patch without changing a dirty local checkout
+
+From an existing authenticated clone, fetch the current base and create a
+separate worktree. Replace `/path/to/KLLAP_update.patch` with the downloaded
+patch path. This preserves uncommitted work in the original checkout.
+
+```bash
+git fetch origin
+git worktree add -b review/photometry-population ../KLLAP-review origin/main
+cd ../KLLAP-review
+git am --3way /path/to/KLLAP_update.patch
+git push -u origin review/photometry-population
+```
+
+If the review branch already exists, choose another branch/worktree name.
+Review the scientific changes and migration notes before merging into `main`.

@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Build four colour envelopes from saved synthetic light curves.
+"""Build empirical colour envelopes using 100% of the selected synthetic population.
+
+No training/validation/test partition is created or configurable. All selected
+KNe (and all selected comparison SNe Ia) enter envelope estimation. Explicit
+latitude selection, max_events, numerical support and photometric criteria still apply.
 
 The reader prefers sharded ``parquet/synthetic_part_*.parquet`` populations
 and falls back to legacy one-file-per-event CSV products. New paired shards
@@ -7,57 +11,47 @@ may contain LSST, PS1 and ZTF magnitudes for the same event IDs. The script neve
 evaluates the surrogate, so both storage layouts preserve the generator's
 numerical and photometric selections exactly.
 
-Stages
-------
-1. intrinsic_no_m5_no_mw:
-   numerically supported magnitudes saved by ``generate_kne_lightcurves.py``,
-   with MW extinction removed and without an m5 cut.
-2. no_m5_with_mw:
-   the saved MW-extincted magnitudes, without an m5 cut.
-3. m5_no_mw:
-   the same intrinsic magnitudes, retained only when both bands are brighter
-   than their selected m5 thresholds.
-4. m5_with_mw:
-   MW extinction is added to both bands before applying the same m5 cuts.
-
-For a PS1 envelope, colour values and extinction coefficients are PS1. Rubin
-OpSim m5 is nevertheless evaluated on the corresponding saved LSST bands,
-because OpSim supplies Rubin rather than PS1 visit depths. Thus the code never
-compares a PS1 magnitude directly with an LSST m5 threshold.
-
-For a ZTF envelope, colour values, MW coefficients and depth selection are all
-ZTF. Depth thresholds can be entered directly, read from a quantile table,
-or obtained from legacy per-image limiting-magnitude KDEs. This controlled global-depth
-comparison does not simulate ZTF cadence, weather correlations or visit noise.
-
-The script never reloads or evaluates the light-curve model. Consequently, the numerical
-support cut chosen during generation is preserved exactly.  Saved synthetic
-``mag`` values include MW extinction; intrinsic magnitudes are reconstructed
-with ``m_intrinsic = m_saved - R_band E(B-V)``.
+The no_m5 stage uses the saved magnitudes as supplied; m5 requires both
+bands to pass the selected depth. PS1 colours use the paired LSST bands for
+depth selection. ZTF uses its own depths.
 
 The analysed population can use every generated latitude, only
 ``|b| >= b_cut`` events, or only ``|b| < b_cut`` events. ``b_cut`` is freely
 configurable. This population selection is independent of the latitude scope
 used to obtain the OpSim m5 quantiles.
 
-Envelope bounds are chosen from a grid extending up to p49-p51 and, if
-necessary, the degenerate p50-p50 case.  The widest statistically valid pair
-is retained in each temporal bin.  The median is always stored and drawn.
+The user chooses one fixed empirical interval p_q--p_(100-q), for example
+p1--p99. Every temporal bin containing at least one usable event is retained.
+The median and the contributing event count are stored with the interval.
 
 Population panels use every finite saved synthetic point, including points
-rejected by m5.  The no-MW stages show the complete intrinsic population;
-the with-MW stages show the complete MW-extincted population.  Each event is
-drawn as an individual trajectory joining its saved samples:
+rejected by m5. Each trajectory joins one event’s saved samples:
 there is no population binning and no evaluation at envelope-bin centres.
 Envelope estimation still uses fixed bin centres for a reproducible cut
 definition.
 
 An optional Rubin/LSST SN Ia parquet population can be projected onto a
-deterministic sample of the KNe sky positions.  The corresponding KNe
-``E(B-V)`` and Rubin extinction coefficients are then used to produce four
-strictly separated SN Ia stages: with/without foreground MW extinction,
-each with/without the selected Rubin m5 cut.  The code writes SN Ia population
-plots, SN Ia envelopes, KNe--SN Ia overlays, and per-bin overlap diagnostics.
+deterministic sample of KNe sky positions and compared at the same depths.
+
+Optional upper-limit diagnostics (LSST and ZTF, same-system depths only)
+------------------------------------------------------------------------
+Enable "Include colour constraints from upper limits" at the terminal prompt.
+The input must retain finite synthetic magnitudes below m5: use the generator's
+"Keep every finite synthetic model point" output, NOT boom_input CSVs where
+non-detection magnitudes are blank. Missing/unsupported model points are unknown,
+never automatically interpreted as non-detections. Depths at bin centres are
+assumed observing thresholds, not actual cadence or forced-photometry data.
+
+For colour b1-b2, with b2 detected, define L = b1-b2 when both are detected,
+and L = m5_b1-b2 when b1 is not detected. Thus L <= true colour for each event.
+Purple hatched bands summarize the distribution of L among b2 detections;
+they are NOT a two-sided envelope of true colours. Quantile-identification
+intervals are also saved without assuming
+independent censoring; infinite upper endpoints remain explicitly infinite.
+Two non-detections provide no finite colour bound. b1-only detections provide an
+upper colour bound and are counted but not merged into the lower-bound sample.
+The original detection-only envelopes and their SN Ia overlap calculations stay
+as before. New outputs live in each m5 stage's upper_limits/ subdirectory.
 """
 
 from __future__ import annotations
@@ -75,7 +69,6 @@ import pandas as pd
 from scipy.signal import find_peaks
 
 from dynamic_color_cut_common import (
-    assign_event_splits,
     canonical_event_id,
     interpolate_band,
     parse_floats,
@@ -83,17 +76,7 @@ from dynamic_color_cut_common import (
 )
 from kne_pipeline_common import discover_m5_quantile_table
 from kne_m5 import M5_SCENARIO_PERCENTILES
-from kne_envelope_core import (
-    MW_EXTINCTED_STAGES,
-    MW_R_BY_SYSTEM,
-    PS1_MW_R,
-    RUBIN_MW_R,
-    STAGES,
-    STAGE_BOOTSTRAP_SEED_OFFSETS,
-    ZTF_MW_R,
-    event_extinction_mag,
-    percentile_diagnostics as _percentile_diagnostics_with_bootstrap,
-)
+from kne_envelope_core import M5_STAGES, STAGES, percentile_diagnostics, select_fixed_percentile_interval
 from kne_population_io import SyntheticPopulationSource, prepare_metadata
 from kne_population_io import population_latitude_label as _population_latitude_label
 
@@ -102,146 +85,8 @@ from kne_population_io import population_latitude_label as _population_latitude_
 # ============================================================================
 
 import matplotlib.pyplot as plt
-import numpy as np
-import pandas as pd
 from matplotlib.collections import LineCollection
 
-
-def percentile_diagnostics(
-    values: np.ndarray,
-    lower_grid: list[float],
-    n_boot: int,
-    bootstrap_threshold: float,
-    minimum_tail_events: float,
-    rng: np.random.Generator,
-) -> tuple[pd.DataFrame, dict[str, float] | None]:
-    """Validate percentile bounds, optionally without bootstrapping.
-
-    With ``n_boot > 0`` this delegates to the established bootstrap
-    implementation. With ``n_boot == 0`` the percentile estimates are
-    computed directly and the bootstrap-width criterion is deliberately not
-    applied. The minimum total sample size is still enforced by the caller,
-    and the expected-number-of-events criterion remains active for every
-    percentile tail.
-    """
-    if n_boot < 0:
-        raise ValueError("Bootstrap repetitions must be non-negative")
-    if n_boot > 0:
-        diagnostics, _ = _percentile_diagnostics_with_bootstrap(
-            values,
-            lower_grid,
-            n_boot,
-            bootstrap_threshold,
-            minimum_tail_events,
-            rng,
-        )
-        return diagnostics, select_adaptive_percentile_interval(
-            diagnostics, len(values), lower_grid
-        )
-
-    finite_values = np.asarray(values, dtype=float)
-    finite_values = finite_values[np.isfinite(finite_values)]
-    lower = list(dict.fromkeys(
-        float(q) for q in lower_grid if 0.0 < q <= 50.0
-    ))
-    percentiles = sorted(set(lower + [100.0 - q for q in lower] + [50.0]))
-    if not len(finite_values) or not percentiles:
-        return pd.DataFrame(), None
-
-    estimates = np.percentile(finite_values, percentiles)
-    n_values = len(finite_values)
-    rows: list[dict[str, object]] = []
-    for percentile, estimate in zip(percentiles, estimates):
-        expected_tail = (
-            n_values * min(percentile, 100.0 - percentile) / 100.0
-        )
-        tail_valid = bool(expected_tail >= minimum_tail_events)
-        rows.append({
-            "percentile": percentile,
-            "value": float(estimate),
-            "bootstrap_p16": np.nan,
-            "bootstrap_p84": np.nan,
-            "bootstrap_half_width_68": np.nan,
-            "expected_nearest_tail_events": expected_tail,
-            "bootstrap_applied": False,
-            "bootstrap_width_valid": True,
-            "tail_support_valid": tail_valid,
-            "percentile_valid": tail_valid,
-        })
-
-    diagnostics = pd.DataFrame(rows)
-    return diagnostics, select_adaptive_percentile_interval(
-        diagnostics, n_values, lower
-    )
-
-
-def select_adaptive_percentile_interval(
-    diagnostics: pd.DataFrame,
-    n_values: int,
-    lower_sequence: list[float],
-) -> dict[str, float | str | bool] | None:
-    """Select the first valid interval in the requested hierarchy.
-
-    For the default sequence, each time bin is tested in this exact order:
-    p16--p84, p25--p75, p30--p70, p40--p60, then the median alone. A wider
-    interval is therefore always preferred when it passes every active
-    validity criterion. The median fallback is accepted only when p50 itself
-    passes those criteria.
-    """
-    if diagnostics.empty:
-        return None
-
-    by_percentile = diagnostics.set_index("percentile")
-    if 50.0 not in by_percentile.index:
-        return None
-    median = by_percentile.loc[50.0]
-    if not bool(median["percentile_valid"]):
-        return None
-
-    sequence = list(dict.fromkeys(
-        float(q) for q in lower_sequence if 0.0 < float(q) <= 50.0
-    ))
-    if 50.0 not in sequence:
-        sequence.append(50.0)
-
-    def half_width(row: pd.Series) -> float:
-        value = row.get("bootstrap_half_width_68", np.nan)
-        return float(value) if pd.notna(value) else np.nan
-
-    for rank, q_low in enumerate(sequence, start=1):
-        q_high = 100.0 - q_low
-        if q_low == 50.0:
-            low = high = median
-            definition = "median_only"
-        else:
-            if q_low not in by_percentile.index or q_high not in by_percentile.index:
-                continue
-            low = by_percentile.loc[q_low]
-            high = by_percentile.loc[q_high]
-            if not (
-                bool(low["percentile_valid"])
-                and bool(high["percentile_valid"])
-            ):
-                continue
-            definition = f"p{q_low:g}-p{q_high:g}"
-
-        return {
-            "low_percentile": q_low,
-            "high_percentile": q_high,
-            "color_min": float(low["value"]),
-            "color_median": float(median["value"]),
-            "color_max": float(high["value"]),
-            "low_bootstrap_half_width_68": half_width(low),
-            "median_bootstrap_half_width_68": half_width(median),
-            "high_bootstrap_half_width_68": half_width(high),
-            "expected_lower_tail_events": float(n_values * q_low / 100.0),
-            "expected_upper_tail_events": float(n_values * q_low / 100.0),
-            "nominal_coverage_percent": float(q_high - q_low),
-            "envelope_definition": definition,
-            "adaptive_selection_rank": rank,
-            "median_only": bool(q_low == 50.0),
-        }
-    return None
 
 def draw_population(
     ax: plt.Axes,
@@ -294,29 +139,46 @@ def draw_population(
         return
 
 
-ADAPTIVE_ENVELOPE_STYLES = {
-    "p16-p84": ("#4477aa", "16th–84th percentiles (central 68%)"),
-    "p25-p75": ("#66ccee", "25th–75th percentiles (central 50%)"),
-    "p30-p70": ("#eecc66", "30th–70th percentiles (central 40%)"),
-    "p40-p60": ("#aa3377", "40th–60th percentiles (central 20%)"),
+ENVELOPE_STYLES = {
+    "p16-p84": ("#4477aa", "16th–84th percentiles"),
+    "p25-p75": ("#66ccee", "25th–75th percentiles"),
+    "p30-p70": ("#eecc66", "30th–70th percentiles"),
+    "p40-p60": ("#aa3377", "40th–60th percentiles"),
     "median_only": ("#cc3311", "Median only"),
 }
 
 
+def ordinal_percentile(value: float) -> str:
+    """Format an integer percentile with its English ordinal suffix."""
+    value = float(value)
+    if not value.is_integer():
+        return f"{value:g}th"
+    integer = int(value)
+    suffix = "th" if 10 <= integer % 100 <= 20 else {
+        1: "st", 2: "nd", 3: "rd",
+    }.get(integer % 10, "th")
+    return f"{integer}{suffix}"
+
+
 def envelope_definition_from_row(row: object) -> str:
-    """Return the adaptive-envelope label, including for older rule tables."""
+    """Return the fixed-envelope label, including for older rule tables."""
     definition = getattr(row, "envelope_definition", None)
-    if isinstance(definition, str) and definition in ADAPTIVE_ENVELOPE_STYLES:
+    if isinstance(definition, str) and definition in ENVELOPE_STYLES:
         return definition
     q_low = float(getattr(row, "low_percentile", 16.0))
     q_high = float(getattr(row, "high_percentile", 100.0 - q_low))
     if np.isclose(q_low, 50.0) and np.isclose(q_high, 50.0):
         return "median_only"
     candidate = f"p{q_low:g}-p{q_high:g}"
-    return candidate if candidate in ADAPTIVE_ENVELOPE_STYLES else "p16-p84"
+    if candidate not in ENVELOPE_STYLES:
+        ENVELOPE_STYLES[candidate] = (
+            "#4477aa",
+            f"{ordinal_percentile(q_low)}–{ordinal_percentile(q_high)} percentiles",
+        )
+    return candidate
 
 
-def adaptive_envelope_legend_handles(
+def envelope_legend_handles(
     *rule_tables: pd.DataFrame,
 ) -> list[object]:
     """Build a compact legend containing only interval types actually used."""
@@ -328,7 +190,7 @@ def adaptive_envelope_legend_handles(
             envelope_definition_from_row(row) for row in rules.itertuples()
         )
     handles: list[object] = []
-    for definition, (color, label) in ADAPTIVE_ENVELOPE_STYLES.items():
+    for definition, (color, label) in ENVELOPE_STYLES.items():
         if definition not in present:
             continue
         if definition == "median_only":
@@ -344,7 +206,7 @@ def draw_envelope(ax: plt.Axes, rules: pd.DataFrame) -> None:
     for row in rules.itertuples():
         x = [row.t_min_days, row.t_max_days]
         definition = envelope_definition_from_row(row)
-        color = ADAPTIVE_ENVELOPE_STYLES[definition][0]
+        color = ENVELOPE_STYLES[definition][0]
         median_only = definition == "median_only"
         ax.fill_between(
             x,
@@ -450,7 +312,7 @@ def draw_comparison_envelope(
     for row in rules.itertuples():
         x = [row.t_min_days, row.t_max_days]
         definition = envelope_definition_from_row(row)
-        interval_color = ADAPTIVE_ENVELOPE_STYLES[definition][0]
+        interval_color = ENVELOPE_STYLES[definition][0]
         median_only = definition == "median_only"
         ax.fill_between(
             x, [row.color_min] * 2, [row.color_max] * 2,
@@ -501,14 +363,10 @@ def comparison_ylim(
     padding = max(0.1, 0.05 * max(high - low, 0.1))
     return low - padding, high + padding
 
-from pathlib import Path
 
-import matplotlib.pyplot as plt
 from matplotlib.colors import hsv_to_rgb, to_hex
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
-import numpy as np
-import pandas as pd
 
 from kne_envelope_core import M5_STAGES, STAGES
 
@@ -577,7 +435,7 @@ def save_snia_population_plots(
                 [0], [0], color="#333333", lw=1.6,
                 label="SN Ia envelope",
             ),
-            *adaptive_envelope_legend_handles(rules),
+            *envelope_legend_handles(rules),
         ], frameon=False, fontsize=8)
         fig.savefig(
             output / f"snia_population_with_envelope_{envelope_name}.png",
@@ -642,7 +500,7 @@ def save_kne_snia_overlay_plots(
                 [0], [0], color="#333333", lw=1.7, linestyle="--",
                 label="SN Ia envelope",
             ),
-            *adaptive_envelope_legend_handles(kne_rules, snia_rules),
+            *envelope_legend_handles(kne_rules, snia_rules),
             Patch(
                 facecolor="#2ca02c", alpha=0.26,
                 label="Envelope intersection",
@@ -733,12 +591,12 @@ def save_at2017gfo_overlay(
             ax.set_ylim(low - padding, high + padding)
     handles, labels = ax.get_legend_handles_labels()
     ax.legend(
-        handles=[*handles, *adaptive_envelope_legend_handles(rules)],
+        handles=[*handles, *envelope_legend_handles(rules)],
         labels=[
             *labels,
             *[
                 handle.get_label()
-                for handle in adaptive_envelope_legend_handles(rules)
+                for handle in envelope_legend_handles(rules)
             ],
         ],
         frameon=False,
@@ -948,7 +806,7 @@ def save_stage_plots(
             ax.set_ylim(low - padding, high + padding)
         if rules is not None and not rules.empty:
             ax.legend(
-                handles=adaptive_envelope_legend_handles(rules),
+                handles=envelope_legend_handles(rules),
                 frameon=False,
                 fontsize=8,
             )
@@ -1022,7 +880,7 @@ def save_stage_plots(
                 )
             if rules is not None and not rules.empty:
                 ax.legend(
-                    handles=adaptive_envelope_legend_handles(rules),
+                    handles=envelope_legend_handles(rules),
                     loc="upper right",
                     frameon=False,
                     fontsize=7.2,
@@ -1078,7 +936,7 @@ def save_dual_system_comparison_plots(
                 for row in rules.itertuples():
                     x = [row.t_min_days, row.t_max_days]
                     definition = envelope_definition_from_row(row)
-                    interval_color = ADAPTIVE_ENVELOPE_STYLES[definition][0]
+                    interval_color = ENVELOPE_STYLES[definition][0]
                     median_only = definition == "median_only"
                     ax.fill_between(
                         x,
@@ -1104,7 +962,7 @@ def save_dual_system_comparison_plots(
                     label=label,
                 ))
 
-            handles.extend(adaptive_envelope_legend_handles(
+            handles.extend(envelope_legend_handles(
                 *rules_by_system.values()
             ))
 
@@ -1160,11 +1018,8 @@ def save_dual_system_comparison_plots(
 
 from dataclasses import dataclass
 
-import numpy as np
-import pandas as pd
 
 from dynamic_color_cut_common import canonical_event_id, interpolate_band
-from kne_envelope_core import MW_EXTINCTED_STAGES, STAGES, event_extinction_mag
 from kne_population_io import SyntheticPopulationSource
 
 
@@ -1172,12 +1027,8 @@ from kne_population_io import SyntheticPopulationSource
 class InterpolatedPopulation:
     intrinsic_band1: np.ndarray
     intrinsic_band2: np.ndarray
-    extincted_band1: np.ndarray
-    extincted_band2: np.ndarray
     selection_intrinsic_band1: np.ndarray
     selection_intrinsic_band2: np.ndarray
-    selection_extincted_band1: np.ndarray
-    selection_extincted_band2: np.ndarray
     native_times: dict[str, list[np.ndarray]]
     native_colours: dict[str, list[np.ndarray]]
     selection_system: str
@@ -1293,7 +1144,7 @@ def estimate_interior_peak_time(
 
 def select_peak_validation_events(
     event_ids: list[str],
-    training_mask: np.ndarray,
+    population_mask: np.ndarray,
     supported_bin_counts: np.ndarray,
     peak_diagnostics: pd.DataFrame,
     sample_size: int,
@@ -1301,7 +1152,7 @@ def select_peak_validation_events(
 ) -> pd.DataFrame:
     """Select reproducible envelope contributors for visual peak checks.
 
-    An eligible object must belong to the training split, have a peak reference
+    An eligible object must belong to the selected envelope population, have a peak reference
     accepted by the production estimator, and contribute a finite colour to at
     least one requested temporal bin.  The returned table records the precise
     random selection and can therefore be audited independently of the plots.
@@ -1313,13 +1164,13 @@ def select_peak_validation_events(
     if sample_size <= 0 or peak_diagnostics.empty:
         return pd.DataFrame(columns=columns)
     if not (
-        len(event_ids) == len(training_mask) == len(supported_bin_counts)
+        len(event_ids) == len(population_mask) == len(supported_bin_counts)
     ):
         raise ValueError("Peak-validation masks must match the event list")
 
     candidates = pd.DataFrame({
         "event_id": [canonical_event_id(value) for value in event_ids],
-        "training_split": np.asarray(training_mask, dtype=bool),
+        "in_envelope_population": np.asarray(population_mask, dtype=bool),
         "N_supported_envelope_bins": np.asarray(
             supported_bin_counts, dtype=int
         ),
@@ -1333,7 +1184,7 @@ def select_peak_validation_events(
     if used.dtype != bool:
         used = used.astype(str).str.lower().isin(("true", "1"))
     candidates = candidates.loc[
-        candidates["training_split"]
+        candidates["in_envelope_population"]
         & candidates["N_supported_envelope_bins"].gt(0)
         & used
     ].copy()
@@ -1631,7 +1482,7 @@ def save_snia_peak_parameter_tables(
 def save_kne_peak_validation(
     source: SyntheticPopulationSource,
     metadata: pd.DataFrame,
-    training_mask: np.ndarray,
+    population_mask: np.ndarray,
     support: np.ndarray,
     peak_diagnostics: pd.DataFrame,
     output: Path,
@@ -1642,7 +1493,7 @@ def save_kne_peak_validation(
     """Reload a small random KNe sample and audit the adopted band peaks."""
     event_ids = metadata["event_id"].astype(str).tolist()
     selection = select_peak_validation_events(
-        event_ids, training_mask, np.sum(support, axis=1), peak_diagnostics,
+        event_ids, population_mask, np.sum(support, axis=1), peak_diagnostics,
         args.peak_validation_sample_size, args.peak_validation_seed,
     )
     selected_ids = selection.get("event_id", pd.Series(dtype=str)).tolist()
@@ -1734,12 +1585,8 @@ def interpolate_saved_population(
     n_events, n_times = len(metadata), len(centres)
     intrinsic_band1 = np.full((n_events, n_times), np.nan, dtype=np.float32)
     intrinsic_band2 = np.full_like(intrinsic_band1, np.nan)
-    extincted_band1 = np.full_like(intrinsic_band1, np.nan)
-    extincted_band2 = np.full_like(intrinsic_band1, np.nan)
     selection_intrinsic_band1 = np.full_like(intrinsic_band1, np.nan)
     selection_intrinsic_band2 = np.full_like(intrinsic_band1, np.nan)
-    selection_extincted_band1 = np.full_like(intrinsic_band1, np.nan)
-    selection_extincted_band2 = np.full_like(intrinsic_band1, np.nan)
     native_times = {
         stage: [np.array([], dtype=np.float32) for _ in range(n_events)]
         for stage in STAGES
@@ -1818,27 +1665,19 @@ def interpolate_saved_population(
             target_curve["t_days"] -= peak.time_days
             selection_curve["t_days"] -= peak.time_days
 
-        mw1 = event_extinction_mag(metadata_row, photometric_system, band1)
-        mw2 = event_extinction_mag(metadata_row, photometric_system, band2)
-        selection_mw1 = event_extinction_mag(metadata_row, selection_system, band1)
-        selection_mw2 = event_extinction_mag(metadata_row, selection_system, band2)
 
         interpolate = (
             interpolate_band_linear
             if time_reference_mode == "band_peak" else interpolate_band
         )
-        centre_ext1 = interpolate(target_curve, band1, centres)
-        centre_ext2 = interpolate(target_curve, band2, centres)
-        extincted_band1[matrix_index] = centre_ext1
-        extincted_band2[matrix_index] = centre_ext2
-        intrinsic_band1[matrix_index] = centre_ext1 - mw1
-        intrinsic_band2[matrix_index] = centre_ext2 - mw2
-        centre_selection_ext1 = interpolate(selection_curve, band1, centres)
-        centre_selection_ext2 = interpolate(selection_curve, band2, centres)
-        selection_extincted_band1[matrix_index] = centre_selection_ext1
-        selection_extincted_band2[matrix_index] = centre_selection_ext2
-        selection_intrinsic_band1[matrix_index] = centre_selection_ext1 - selection_mw1
-        selection_intrinsic_band2[matrix_index] = centre_selection_ext2 - selection_mw2
+        centre_mag1 = interpolate(target_curve, band1, centres)
+        centre_mag2 = interpolate(target_curve, band2, centres)
+        intrinsic_band1[matrix_index] = centre_mag1
+        intrinsic_band2[matrix_index] = centre_mag2
+        centre_selection_mag1 = interpolate(selection_curve, band1, centres)
+        centre_selection_mag2 = interpolate(selection_curve, band2, centres)
+        selection_intrinsic_band1[matrix_index] = centre_selection_mag1
+        selection_intrinsic_band2[matrix_index] = centre_selection_mag2
 
         paired = (
             target_curve.groupby(["t_days", "band"], as_index=False)["magnitude"]
@@ -1857,12 +1696,10 @@ def interpolate_saved_population(
             np.isfinite(times) & np.isfinite(saved1) & np.isfinite(saved2)
             & (times >= t_min) & (times <= t_max)
         )
-        intrinsic_colour = (saved1 - mw1) - (saved2 - mw2)
-        extincted_colour = saved1 - saved2
+        intrinsic_colour = saved1 - saved2
         for stage in STAGES:
             native_times[stage][matrix_index] = times[finite_native].astype(np.float32)
-            colours = extincted_colour if stage in MW_EXTINCTED_STAGES else intrinsic_colour
-            native_colours[stage][matrix_index] = colours[finite_native].astype(np.float32)
+            native_colours[stage][matrix_index] = intrinsic_colour[finite_native].astype(np.float32)
 
         if len(processed) % progress_interval == 0:
             print(f"  {len(processed):,}/{n_events:,}")
@@ -1897,9 +1734,8 @@ def interpolate_saved_population(
         f"rows; {len(missing_event_ids):,} colour-unavailable events."
     )
     return InterpolatedPopulation(
-        intrinsic_band1, intrinsic_band2, extincted_band1, extincted_band2,
+        intrinsic_band1, intrinsic_band2,
         selection_intrinsic_band1, selection_intrinsic_band2,
-        selection_extincted_band1, selection_extincted_band2,
         native_times, native_colours, selection_system, missing_event_ids,
         pd.DataFrame(peak_rows),
     )
@@ -1908,11 +1744,8 @@ def interpolate_saved_population(
 # USER-FRIENDLY TERMINAL INTERFACE
 # ============================================================================
 
-import argparse
-from pathlib import Path
 
 from dynamic_color_cut_common import prompt_choice, prompt_text
-from kne_envelope_core import DEFAULT_TAIL_GRID
 from kne_m5 import M5_SCENARIO_LABELS
 
 ZTF_DEPTH_FILENAMES = {
@@ -1932,10 +1765,7 @@ def default_configuration() -> argparse.Namespace:
         peak_min_prominence_mag=0.05,
         peak_validation_enabled=True, peak_validation_sample_size=20,
         peak_validation_seed=20261027,
-        tail_percentiles="16,25,30,40,50",
-        n_boot=1000, bootstrap_threshold_mag=0.1, minimum_events=30,
-        minimum_tail_events=20.0, train_fraction=0.70,
-        validation_fraction=0.15, seed=12345, max_events=0,
+        envelope_lower_percentile=1.0, seed=12345, max_events=0,
         event_subsample_seed=None, colored_plot_sizes="10,100",
         population_plot_seed=20260921, outlier_table_plot_size=10,
         minimum_final_outside_bins=3, max_outlier_table_events=20,
@@ -1944,20 +1774,19 @@ def default_configuration() -> argparse.Namespace:
         ztf_depth_quantile_table=None, ztf_depth_samples=200000,
         ztf_depth_seed=20261001, threshold_scope="common_global",
         m5_scenario="median_p50", population_latitude_selection="all",
+        include_upper_limits=True,
         latitude_threshold_deg=20.0,
         assume_latitude_selection_already_applied=False,
         assume_high_latitude_run=False, output_dir=None,
         at2017gfo_file=None, at2017gfo_merger_mjd=AT2017GFO_DEFAULT_MERGER_MJD,
-        at2017gfo_match_window_days=0.4, at2017gfo_ebv=0.105,
-        at2017gfo_error_sigma=1.0, at2017gfo_photometry_mode="dereddened",
+        at2017gfo_match_window_days=0.4,
+        at2017gfo_error_sigma=1.0,
         at2017gfo_bestfit_file=None,
-        at2017gfo_bestfit_photometry_mode="dereddened", snia_parquet=None,
-        snia_magnitude_column="mag_perfect", snia_input_mw_mode="dereddened",
+        snia_parquet=None,
+        snia_magnitude_column="mag_perfect",
         snia_time_reference="peak", snia_position_seed=20260929,
         snia_max_events=0, write_adapted_snia_parquet=True,
     )
-
-
 
 
 def interactive(args: argparse.Namespace) -> argparse.Namespace:
@@ -1985,6 +1814,12 @@ def interactive(args: argparse.Namespace) -> argparse.Namespace:
         ],
         args.time_reference_mode,
     )
+    args.include_upper_limits = prompt_choice(
+        "Include colour constraints from upper limits (same-system LSST/ZTF only)",
+        [("yes", "Add lower-bound summaries, detection counts and support horizon"),
+         ("no", "Detection-only envelopes")],
+        "yes" if getattr(args, "include_upper_limits", True) else "no",
+    ) == "yes"
     if args.time_reference_mode == "band_peak":
         peak_bands = [
             piece.strip().lower()
@@ -2047,31 +1882,9 @@ def interactive(args: argparse.Namespace) -> argparse.Namespace:
     args.t_min = float(prompt_text(first_edge_label, str(args.t_min)))
     args.t_max = float(prompt_text(last_edge_label, str(args.t_max)))
     args.bin_width = float(prompt_text("Fixed bin width [days]", str(args.bin_width)))
-    args.tail_percentiles = prompt_text(
-        "Adaptive percentile sequence (50 = median only)",
-        args.tail_percentiles,
-    )
-    bootstrap_mode = prompt_choice(
-        "Bootstrap validation of percentile bounds",
-        [
-            ("enable", "Enable bootstrap validation"),
-            ("disable", "Do not bootstrap"),
-        ],
-        "enable" if args.n_boot > 0 else "disable",
-    )
-    if bootstrap_mode == "enable":
-        args.n_boot = int(prompt_text(
-            "Bootstrap repetitions", str(max(1, args.n_boot))
-        ))
-        args.bootstrap_threshold_mag = float(prompt_text(
-            "Maximum 68% bootstrap half-width per bound [mag]",
-            str(args.bootstrap_threshold_mag),
-        ))
-    else:
-        args.n_boot = 0
-    args.minimum_tail_events = float(prompt_text(
-        "Minimum expected events in each percentile tail",
-        str(args.minimum_tail_events),
+    args.envelope_lower_percentile = float(prompt_text(
+        "Lower envelope percentile q (builds p_q-p_(100-q); 1 gives p1-p99)",
+        str(args.envelope_lower_percentile),
     ))
     args.colored_plot_sizes = prompt_text(
         "Random coloured KNe sample sizes",
@@ -2193,22 +2006,10 @@ def interactive(args: argparse.Namespace) -> argparse.Namespace:
             "Maximum inter-band matching separation [days]",
             str(args.at2017gfo_match_window_days),
         ))
-        args.at2017gfo_ebv = float(prompt_text(
-            "AT2017gfo Milky-Way E(B-V)",
-            str(args.at2017gfo_ebv),
-        ))
         args.at2017gfo_error_sigma = float(prompt_text(
             "Photometric-error compatibility level [sigma]",
             str(args.at2017gfo_error_sigma),
         ))
-        args.at2017gfo_photometry_mode = prompt_choice(
-            "AT2017gfo input photometry",
-            [
-                ("dereddened", "Already corrected for Milky-Way extinction"),
-                ("mw_extincted", "Still contains Milky-Way extinction"),
-            ],
-            args.at2017gfo_photometry_mode,
-        )
         bestfit_path = prompt_text(
             "AT2017gfo best-fit pickle (empty = do not overlay)",
             (
@@ -2217,15 +2018,6 @@ def interactive(args: argparse.Namespace) -> argparse.Namespace:
             ),
         ).strip()
         args.at2017gfo_bestfit_file = Path(bestfit_path) if bestfit_path else None
-        if args.at2017gfo_bestfit_file is not None:
-            args.at2017gfo_bestfit_photometry_mode = prompt_choice(
-                "Foreground MW extinction in the AT2017gfo best-fit magnitudes",
-                [
-                    ("dereddened", "Absent/already corrected"),
-                    ("mw_extincted", "Already present"),
-                ],
-                args.at2017gfo_bestfit_photometry_mode,
-            )
     else:
         args.at2017gfo_file = None
         args.at2017gfo_bestfit_file = None
@@ -2252,14 +2044,6 @@ def interactive(args: argparse.Namespace) -> argparse.Namespace:
                 ("mag", "Noisy observed magnitude"),
             ],
             args.snia_magnitude_column,
-        )
-        args.snia_input_mw_mode = prompt_choice(
-            "Foreground MW extinction in the SN Ia input magnitude",
-            [
-                ("dereddened", "Absent/already corrected; add A for the MW-present output"),
-                ("mw_extincted", "Already present; subtract A for the corrected output"),
-            ],
-            args.snia_input_mw_mode,
         )
         if args.time_reference_mode == "merger":
             args.snia_time_reference = prompt_choice(
@@ -2291,17 +2075,8 @@ RA_COLUMNS = ("fieldRA", "field_ra_deg", "ra_deg", "ra")
 DEC_COLUMNS = ("fieldDec", "field_dec_deg", "dec_deg", "dec")
 
 SNIA_CONVENTIONS = {
-    "mw_corrected": "intrinsic_no_m5_no_mw",
-    "mw_present": "no_m5_with_mw",
-    "m5_no_mw": "m5_no_mw",
-    "m5_with_mw": "m5_with_mw",
-}
-
-SNIA_BOOTSTRAP_SEED_OFFSETS = {
-    "mw_corrected": 8001,
-    "mw_present": 8002,
-    "m5_no_mw": 8003,
-    "m5_with_mw": 8004,
+    "no_m5": "no_m5",
+    "m5": "m5",
 }
 
 AT2017GFO_FILTER_ALIASES = {
@@ -2571,7 +2346,7 @@ def build_snia_sky_mapping(
     kne_metadata: pd.DataFrame,
     seed: int,
 ) -> pd.DataFrame:
-    """Assign each SN Ia a reproducible KNe sky position and MW extinction."""
+    """Assign each SN Ia a reproducible KNe sky position ."""
     ra_column = first_existing_column(kne_metadata.columns, RA_COLUMNS)
     dec_column = first_existing_column(kne_metadata.columns, DEC_COLUMNS)
     if ra_column is None or dec_column is None:
@@ -2583,15 +2358,13 @@ def build_snia_sky_mapping(
     pool = kne_metadata.copy()
     pool[ra_column] = pd.to_numeric(pool[ra_column], errors="coerce")
     pool[dec_column] = pd.to_numeric(pool[dec_column], errors="coerce")
-    pool["ebv_mw"] = pd.to_numeric(pool["ebv_mw"], errors="coerce")
     pool = pool.loc[
         np.isfinite(pool[ra_column])
         & np.isfinite(pool[dec_column])
-        & np.isfinite(pool["ebv_mw"])
     ].reset_index(drop=True)
     if pool.empty:
         raise ValueError(
-            "No KNe event has finite sky coordinates and ebv_mw; "
+            "No KNe event has finite sky coordinates ; "
             "the SN Ia projection cannot be constructed."
         )
 
@@ -2612,18 +2385,9 @@ def build_snia_sky_mapping(
         "projected_kne_event_id": selected["event_id"].astype(str).to_numpy(),
         "fieldRA": selected[ra_column].to_numpy(float),
         "fieldDec": selected[dec_column].to_numpy(float),
-        "ebv_mw": selected["ebv_mw"].to_numpy(float),
         "position_sampled_with_replacement": replace,
         "position_assignment_seed": int(seed),
     })
-    for band, coefficient in RUBIN_MW_R.items():
-        exact_column = f"A_lsst_{band}_mw"
-        if exact_column in selected:
-            exact = pd.to_numeric(selected[exact_column], errors="coerce").to_numpy(float)
-        else:
-            exact = np.full(len(selected), np.nan)
-        fallback = mapping["ebv_mw"].to_numpy(float) * float(coefficient)
-        mapping[f"A_lsst_{band}_mw"] = np.where(np.isfinite(exact), exact, fallback)
     return mapping
 
 
@@ -2761,8 +2525,7 @@ def prepare_snia_population(
     mapping.to_csv(output / "snia_to_kne_sky_mapping.csv", index=False)
     measurements = measurements.rename(columns={"ra": "source_ra", "dec": "source_dec"})
     mapping_columns = [
-        "sn_id", "projected_kne_event_id", "fieldRA", "fieldDec", "ebv_mw",
-        f"A_lsst_{band1}_mw", f"A_lsst_{band2}_mw",
+        "sn_id", "projected_kne_event_id", "fieldRA", "fieldDec",
     ]
     measurements = measurements.merge(
         mapping[mapping_columns], on="sn_id", how="left", validate="many_to_one"
@@ -2815,31 +2578,17 @@ def prepare_snia_population(
         lambda value: f"snia_{int(value):06d}"
     )
     measurements["photometric_system"] = "lsst"
-    extinction_columns = {
-        band: f"A_lsst_{band}_mw" for band in (band1, band2)
-    }
-    measurements["A_mw"] = np.nan
-    for band, column in extinction_columns.items():
-        mask = measurements["band"] == band
-        measurements.loc[mask, "A_mw"] = measurements.loc[mask, column]
     source_magnitude = pd.to_numeric(
         measurements[args.snia_magnitude_column], errors="coerce"
     )
-    if args.snia_input_mw_mode == "dereddened":
-        measurements["mag_mw_corrected"] = source_magnitude
-        measurements["mag_mw_present"] = source_magnitude + measurements["A_mw"]
-    else:
-        measurements["mag_mw_present"] = source_magnitude
-        measurements["mag_mw_corrected"] = source_magnitude - measurements["A_mw"]
-    # compact-extincted compatibility: ``mag`` is the magnitude with MW dust.
-    measurements["mag"] = measurements["mag_mw_present"]
+    measurements["mag"] = source_magnitude
     measurements["time_mjd"] = measurements["mjd"]
 
     adapted_columns = [
         "event_id", "sn_id", "time_mjd", "t_days", "band", "mag",
-        "mag_mw_corrected", "mag_mw_present", "magerr", "redshift", "t0",
+        "magerr", "redshift", "t0",
         "snia_time_reference", "snia_time_reference_mjd",
-        "fieldRA", "fieldDec", "source_ra", "source_dec", "ebv_mw", "A_mw",
+        "fieldRA", "fieldDec", "source_ra", "source_dec",
         "projected_kne_event_id", "photometric_system",
     ]
     adapted_path = output / f"snia_adapted_{band1}_{band2}.parquet"
@@ -2867,23 +2616,16 @@ def prepare_snia_population(
     for event_id, curve in measurements.groupby("event_id", sort=False):
         index = event_position[event_id]
         corrected1 = interpolate_snia_band(
-            curve, band1, centres, "mag_mw_corrected",
+            curve, band1, centres, "mag",
             effective_time_reference,
         )
         corrected2 = interpolate_snia_band(
-            curve, band2, centres, "mag_mw_corrected",
+            curve, band2, centres, "mag",
             effective_time_reference,
         )
         corrected_colour = corrected1 - corrected2
-        extinction1 = float(curve[f"A_lsst_{band1}_mw"].iloc[0])
-        extinction2 = float(curve[f"A_lsst_{band2}_mw"].iloc[0])
-        differential_extinction = extinction1 - extinction2
-        present1 = corrected1 + extinction1
-        present2 = corrected2 + extinction2
-        present_colour = present1 - present2
-        matrices["mw_corrected"][index] = corrected_colour.astype(np.float32)
-        matrices["mw_present"][index] = present_colour.astype(np.float32)
-        matrices["m5_no_mw"][index] = np.where(
+        matrices["no_m5"][index] = corrected_colour.astype(np.float32)
+        matrices["m5"][index] = np.where(
             np.isfinite(corrected1)
             & np.isfinite(corrected2)
             & (corrected1 <= m5[band1])
@@ -2891,19 +2633,11 @@ def prepare_snia_population(
             corrected_colour,
             np.nan,
         ).astype(np.float32)
-        matrices["m5_with_mw"][index] = np.where(
-            np.isfinite(present1)
-            & np.isfinite(present2)
-            & (present1 <= m5[band1])
-            & (present2 <= m5[band2]),
-            present_colour,
-            np.nan,
-        ).astype(np.float32)
 
         paired = (
-            curve.groupby(["t_days", "band"], as_index=False)["mag_mw_corrected"]
+            curve.groupby(["t_days", "band"], as_index=False)["mag"]
             .median()
-            .pivot(index="t_days", columns="band", values="mag_mw_corrected")
+            .pivot(index="t_days", columns="band", values="mag")
         )
         if band1 in paired.columns and band2 in paired.columns:
             paired = paired.dropna(subset=[band1, band2]).sort_index()
@@ -2913,30 +2647,22 @@ def prepare_snia_population(
                 np.isfinite(times) & np.isfinite(corrected_colours)
                 & (times >= args.t_min) & (times <= args.t_max)
             )
-            population_times["mw_corrected"][index] = times[keep].astype(np.float32)
-            population_colors["mw_corrected"][index] = (
+            population_times["no_m5"][index] = times[keep].astype(np.float32)
+            population_colors["no_m5"][index] = (
                 corrected_colours[keep].astype(np.float32)
             )
-            population_times["mw_present"][index] = times[keep].astype(np.float32)
-            population_colors["mw_present"][index] = (
-                corrected_colours[keep] + differential_extinction
-            ).astype(np.float32)
             # As for the KNe m5 stages, the unbinned background remains the
             # complete saved population; only the matrix used to estimate the
             # envelope is depth-selected.
-            population_times["m5_no_mw"][index] = times[keep].astype(np.float32)
-            population_colors["m5_no_mw"][index] = (
+            population_times["m5"][index] = times[keep].astype(np.float32)
+            population_colors["m5"][index] = (
                 corrected_colours[keep].astype(np.float32)
             )
-            population_times["m5_with_mw"][index] = times[keep].astype(np.float32)
-            population_colors["m5_with_mw"][index] = (
-                corrected_colours[keep] + differential_extinction
-            ).astype(np.float32)
 
     object_metadata_columns = [
         "event_id", "sn_id", "redshift", "t0", "snia_time_reference",
         "snia_time_reference_mjd", "fieldRA", "fieldDec",
-        "source_ra", "source_dec", "ebv_mw", "projected_kne_event_id",
+        "source_ra", "source_dec", "projected_kne_event_id",
     ]
     object_metadata_columns.extend(
         column for column in optional_parameter_columns
@@ -2947,21 +2673,17 @@ def prepare_snia_population(
         .drop_duplicates("event_id")[object_metadata_columns]
         .reset_index(drop=True)
     )
-    split = assign_event_splits(
-        event_ids, args.train_fraction, args.validation_fraction,
-        args.seed + 7000,
-    )
-    split_map = split.set_index("event_id")["split"].to_dict()
-    train = np.array([split_map[event_id] == "train" for event_id in event_ids])
-    split.to_csv(output / "snia_event_split.csv", index=False)
+    population_mask = np.ones(len(event_ids), dtype=bool)
+    pd.DataFrame({"event_id": event_ids, "used_for_envelope": True}).to_csv(
+        output / "snia_event_population.csv", index=False)
     if (
         args.time_reference_mode == "band_peak"
         and args.peak_validation_enabled
     ):
         selection = select_peak_validation_events(
             event_ids,
-            train,
-            np.sum(np.isfinite(matrices["mw_corrected"]), axis=1),
+            population_mask,
+            np.sum(np.isfinite(matrices["no_m5"]), axis=1),
             peak_diagnostics,
             args.peak_validation_sample_size,
             args.peak_validation_seed + 1,
@@ -2986,8 +2708,7 @@ def prepare_snia_population(
         )
     print(
         f"SN Ia: {n_events:,} objects projected onto KNe sky positions; "
-        f"magnitude={args.snia_magnitude_column}; input MW mode="
-        f"{args.snia_input_mw_mode}; time reference={effective_time_reference}"
+        f"magnitude={args.snia_magnitude_column}; time reference={effective_time_reference}"
     )
     if args.time_reference_mode == "band_peak":
         n_resolved = int(
@@ -3006,7 +2727,7 @@ def prepare_snia_population(
         ),
         "event_ids": event_ids,
         "metadata": object_metadata,
-        "train": train,
+        "population_mask": population_mask,
         "matrices": matrices,
         "population_times": population_times,
         "population_colors": population_colors,
@@ -3019,12 +2740,11 @@ def prepare_snia_population(
 
 def build_population_envelope_tables(
     matrix: np.ndarray,
-    train: np.ndarray,
+    population_mask: np.ndarray,
     edges: np.ndarray,
     centres: np.ndarray,
     tails: list[float],
     args: argparse.Namespace,
-    rng: np.random.Generator,
     stage: str,
     interpolation_method: str = "linear_in_log10_positive_phase",
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -3034,17 +2754,10 @@ def build_population_envelope_tables(
     availability: list[dict[str, object]] = []
     consecutive_open = True
     for bin_index, centre in enumerate(centres):
-        values = matrix[train, bin_index]
+        values = matrix[population_mask, bin_index]
         values = values[np.isfinite(values)].astype(float)
-        if len(values) >= args.minimum_events:
-            diagnostics, selected = percentile_diagnostics(
-                values,
-                tails,
-                args.n_boot,
-                args.bootstrap_threshold_mag,
-                args.minimum_tail_events,
-                rng,
-            )
+        if len(values):
+            diagnostics, selected = percentile_diagnostics(values, tails)
         else:
             diagnostics, selected = pd.DataFrame(), None
         if not diagnostics.empty:
@@ -3052,7 +2765,7 @@ def build_population_envelope_tables(
             diagnostics.insert(1, "t_min_days", edges[bin_index])
             diagnostics.insert(2, "t_max_days", edges[bin_index + 1])
             diagnostics.insert(3, "t_center_days", centre)
-            diagnostics.insert(4, "N_train_events", len(values))
+            diagnostics.insert(4, "N_population_events", len(values))
             diagnostics_frames.append(diagnostics)
         valid = selected is not None
         if not valid:
@@ -3062,8 +2775,8 @@ def build_population_envelope_tables(
             "t_min_days": edges[bin_index],
             "t_max_days": edges[bin_index + 1],
             "t_center_days": centre,
-            "N_train_total": int(train.sum()),
-            "N_train_stage_available": len(values),
+            "N_population_total": int(population_mask.sum()),
+            "N_population_stage_available": len(values),
             "candidate_envelope_valid": valid,
             "initial_consecutive_valid": bool(valid and consecutive_open),
         })
@@ -3076,11 +2789,9 @@ def build_population_envelope_tables(
                 "t_max_days": edges[bin_index + 1],
                 "t_center_days": centre,
                 "bin_width_days": args.bin_width,
-                "N_train_events": len(values),
+                "N_population_events": len(values),
                 "initial_consecutive_valid": bool(consecutive_open),
                 **selected,
-                "bootstrap_threshold_mag": args.bootstrap_threshold_mag,
-                "minimum_tail_events": args.minimum_tail_events,
                 "target_interpolation_time_days": centre,
                 "interpolation_method": interpolation_method,
             })
@@ -3088,7 +2799,7 @@ def build_population_envelope_tables(
     if rules_all.empty:
         rules_all = pd.DataFrame(columns=[
             "rule_id", "bin_index", "stage", "t_min_days", "t_max_days",
-            "t_center_days", "bin_width_days", "N_train_events",
+            "t_center_days", "bin_width_days", "N_population_events",
             "initial_consecutive_valid", "low_percentile", "high_percentile",
             "color_min", "color_median", "color_max",
         ])
@@ -3228,7 +2939,6 @@ def summarize_overlap(
     }
 
 
-
 def save_snia_comparison_outputs(
     root_output: Path,
     convention: str,
@@ -3246,7 +2956,7 @@ def save_snia_comparison_outputs(
 ) -> list[dict[str, object]]:
     output_name = (
         f"{convention}_{args.m5_scenario}"
-        if convention in {"m5_no_mw", "m5_with_mw"}
+        if convention == "m5"
         else convention
     )
     output = root_output / "snia_comparison" / output_name
@@ -3254,16 +2964,14 @@ def save_snia_comparison_outputs(
     snia_matrix = snia_population["matrices"][convention]
     snia_times = snia_population["population_times"][convention]
     snia_colours = snia_population["population_colors"][convention]
-    seed_offset = SNIA_BOOTSTRAP_SEED_OFFSETS[convention]
     rules_all, rules_consecutive, availability, diagnostics = (
         build_population_envelope_tables(
             snia_matrix,
-            snia_population["train"],
+            snia_population["population_mask"],
             edges,
             centres,
             tails,
             args,
-            np.random.default_rng(args.seed + 1000 * seed_offset),
             f"snia_{convention}",
             (
                 "linear_in_phase_relative_to_measured_band_peak"
@@ -3278,7 +2986,7 @@ def save_snia_comparison_outputs(
     rules_consecutive.to_csv(output / "snia_color_rules_consecutive.csv", index=False)
     availability.to_csv(output / "snia_envelope_availability.csv", index=False)
     if not diagnostics.empty:
-        diagnostics.to_csv(output / "snia_candidate_percentile_bootstrap.csv", index=False)
+        diagnostics.to_csv(output / "snia_percentile_diagnostics.csv", index=False)
     save_snia_population_plots(
         output, pair, args.t_min, args.t_max,
         snia_times, snia_colours, rules_all, rules_consecutive,
@@ -3545,25 +3253,11 @@ def load_at2017gfo_bestfit_colour_curve(
 def at2017gfo_stage_colours(
     points: pd.DataFrame,
     stage: str,
-    band1: str,
-    band2: str,
-    ebv: float,
-    photometry_mode: str,
     photometric_system: str,
 ) -> pd.DataFrame:
-    """Transform input colours to the extinction convention of one stage."""
+    """Copy input colours into the stage output without a photometric transformation."""
     transformed = points.copy()
-    coefficients = MW_R_BY_SYSTEM[photometric_system]
-    differential_extinction = (
-        coefficients[band1] - coefficients[band2]
-    ) * ebv
-    stage_has_mw = stage in MW_EXTINCTED_STAGES
-    if photometry_mode == "dereddened":
-        correction = differential_extinction if stage_has_mw else 0.0
-    else:
-        correction = 0.0 if stage_has_mw else -differential_extinction
-    transformed["color"] = transformed["color_input"] + correction
-    transformed["color_extinction_adjustment"] = correction
+    transformed["color"] = transformed["color_input"]
     transformed["photometric_stage"] = stage
     transformed["envelope_photometric_system"] = photometric_system
     return transformed
@@ -3660,7 +3354,6 @@ def evaluate_at2017gfo_points(
     return pd.DataFrame(evaluated_rows)
 
 
-
 def save_at2017gfo_outputs(
     stage_dir: Path,
     points: pd.DataFrame,
@@ -3712,7 +3405,7 @@ def save_at2017gfo_outputs(
 
 
 PERMANENT_EXIT_COLUMNS = [
-    "event_id", "split", "first_permanent_outside_bin_index",
+    "event_id", "population_role", "first_permanent_outside_bin_index",
     "first_permanent_outside_time_days", "last_outside_bin_index",
     "last_outside_time_days",
     "N_final_consecutive_outside_bins", "exit_direction",
@@ -3729,7 +3422,7 @@ def identify_permanent_exits(
     matrix: np.ndarray,
     rules: pd.DataFrame,
     metadata: pd.DataFrame,
-    split_map: dict[str, str],
+    population_roles: dict[str, str],
     minimum_final_outside_bins: int,
 ) -> pd.DataFrame:
     """Find events whose final comparable run remains outside the envelope.
@@ -3806,7 +3499,7 @@ def identify_permanent_exits(
         event_id = canonical_event_id(metadata_row["event_id"])
         row = {
             "event_id": event_id,
-            "split": split_map.get(event_id, ""),
+            "population_role": population_roles.get(event_id, ""),
             "first_permanent_outside_bin_index": int(rule_bins[exit_position]),
             "first_permanent_outside_time_days": float(times[exit_position]),
             "last_outside_bin_index": int(rule_bins[last_position]),
@@ -3847,13 +3540,12 @@ def identify_permanent_exits(
     )
 
 
-
 def validate_analysis_arguments(
     args: argparse.Namespace,
 ) -> tuple[str, str, str, np.ndarray, np.ndarray]:
     """Validate scientific options and construct the fixed temporal grid."""
     pieces = args.color_pair.lower().replace("_", "-").split("-")
-    if len(pieces) != 2 or pieces[0] == pieces[1] or any(b not in RUBIN_MW_R for b in pieces):
+    if len(pieces) != 2 or pieces[0] == pieces[1] or any(b not in tuple("ugrizy") for b in pieces):
         raise ValueError("Colour pair must look like g-r")
     band1, band2 = pieces
     pair = f"{band1}-{band2}"
@@ -3864,7 +3556,7 @@ def validate_analysis_arguments(
             "i-z or z-y, or run --photometric-system lsst."
         )
     if args.photometric_system in {"ztf", "lsst+ztf"} and any(
-        band not in ZTF_MW_R for band in pieces
+        band not in tuple("gri") for band in pieces
     ):
         raise ValueError(
             "ZTF supports only g, r and i. Choose g-r, g-i or r-i."
@@ -3872,17 +3564,8 @@ def validate_analysis_arguments(
 
     if args.bin_width <= 0 or args.t_max <= args.t_min:
         raise ValueError("Require bin-width > 0 and t-max > t-min")
-    if args.n_boot < 0:
-        raise ValueError("Bootstrap repetitions must be non-negative")
-    if args.n_boot > 0 and args.bootstrap_threshold_mag <= 0:
-        raise ValueError(
-            "The bootstrap half-width threshold must be positive when "
-            "bootstrap validation is enabled"
-        )
-    if args.minimum_events < 1:
-        raise ValueError("The minimum number of events must be at least 1")
-    if args.minimum_tail_events < 0:
-        raise ValueError("The minimum expected tail count must be non-negative")
+    if not 0.0 <= args.envelope_lower_percentile <= 50.0:
+        raise ValueError("The lower envelope percentile q must be in [0, 50]")
     if args.time_reference_mode not in {"merger", "band_peak"}:
         raise ValueError("time-reference-mode must be merger or band_peak")
     if args.time_reference_mode == "band_peak":
@@ -3913,8 +3596,6 @@ def validate_analysis_arguments(
         raise ValueError("outlier-table-plot-size must be at least 1")
     if args.at2017gfo_match_window_days < 0:
         raise ValueError("at2017gfo-match-window-days must be non-negative")
-    if args.at2017gfo_ebv < 0:
-        raise ValueError("at2017gfo-ebv must be non-negative")
     if args.at2017gfo_error_sigma <= 0:
         raise ValueError("at2017gfo-error-sigma must be strictly positive")
     if args.at2017gfo_file is not None and args.photometric_system == "ztf":
@@ -3944,7 +3625,7 @@ def dispatch_dual_system_analysis(
     band2: str,
     pair: str,
 ) -> Path | None:
-    """Run paired systems with the same population, split and temporal grid."""
+    """Run paired systems with the same full population and temporal grid."""
     if args.photometric_system not in {"both", "lsst+ztf"}:
         return None
 
@@ -3959,7 +3640,7 @@ def dispatch_dual_system_analysis(
         run_root(args.run_dir)
         / "analysis"
         / (
-            f"four_stage_{band1}_{band2}_envelopes_"
+            f"colour_{band1}_{band2}_envelopes_"
             f"{args.m5_scenario}_{comparison_slug}_{population_latitude_tag(args)}"
             f"{time_reference_tag(args)}"
         )
@@ -3993,7 +3674,7 @@ def dispatch_dual_system_analysis(
                 "color_pair": pair,
                 "systems": list(systems),
                 "same_injected_events": True,
-                "same_event_split_and_random_seed": True,
+                "same_full_population_and_random_seed": True,
                 "same_OpSim_field_per_event": True,
                 "depth_selection_system_by_envelope": {
                     "lsst": "lsst",
@@ -4026,36 +3707,276 @@ def dispatch_dual_system_analysis(
     return output
 
 
+# ============================================================================
+# UPPER-LIMIT CALCULATIONS AND DIAGNOSTIC TABLES
+# ============================================================================
+
+def censored_colour_arrays(band1_mag, band2_mag, m5_band1, m5_band2):
+    """Classify finite synthetic pairs under deterministic m5 censoring.
+
+    Status: 0 unknown model support, 1 both detected, 2 b1 UL/b2 detected,
+    3 b1 detected/b2 UL, 4 both UL. Missing model magnitudes are NOT limits.
+    Endpoints are extended-real colour constraints, not measured colours.
+    """
+    a, b = np.asarray(band1_mag, float), np.asarray(band2_mag, float)
+    if a.shape != b.shape or a.ndim != 2:
+        raise ValueError("Colour magnitudes must have the same (events, bins) shape")
+    if not np.isfinite([m5_band1, m5_band2]).all():
+        raise ValueError("Upper-limit diagnostics require finite m5 values")
+    known = np.isfinite(a) & np.isfinite(b)
+    d1, d2 = a <= m5_band1, b <= m5_band2
+    status = np.zeros(a.shape, dtype=np.uint8)
+    status[known & d1 & d2] = 1
+    status[known & ~d1 & d2] = 2
+    status[known & d1 & ~d2] = 3
+    status[known & ~d1 & ~d2] = 4
+    lower = np.full(a.shape, -np.inf)
+    upper = np.full(a.shape, np.inf)
+    lower[status == 0] = upper[status == 0] = np.nan
+    lower[status == 1] = upper[status == 1] = (a-b)[status == 1]
+    lower[status == 2] = (m5_band1-b)[status == 2]
+    upper[status == 3] = (a-m5_band2)[status == 3]
+    return status, lower, upper
+
+
+def first_valid_interval(valid):
+    """First contiguous valid interval, allowing leading invalid bins only."""
+    valid = np.asarray(valid, bool)
+    result = np.zeros(len(valid), dtype=bool)
+    indices = np.flatnonzero(valid)
+    if len(indices):
+        start = int(indices[0])
+        failures = np.flatnonzero(~valid[start:])
+        stop = start + int(failures[0]) if len(failures) else len(valid)
+        result[start:stop] = True
+    return result
+
+
+def save_upper_limit_diagnostics(stage_dir, stage, band1, band2, mags1, mags2,
+                                 m5, population_mask, edges, centres, tails, args,
+                                 measured_rules, snia_rules=None):
+    """Save conditional colour constraints, availability and a finite-grid horizon.
+
+    No Kaplan-Meier independence assumption or substitution-as-exact-colour is
+    made. Purple percentiles are statistics of L; finite-sample order statistics
+    of lower/upper endpoints bound true quantiles of the SAME b2-detected sample.
+    These identification intervals are not confidence intervals or all-population
+    quantiles. In particular, they do not remove selection on b2 detection.
+    """
+    outdir = stage_dir / "upper_limits"
+    outdir.mkdir(parents=True, exist_ok=True)
+    status, lower, upper = censored_colour_arrays(mags1, mags2, m5[band1], m5[band2])
+    population_mask = np.asarray(population_mask, bool)
+    n_population, n_all = int(population_mask.sum()), len(population_mask)
+    if population_mask.shape != (status.shape[0],):
+        raise ValueError("Population mask does not match event count")
+    availability, rules, quantiles, diagnostic_frames = [], [], [], []
+    labels = {0: "unknown_model", 1: "both_detected", 2: "band1_ul_band2_detected",
+              3: "band1_detected_band2_ul", 4: "both_ul"}
+    for j, centre in enumerate(centres):
+        row = dict(bin_index=j, t_min_days=edges[j], t_max_days=edges[j+1],
+                   t_center_days=centre, N_all=n_all, N_population=n_population)
+        for code, label in labels.items():
+            row[f"N_all_{label}"] = int((status[:, j] == code).sum())
+            row[f"N_population_{label}"] = int((status[population_mask, j] == code).sum())
+        # Independent single-band counts remain meaningful if the other model
+        # band is unsupported. Such events still cannot supply a colour limit.
+        for band, magnitudes in ((band1, mags1), (band2, mags2)):
+            for prefix, mask in (("all", np.ones(n_all, bool)), ("population", population_mask)):
+                values = magnitudes[mask, j]
+                row[f"N_{prefix}_{band}_detected"] = int((np.isfinite(values) & (values <= m5[band])).sum())
+                row[f"N_{prefix}_{band}_unknown"] = int((~np.isfinite(values)).sum())
+        eligible = population_mask & ((status[:, j] == 1) | (status[:, j] == 2))
+        lo, hi = lower[eligible, j], upper[eligible, j]
+        row["N_population_lower_bound_sample"] = len(lo)
+        row["fraction_population_lower_bound_sample"] = len(lo)/n_population if n_population else 0.0
+        selected = None
+        if len(lo):
+            diagnostics, selected = percentile_diagnostics(lo, tails)
+            if not diagnostics.empty:
+                diagnostics = diagnostics.assign(bin_index=j, t_center_days=centre,
+                                                 statistic="lower_bound_L_not_true_colour")
+                diagnostic_frames.append(diagnostics)
+        row["lower_bound_summary_valid"] = selected is not None
+        if selected is not None:
+            rules.append(dict(bin_index=j, t_min_days=edges[j], t_max_days=edges[j+1],
+                              t_center_days=centre, N_population_events=len(lo),
+                              N_population_ul=int((status[population_mask, j] == 2).sum()),
+                              statistic="L_lower_bound_not_measured_colour", **selected))
+        # Inverse-ECDF (nearest-rank) quantiles, valid even with infinite endpoints.
+        # This is distinct from numpy's interpolated quantiles used for plotting L.
+        if len(lo):
+            lo_sorted, hi_sorted = np.sort(lo), np.sort(hi)
+            for q in sorted(set(tails + [100-t for t in tails] + [50.0])):
+                k = max(0, int(np.ceil(q*len(lo)/100))-1)
+                quantiles.append(dict(bin_index=j, t_center_days=centre, percentile=q,
+                                      N_population_events=len(lo), colour_quantile_lower=lo_sorted[k],
+                                      colour_quantile_upper=hi_sorted[k],
+                                      upper_is_finite=bool(np.isfinite(hi_sorted[k])),
+                                      estimator="inverse_ecdf", population=f"{band2}_detected_supported_pairs"))
+        availability.append(row)
+    counts = pd.DataFrame(availability)
+    counts["usable_lower_bound_bin"] = counts.lower_bound_summary_valid.astype(bool)
+    counts.to_csv(outdir / "colour_detection_states.csv", index=False)
+    columns = ["bin_index", "t_min_days", "t_max_days", "t_center_days", "N_population_events", "N_population_ul",
+               "statistic", "color_min", "color_median", "color_max", "envelope_definition"]
+    bound_rules = pd.DataFrame(rules) if rules else pd.DataFrame(columns=columns)
+    bound_rules.to_csv(outdir / "lower_bound_L_percentiles.csv", index=False)
+    pd.DataFrame(quantiles, columns=["bin_index", "t_center_days", "percentile", "N_population_events",
+                                    "colour_quantile_lower", "colour_quantile_upper", "upper_is_finite",
+                                    "estimator", "population"]).to_csv(outdir / "colour_quantile_identification_intervals.csv", index=False)
+    if diagnostic_frames:
+        pd.concat(diagnostic_frames, ignore_index=True).to_csv(
+            outdir / "lower_bound_percentile_diagnostics.csv", index=False
+        )
+    active = np.flatnonzero(counts.usable_lower_bound_bin)
+    horizon = {
+        "N_all": n_all, "N_population": n_population,
+        "first_supported_bin_lower_edge_days": float(edges[active[0]]) if len(active) else None,
+        "supported_until_bin_upper_edge_days": float(edges[active[-1]+1]) if len(active) else None,
+        "support_reaches_grid_end": bool(len(active) and active[-1] == len(centres)-1),
+        "criterion": "every bin with at least one usable L value; empty bins remain empty",
+        "meaning": "validity of lower-bound statistic, NOT identification of true colour envelope",
+        "m5_by_band": {band1: float(m5[band1]), band2: float(m5[band2])},
+        "time_reference_mode": args.time_reference_mode, "peak_reference_band": args.peak_reference_band,
+    }
+    for band in (band1, band2):
+        occupied = np.flatnonzero(counts[f"N_all_{band}_detected"].to_numpy() > 0)
+        horizon[f"last_grid_centre_with_{band}_detection_days"] = float(centres[occupied[-1]]) if len(occupied) else None
+        horizon[f"{band}_detection_reaches_grid_end"] = bool(len(occupied) and occupied[-1] == len(centres)-1)
+    horizon["detection_horizon_note"] = "Finite-grid, saved-model result only; unknown model values do not establish non-detection."
+    (outdir / "support_horizon.json").write_text(json.dumps(horizon, indent=2) + "\n")
+    (outdir / "README.txt").write_text(
+        f"Colour: {band1}-{band2}. Fixed assumed depths; not actual survey cadence.\n"
+        f"Both detected: colour measured. {band1} UL, {band2} detected: colour >= m5_{band1}-{band2}.\n"
+        f"{band1} detected, {band2} UL: colour <= {band1}-m5_{band2}; counted separately.\n"
+        "Both UL: no finite colour constraint. Missing model support: unknown, not an UL.\n"
+        f"Where a detection-only envelope exists, purple hatching shows the full L percentile\n"
+        f"band minus its overlap with that envelope, including extensions on either side.\n"
+        f"After two-band detections disappear, the full L percentile band is hatched to extend\n"
+        f"the envelope in time. L mixes exact colours and\n"
+        f"m5_{band1}-{band2}; each percentile of L is a lower bound on the corresponding\n"
+        "true-colour percentile of THAT sample. No upper-limit median is plotted.\n"
+        "The purple extension is NOT a two-sided measured-colour envelope.\n"
+        "Every non-empty bin is included. Event counts are saved per bin.\n"
+        "Identification intervals use inverse-ECDF order statistics; inf means unbounded.\n"
+        "These are finite-sample constraints, not confidence intervals.\n"
+        "Purple hatching shows every non-overlapping part of the L percentile band where a\n"
+        "detection-only envelope exists, and the full L band where no such envelope remains.\n"
+        "Empty bins remain empty; later non-empty bins are retained.\n"
+        "SN Ia curves, when shown, are the existing detection-only comparison.\n"
+        "No new KN/SN overlap or classification performance is inferred from the purple band.\n"
+    )
+    plot_upper_limit_diagnostics(outdir, band1, band2, counts, bound_rules,
+                                measured_rules, snia_rules, horizon, args)
+    print(f"{stage}: UL constraints -> {outdir}; last usable bin ends at "
+          f"{horizon['supported_until_bin_upper_edge_days']} days")
+
+
+# ----------------------------------------------------------------------------
+# Figures: measured colours and upper limits
+# ----------------------------------------------------------------------------
+
+def plot_upper_limit_diagnostics(outdir, band1, band2, counts, bounds, measured, snia, horizon, args):
+    """Plot the UL percentile band after removing overlap with detections."""
+    fig, ax = plt.subplots(figsize=(10, 5.5), constrained_layout=True)
+    draw_comparison_envelope(ax, measured, "#2f5f98", "-", 0.16)
+    if snia is not None and not snia.empty:
+        draw_comparison_envelope(ax, snia, "#d97706", "--", 0.10)
+    purple = "#8e44ad"
+    supported_bins = counts.loc[counts.usable_lower_bound_bin, "bin_index"]
+    measured_interval_by_bin = {
+        int(row.bin_index): (float(row.color_min), float(row.color_max))
+        for row in measured.itertuples()
+        if np.isfinite([row.color_min, row.color_max]).all()
+    }
+    extension_drawn = False
+    for row in bounds.loc[(bounds.N_population_ul > 0) & bounds.bin_index.isin(supported_bins)].itertuples():
+        detected_interval = measured_interval_by_bin.get(int(row.bin_index))
+        ul_lower = float(row.color_min)
+        ul_upper = float(row.color_max)
+        if not np.isfinite([ul_lower, ul_upper]).all():
+            continue
+        if detected_interval is None:
+            # Once two-band detections disappear, the full lower-bound
+            # percentile interval carries the temporal extension.
+            hatch_segments = [(ul_lower, ul_upper)]
+        else:
+            # Subtract the measured interval from the UL interval.  This keeps
+            # every population extension while never hatching over the blue
+            # detection-only envelope.
+            detected_lower, detected_upper = detected_interval
+            hatch_segments = [
+                (ul_lower, min(ul_upper, detected_lower)),
+                (max(ul_lower, detected_upper), ul_upper),
+            ]
+        x = [row.t_min_days, row.t_max_days]
+        for hatch_lower, hatch_upper in hatch_segments:
+            if hatch_upper <= hatch_lower:
+                continue
+            ax.fill_between(
+                x,
+                [hatch_lower] * 2,
+                [hatch_upper] * 2,
+                facecolor=purple,
+                edgecolor=purple,
+                alpha=0.14,
+                hatch="///",
+            )
+            extension_drawn = True
+    handles = [Line2D([], [], color="#333333", label="KNe: both bands detected"),
+               *envelope_legend_handles(measured)]
+    if snia is not None and not snia.empty:
+        handles.append(Line2D([], [], color="#333333", linestyle="--", label="SN Ia: both bands detected"))
+    if extension_drawn:
+        handles.append(Patch(
+            facecolor=purple,
+            edgecolor=purple,
+            alpha=.25,
+            hatch="///",
+            label=(
+                rf"Extended ${band1}-{band2}$ envelope from "
+                rf"${band1}$-band upper limits"
+            ),
+        ))
+    ax.legend(handles=handles, fontsize=8, ncol=2, loc="lower left",
+              bbox_to_anchor=(0, 1.01), frameon=False)
+    ax.set_ylabel(f"{band1}-{band2} [mag]")
+    ax.set_xlabel(time_axis_label(args.time_reference_mode, args.peak_reference_band))
+    ax.set_xlim(args.t_min, args.t_max)
+    ax.grid(alpha=.18)
+    stop = horizon["supported_until_bin_upper_edge_days"]
+    if stop is not None and not horizon["support_reaches_grid_end"]:
+        ax.axvline(stop, color="#555555", linestyle="--", linewidth=1)
+        ax.text(stop, .02, " last bin with a usable L value", rotation=90,
+                transform=ax.get_xaxis_transform(), va="bottom", fontsize=8)
+    fig.savefig(outdir / "colour_constraints_with_UL.png", dpi=200, bbox_inches="tight")
+    plt.close(fig)
+
+
+# ============================================================================
+# ENVELOPE CALCULATIONS AND RUN ORCHESTRATION
+# ============================================================================
+
 def build_stage_matrix(
     stage: str,
     support: np.ndarray,
     selection_support: np.ndarray,
     intrinsic_color: np.ndarray,
-    extincted_color: np.ndarray,
     selection_int1: np.ndarray,
     selection_int2: np.ndarray,
-    selection_ext1: np.ndarray,
-    selection_ext2: np.ndarray,
     m5_band1: float,
     m5_band2: float,
 ) -> np.ndarray:
-    """Apply one of the four documented MW/m5 selections."""
-    if stage == "intrinsic_no_m5_no_mw":
+    """Apply the requested depth selection."""
+    if stage == "no_m5":
         keep, colours = support, intrinsic_color
-    elif stage == "no_m5_with_mw":
-        keep, colours = support, extincted_color
-    elif stage == "m5_no_mw":
+    elif stage == "m5":
         keep = (
             support & selection_support
             & (selection_int1 <= m5_band1) & (selection_int2 <= m5_band2)
         )
         colours = intrinsic_color
-    elif stage == "m5_with_mw":
-        keep = (
-            support & np.isfinite(selection_ext1) & np.isfinite(selection_ext2)
-            & (selection_ext1 <= m5_band1) & (selection_ext2 <= m5_band2)
-        )
-        colours = extincted_color
     else:
         raise ValueError(f"Unknown envelope stage: {stage}")
     return np.where(keep, colours, np.nan).astype(np.float32)
@@ -4064,29 +3985,23 @@ def build_stage_matrix(
 def build_stage_rules(
     matrix: np.ndarray,
     support: np.ndarray,
-    train: np.ndarray,
+    population_mask: np.ndarray,
     stage: str,
     edges: np.ndarray,
     centres: np.ndarray,
     tails: list[float],
     args: argparse.Namespace,
 ) -> tuple[pd.DataFrame, pd.DataFrame, list[pd.DataFrame], list[dict[str, object]]]:
-    """Bootstrap each time bin and return all-valid and consecutive rules."""
-    rng = np.random.default_rng(
-        args.seed + 1000 * STAGE_BOOTSTRAP_SEED_OFFSETS[stage]
-    )
+    """Estimate the fixed interval in every non-empty temporal bin."""
     rules: list[dict[str, object]] = []
     diagnostic_frames: list[pd.DataFrame] = []
     availability: list[dict[str, object]] = []
     consecutive_open = True
     for bin_index, centre in enumerate(centres):
-        values = matrix[train, bin_index]
+        values = matrix[population_mask, bin_index]
         values = values[np.isfinite(values)].astype(float)
-        if len(values) >= args.minimum_events:
-            diagnostics, selected = percentile_diagnostics(
-                values, tails, args.n_boot, args.bootstrap_threshold_mag,
-                args.minimum_tail_events, rng,
-            )
+        if len(values):
+            diagnostics, selected = percentile_diagnostics(values, tails)
         else:
             diagnostics, selected = pd.DataFrame(), None
         if not diagnostics.empty:
@@ -4094,7 +4009,7 @@ def build_stage_rules(
             diagnostics.insert(1, "t_min_days", edges[bin_index])
             diagnostics.insert(2, "t_max_days", edges[bin_index + 1])
             diagnostics.insert(3, "t_center_days", centre)
-            diagnostics.insert(4, "N_train_events", len(values))
+            diagnostics.insert(4, "N_population_events", len(values))
             diagnostic_frames.append(diagnostics)
         valid = selected is not None
         if not valid:
@@ -4104,9 +4019,9 @@ def build_stage_rules(
             "t_min_days": edges[bin_index],
             "t_max_days": edges[bin_index + 1],
             "t_center_days": centre,
-            "N_train_total": int(train.sum()),
-            "N_train_model_supported": int(support[train, bin_index].sum()),
-            "N_train_stage_available": len(values),
+            "N_population_total": int(population_mask.sum()),
+            "N_population_model_supported": int(support[population_mask, bin_index].sum()),
+            "N_population_stage_available": len(values),
             "candidate_envelope_valid": valid,
             "initial_consecutive_valid": bool(valid and consecutive_open),
         })
@@ -4119,11 +4034,9 @@ def build_stage_rules(
                 "t_max_days": edges[bin_index + 1],
                 "t_center_days": centre,
                 "bin_width_days": args.bin_width,
-                "N_train_events": len(values),
+                "N_population_events": len(values),
                 "initial_consecutive_valid": bool(consecutive_open),
                 **selected,
-                "bootstrap_threshold_mag": args.bootstrap_threshold_mag,
-                "minimum_tail_events": args.minimum_tail_events,
                 "target_interpolation_time_days": centre,
                 "interpolation_method": (
                     "linear_in_phase_relative_to_measured_band_peak"
@@ -4135,7 +4048,7 @@ def build_stage_rules(
     if rules_all.empty:
         rules_all = pd.DataFrame(columns=[
             "rule_id", "bin_index", "stage", "t_min_days", "t_max_days",
-            "t_center_days", "bin_width_days", "N_train_events",
+            "t_center_days", "bin_width_days", "N_population_events",
             "initial_consecutive_valid", "low_percentile", "high_percentile",
             "color_min", "color_median", "color_max",
         ])
@@ -4195,17 +4108,15 @@ def _run_single_system(
         event_ids[int(event_index)]: colour_by_event_index[int(event_index)]
         for event_index in table_plot_indices
     }
-    split = assign_event_splits(
-        event_ids, args.train_fraction, args.validation_fraction, args.seed
-    )
-    split_map = split.set_index("event_id")["split"].to_dict()
-    train = np.array([split_map[eid] == "train" for eid in event_ids], dtype=bool)
+    # Every event remaining after the explicit population selection contributes.
+    population_mask = np.ones(len(event_ids), dtype=bool)
+    population_roles = {event_id: "envelope_population" for event_id in event_ids}
 
     output = args.output_dir.expanduser().resolve() if args.output_dir else (
         run_root(args.run_dir)
         / "analysis"
         / (
-            f"four_stage_{band1}_{band2}_envelopes_"
+            f"colour_{band1}_{band2}_envelopes_"
             f"{args.m5_scenario}_{args.photometric_system}_"
             f"{population_latitude_tag(args)}{time_reference_tag(args)}"
         )
@@ -4247,7 +4158,8 @@ def _run_single_system(
             m5_table, args.threshold_scope, args.m5_scenario, (band1, band2)
         )
 
-    split.to_csv(output / "event_split.csv", index=False)
+    pd.DataFrame({"event_id": event_ids, "used_for_envelope": True}).to_csv(
+        output / "event_population.csv", index=False)
     at2017gfo_input = None
     at2017gfo_bestfit_input = None
     at2017gfo_bestfit_parameters: dict[str, float] = {}
@@ -4303,12 +4215,8 @@ def _run_single_system(
     )
     int1 = population.intrinsic_band1
     int2 = population.intrinsic_band2
-    ext1 = population.extincted_band1
-    ext2 = population.extincted_band2
     selection_int1 = population.selection_intrinsic_band1
     selection_int2 = population.selection_intrinsic_band2
-    selection_ext1 = population.selection_extincted_band1
-    selection_ext2 = population.selection_extincted_band2
     population_times = population.native_times
     population_colors = population.native_colours
     selection_system = population.selection_system
@@ -4350,30 +4258,15 @@ def _run_single_system(
     support = np.isfinite(int1) & np.isfinite(int2)
     selection_support = np.isfinite(selection_int1) & np.isfinite(selection_int2)
     intrinsic_color = int1 - int2
-    extincted_color = ext1 - ext2
     if (
         args.time_reference_mode == "band_peak"
         and args.peak_validation_enabled
     ):
         save_kne_peak_validation(
-            synthetic_source, metadata, train, support,
+            synthetic_source, metadata, population_mask, support,
             population.peak_diagnostics, output, args, band1, band2,
         )
-    tails = list(dict.fromkeys(
-        float(q) for q in parse_floats(args.tail_percentiles)
-        if 0.0 < float(q) <= 50.0
-    ))
-    if not tails:
-        raise ValueError(
-            "The adaptive percentile sequence must contain values in (0, 50]"
-        )
-    if any(right <= left for left, right in zip(tails, tails[1:])):
-        raise ValueError(
-            "Enter the adaptive percentile sequence from widest to narrowest, "
-            "for example 16,25,30,40,50"
-        )
-    if 50.0 not in tails:
-        tails.append(50.0)
+    tails = [float(args.envelope_lower_percentile)]
 
     snia_population: dict[str, object] = {}
     if args.snia_parquet is not None:
@@ -4389,11 +4282,8 @@ def _run_single_system(
             support,
             selection_support,
             intrinsic_color,
-            extincted_color,
             selection_int1,
             selection_int2,
-            selection_ext1,
-            selection_ext2,
             m5[band1],
             m5[band2],
         )
@@ -4409,7 +4299,7 @@ def _run_single_system(
             diagnostic_frames,
             availability,
         ) = build_stage_rules(
-            matrix, support, train, stage, edges, centres, tails, args
+            matrix, support, population_mask, stage, edges, centres, tails, args
         )
         rules_all.to_csv(stage_dir / "dynamic_color_cut_rules_all_valid.csv", index=False)
         rules_consecutive.to_csv(stage_dir / "dynamic_color_cut_rules.csv", index=False)
@@ -4418,7 +4308,7 @@ def _run_single_system(
         )
         if diagnostic_frames:
             pd.concat(diagnostic_frames, ignore_index=True).to_csv(
-                stage_dir / "all_candidate_percentile_bootstrap.csv", index=False
+                stage_dir / "percentile_diagnostics.csv", index=False
             )
 
         exit_counts = {}
@@ -4431,7 +4321,7 @@ def _run_single_system(
                 matrix,
                 envelope_rules,
                 metadata,
-                split_map,
+                population_roles,
                 args.minimum_final_outside_bins,
             )
             all_event_exit_counts[envelope_name] = len(all_permanent_exits)
@@ -4467,10 +4357,6 @@ def _run_single_system(
             at2017gfo_stage = at2017gfo_stage_colours(
                 at2017gfo_input,
                 stage,
-                band1,
-                band2,
-                args.at2017gfo_ebv,
-                args.at2017gfo_photometry_mode,
                 args.photometric_system,
             )
             at2017gfo_bestfit_stage = None
@@ -4478,10 +4364,6 @@ def _run_single_system(
                 at2017gfo_bestfit_stage = at2017gfo_stage_colours(
                     at2017gfo_bestfit_input,
                     stage,
-                    band1,
-                    band2,
-                    args.at2017gfo_ebv,
-                    args.at2017gfo_bestfit_photometry_mode,
                     args.photometric_system,
                 )
                 at2017gfo_bestfit_stage.to_csv(
@@ -4543,6 +4425,20 @@ def _run_single_system(
                 rules_consecutive,
             ))
         n_population_points = sum(len(values) for values in population_colors[stage])
+        if getattr(args, "include_upper_limits", True) and stage == "m5":
+            if args.photometric_system != selection_system:
+                print("UL colour diagnostics skipped: colour and m5 selection use different photometric systems.")
+            else:
+                snia_ul_overlay = None
+                if snia_population and snia_convention is not None:
+                    comparison_dir = output / "snia_comparison" / stage_output_name(snia_convention, args.m5_scenario)
+                    snia_ul_overlay = pd.read_csv(comparison_dir / "snia_color_rules_all_valid.csv")
+                save_upper_limit_diagnostics(
+                    stage_dir, stage, band1, band2,
+                    int1,
+                    int2,
+                    m5, population_mask, edges, centres, tails, args, rules_all, snia_ul_overlay,
+                )
         last_edge = (
             float(rules_consecutive["t_max_days"].max())
             if not rules_consecutive.empty else np.nan
@@ -4583,6 +4479,8 @@ def _run_single_system(
         "synthetic_input_source": synthetic_source.kind,
         "photometric_system": args.photometric_system,
         "m5_selection_system": selection_system,
+        "upper_limit_diagnostics_enabled": bool(getattr(args, "include_upper_limits", True)),
+        "upper_limit_interpretation": "L quantiles are lower bounds among band2 detections; not true-colour envelopes",
         "m5_selection_note": (
             "ZTF empirical depth is applied directly to saved ZTF magnitudes."
             if args.photometric_system == "ztf"
@@ -4624,7 +4522,7 @@ def _run_single_system(
             and args.snia_parquet is not None else None
         ),
         "peak_validation_eligibility": (
-            "training-split object with an accepted peak reference and at "
+            "selected-population object with an accepted peak reference and at "
             "least one finite colour bin used by the envelope calculation"
             if args.time_reference_mode == "band_peak"
             and args.peak_validation_enabled else None
@@ -4657,10 +4555,8 @@ def _run_single_system(
         "bins_are_merged": False,
         "stages": list(STAGES),
         "stage_output_directories": {
-            "intrinsic_no_m5_no_mw": "intrinsic_no_m5_no_mw",
-            "no_m5_with_mw": "no_m5_with_mw",
-            "m5_no_mw": f"m5_no_mw_{args.m5_scenario}",
-            "m5_with_mw": f"m5_with_mw_{args.m5_scenario}",
+            "no_m5": "no_m5",
+            "m5": f"m5_{args.m5_scenario}",
         },
         "m5_quantile_table": str(m5_table),
         "m5_threshold_scope": (
@@ -4712,16 +4608,15 @@ def _run_single_system(
             }
             if args.photometric_system == "ztf" else None
         ),
-        "tail_percentile_grid": sorted(set(tails)),
-        "adaptive_percentile_sequence": tails,
-        "adaptive_percentile_selection": (
-            "first statistically valid interval in the listed order, "
-            "evaluated independently in every time bin; p50-p50 is stored "
-            "as median_only"
+        "envelope_lower_percentile": tails[0],
+        "envelope_upper_percentile": 100.0 - tails[0],
+        "percentile_selection": (
+            "one fixed empirical interval in every bin containing at least "
+            "one usable event"
         ),
-        "adaptive_percentile_plot_styles": {
+        "percentile_plot_styles": {
             definition: {"color": color, "legend_label": label}
-            for definition, (color, label) in ADAPTIVE_ENVELOPE_STYLES.items()
+            for definition, (color, label) in ENVELOPE_STYLES.items()
         },
         "median_is_stored_and_plotted": True,
         "population_plot_is_binned": False,
@@ -4763,21 +4658,11 @@ def _run_single_system(
         "right_censored_definition": (
             "the event has no comparable colour in the final valid envelope bin"
         ),
-        "bootstrap_repetitions": args.n_boot,
-        "bootstrap_enabled": bool(args.n_boot > 0),
-        "bootstrap_half_width_threshold_mag": (
-            args.bootstrap_threshold_mag if args.n_boot > 0 else None
-        ),
-        "percentile_validity_without_bootstrap": (
-            "minimum total sample size and minimum expected events in each "
-            "percentile tail"
-            if args.n_boot == 0 else None
-        ),
-        "minimum_events": args.minimum_events,
-        "minimum_expected_tail_events": args.minimum_tail_events,
-        "train_fraction": args.train_fraction,
-        "validation_fraction": args.validation_fraction,
-        "split_seed": args.seed,
+        "percentile_estimator": "numpy.percentile(method='linear')",
+        "minimum_usable_events_per_bin": 1,
+        "envelope_population_fraction": 1.0,
+        "population_partition": "none; all selected events used for envelope construction",
+        "random_seed": args.seed,
         "n_input_events": n_events,
         "maximum_events_requested": args.max_events,
         "event_subsample_seed": args.event_subsample_seed,
@@ -4789,7 +4674,6 @@ def _run_single_system(
             ),
             "photometric_system": "lsst" if snia_population else None,
             "magnitude_column": args.snia_magnitude_column,
-            "input_mw_mode": args.snia_input_mw_mode,
             "time_reference": (
                 f"measured interior {args.peak_reference_band}-band peak"
                 if args.time_reference_mode == "band_peak"
@@ -4833,16 +4717,12 @@ def _run_single_system(
             ),
             "comparison_conventions": SNIA_CONVENTIONS,
             "output_directories": {
-                "mw_corrected": "mw_corrected",
-                "mw_present": "mw_present",
-                "m5_no_mw": f"m5_no_mw_{args.m5_scenario}",
-                "m5_with_mw": f"m5_with_mw_{args.m5_scenario}",
+                "no_m5": "no_m5",
+                "m5": f"m5_{args.m5_scenario}",
             },
             "m5_applied_to_snia": {
-                "mw_corrected": False,
-                "mw_present": False,
-                "m5_no_mw": True,
-                "m5_with_mw": True,
+                "no_m5": False,
+                "m5": True,
             },
             "m5_threshold_scope": args.threshold_scope,
             "m5_scenario": args.m5_scenario,
@@ -4880,13 +4760,8 @@ def _run_single_system(
             ),
             "merger_mjd": args.at2017gfo_merger_mjd,
             "maximum_pair_separation_days": args.at2017gfo_match_window_days,
-            "input_photometry_mode": args.at2017gfo_photometry_mode,
             "bestfit_file": (
                 str(args.at2017gfo_bestfit_file.expanduser().resolve())
-                if args.at2017gfo_bestfit_file is not None else None
-            ),
-            "bestfit_input_photometry_mode": (
-                args.at2017gfo_bestfit_photometry_mode
                 if args.at2017gfo_bestfit_file is not None else None
             ),
             "bestfit_curve_source": (
@@ -4894,7 +4769,6 @@ def _run_single_system(
                 if args.at2017gfo_bestfit_file is not None else None
             ),
             "bestfit_parameters": at2017gfo_bestfit_parameters,
-            "ebv_mw": args.at2017gfo_ebv,
             "photometric_error_compatibility_sigma": args.at2017gfo_error_sigma,
             "filter_mapping": {
                 band1: list(AT2017GFO_FILTER_ALIASES[band1]),
@@ -4915,7 +4789,7 @@ def _run_single_system(
             ),
         },
     }
-    (output / "four_stage_envelope_configuration.json").write_text(
+    (output / "colour_envelope_configuration.json").write_text(
         json.dumps(configuration, indent=2) + "\n"
     )
     print("Output:", output)
@@ -4926,6 +4800,11 @@ def main(args: argparse.Namespace | None = None) -> Path:
     """Validate the request, dispatch paired analyses, or run one system."""
     if args is None:
         args = interactive(default_configuration())
+    from dynamic_color_cut_common import run_info_value
+
+    if run_info_value(Path(args.run_dir), "synthetic_schema") == "compact-extincted":
+        print("Legacy population: saved magnitudes already include Galactic extinction. "
+              "Regenerate the population for an envelope without extinction.")
     band1, band2, pair, edges, centres = validate_analysis_arguments(args)
     combined_output = dispatch_dual_system_analysis(args, band1, band2, pair)
     if combined_output is not None:

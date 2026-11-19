@@ -10,79 +10,13 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from dynamic_color_cut_common import bootstrap_percentiles_batched
+STAGES = ("no_m5", "m5")
+M5_STAGES = frozenset({"m5"})
 
-
-RUBIN_MW_R = {
-    "u": 4.757217815396922,
-    "g": 3.6605664439892616,
-    "r": 2.70136780871597,
-    "i": 2.0536599130965882,
-    "z": 1.5900964472616756,
-    "y": 1.3077049588254708,
-}
-
-PS1_MW_R = {
-    "g": 3.172,
-    "r": 2.271,
-    "i": 1.682,
-    "z": 1.322,
-    "y": 1.087,
-}
-
-ZTF_MW_R = {
-    "g": 3.303,
-    "r": 2.285,
-    "i": 1.698,
-}
-
-MW_R_BY_SYSTEM = {
-    "lsst": RUBIN_MW_R,
-    "ps1": PS1_MW_R,
-    "ztf": ZTF_MW_R,
-}
-
-# q is the lower percentile of the symmetric p_q--p_(100-q) envelope.
 DEFAULT_TAIL_GRID = (
     "0.02,0.05,0.1,0.25,0.5,0.53,1,2.5,5,10,16,20,25,30,35,"
     "40,42,44,45,46,47,48,49,50"
 )
-
-STAGES = (
-    "intrinsic_no_m5_no_mw",
-    "no_m5_with_mw",
-    "m5_no_mw",
-    "m5_with_mw",
-)
-
-MW_EXTINCTED_STAGES = frozenset({"no_m5_with_mw", "m5_with_mw"})
-M5_STAGES = frozenset({"m5_no_mw", "m5_with_mw"})
-
-# Preserve the historical bootstrap streams of the original three stages.
-STAGE_BOOTSTRAP_SEED_OFFSETS = {
-    "intrinsic_no_m5_no_mw": 1,
-    "m5_no_mw": 2,
-    "m5_with_mw": 3,
-    "no_m5_with_mw": 4,
-}
-
-
-def event_extinction_mag(
-    metadata_row: pd.Series,
-    photometric_system: str,
-    band: str,
-) -> float:
-    """Return the stored A_band, or reconstruct it from E(B-V)."""
-    column = f"A_{photometric_system}_{band}_mw"
-    if column in metadata_row.index:
-        value = pd.to_numeric(
-            pd.Series([metadata_row[column]]), errors="coerce"
-        ).iloc[0]
-        if np.isfinite(value):
-            return float(value)
-    ebv = float(metadata_row["ebv_mw"])
-    return float(MW_R_BY_SYSTEM[photometric_system][band] * ebv)
-
 
 def select_metadata_subset(
     metadata: pd.DataFrame,
@@ -106,70 +40,86 @@ def select_metadata_subset(
 def percentile_diagnostics(
     values: np.ndarray,
     lower_grid: list[float],
-    n_boot: int,
-    bootstrap_threshold: float,
-    minimum_tail_events: float,
-    rng: np.random.Generator,
 ) -> tuple[pd.DataFrame, dict[str, float] | None]:
-    """Validate percentiles and retain the widest valid symmetric envelope."""
-    lower = sorted(set(float(q) for q in lower_grid if 0.0 < q <= 50.0))
-    percentiles = sorted(set(lower + [100.0 - q for q in lower] + [50.0]))
-    estimate, boot16, boot84, half = bootstrap_percentiles_batched(
-        values, percentiles, n_boot, rng
-    )
-    n_values = len(values)
-    rows = []
-    for q, value, low, high, width in zip(
-        percentiles, estimate, boot16, boot84, half
-    ):
-        expected_tail = n_values * min(q, 100.0 - q) / 100.0
-        width_valid = bool(np.isfinite(width) and width <= bootstrap_threshold)
-        tail_valid = bool(expected_tail >= minimum_tail_events)
-        rows.append(
-            {
-                "percentile": q,
-                "value": value,
-                "bootstrap_p16": low,
-                "bootstrap_p84": high,
-                "bootstrap_half_width_68": width,
-                "expected_nearest_tail_events": expected_tail,
-                "bootstrap_width_valid": width_valid,
-                "tail_support_valid": tail_valid,
-                "percentile_valid": bool(width_valid and tail_valid),
-            }
-        )
-    diagnostics = pd.DataFrame(rows)
-    by_q = diagnostics.set_index("percentile")
-    median_valid = bool(by_q.loc[50.0, "percentile_valid"])
-    valid_pairs = [
-        q
-        for q in lower
-        if median_valid
-        and bool(by_q.loc[q, "percentile_valid"])
-        and bool(by_q.loc[100.0 - q, "percentile_valid"])
-    ]
-    if not valid_pairs:
-        return diagnostics, None
+    """Compute one fixed empirical percentile interval without resampling."""
 
-    q_low = min(valid_pairs)
-    q_high = 100.0 - q_low
-    selected = {
-        "low_percentile": q_low,
-        "high_percentile": q_high,
-        "color_min": float(by_q.loc[q_low, "value"]),
-        "color_median": float(by_q.loc[50.0, "value"]),
-        "color_max": float(by_q.loc[q_high, "value"]),
-        "low_bootstrap_half_width_68": float(
-            by_q.loc[q_low, "bootstrap_half_width_68"]
-        ),
-        "median_bootstrap_half_width_68": float(
-            by_q.loc[50.0, "bootstrap_half_width_68"]
-        ),
-        "high_bootstrap_half_width_68": float(
-            by_q.loc[q_high, "bootstrap_half_width_68"]
-        ),
-        "expected_lower_tail_events": float(n_values * q_low / 100.0),
-        "expected_upper_tail_events": float(n_values * q_low / 100.0),
-        "nominal_coverage_percent": float(q_high - q_low),
-    }
-    return diagnostics, selected
+    finite_values = np.asarray(values, dtype=float)
+    finite_values = finite_values[np.isfinite(finite_values)]
+    lower = list(dict.fromkeys(
+        float(q) for q in lower_grid if 0.0 <= q <= 50.0
+    ))
+    percentiles = sorted(set(lower + [100.0 - q for q in lower] + [50.0]))
+    if not len(finite_values) or not percentiles:
+        return pd.DataFrame(), None
+
+    estimates = np.percentile(finite_values, percentiles, method="linear")
+    n_values = len(finite_values)
+    rows: list[dict[str, object]] = []
+    for percentile, estimate in zip(percentiles, estimates):
+        expected_tail = (
+            n_values * min(percentile, 100.0 - percentile) / 100.0
+        )
+        rows.append({
+            "percentile": percentile,
+            "value": float(estimate),
+            "expected_nearest_tail_events": expected_tail,
+            "percentile_valid": True,
+            "estimator": "numpy.percentile(method='linear')",
+        })
+
+    diagnostics = pd.DataFrame(rows)
+    return diagnostics, select_fixed_percentile_interval(
+        diagnostics, n_values, lower
+    )
+
+
+def select_fixed_percentile_interval(
+    diagnostics: pd.DataFrame,
+    n_values: int,
+    lower_sequence: list[float],
+) -> dict[str, float | str | bool] | None:
+    """Return the single fixed interval requested by the user."""
+    if diagnostics.empty:
+        return None
+
+    by_percentile = diagnostics.set_index("percentile")
+    if 50.0 not in by_percentile.index:
+        return None
+    median = by_percentile.loc[50.0]
+    if not bool(median["percentile_valid"]):
+        return None
+
+    sequence = list(dict.fromkeys(
+        float(q) for q in lower_sequence if 0.0 <= float(q) <= 50.0
+    ))
+    for rank, q_low in enumerate(sequence, start=1):
+        q_high = 100.0 - q_low
+        if q_low == 50.0:
+            low = high = median
+            definition = "median_only"
+        else:
+            if q_low not in by_percentile.index or q_high not in by_percentile.index:
+                continue
+            low = by_percentile.loc[q_low]
+            high = by_percentile.loc[q_high]
+            if not (
+                bool(low["percentile_valid"])
+                and bool(high["percentile_valid"])
+            ):
+                continue
+            definition = f"p{q_low:g}-p{q_high:g}"
+
+        return {
+            "low_percentile": q_low,
+            "high_percentile": q_high,
+            "color_min": float(low["value"]),
+            "color_median": float(median["value"]),
+            "color_max": float(high["value"]),
+            "expected_lower_tail_events": float(n_values * q_low / 100.0),
+            "expected_upper_tail_events": float(n_values * q_low / 100.0),
+            "nominal_coverage_percent": float(q_high - q_low),
+            "envelope_definition": definition,
+            "selection_rank": rank,
+            "median_only": bool(q_low == 50.0),
+        }
+    return None

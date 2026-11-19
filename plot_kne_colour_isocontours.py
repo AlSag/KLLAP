@@ -310,20 +310,6 @@ def load_event_colours(args, root, metadata, bands, times, depths):
         selection_magnitudes = [
             interpolate_band(selection, band, evaluation_times) for band in bands
         ]
-        if args.stage not in envelope_core.MW_EXTINCTED_STAGES:
-            magnitudes = [
-                values - envelope_core.event_extinction_mag(
-                    row, args.photometric_system, band
-                )
-                for values, band in zip(magnitudes, bands)
-            ]
-            if args.stage in envelope_core.M5_STAGES:
-                selection_magnitudes = [
-                    values - envelope_core.event_extinction_mag(
-                        row, selection_system, band
-                    )
-                    for values, band in zip(selection_magnitudes, bands)
-                ]
         finite = np.isfinite(magnitudes[0]) & np.isfinite(magnitudes[1])
         supported[index] = finite
         colour[index] = magnitudes[0] - magnitudes[1]
@@ -338,7 +324,7 @@ def load_event_colours(args, root, metadata, bands, times, depths):
         raise ValueError(f"Aucune couleur {args.color_pair} disponible")
     return colour, supported, depth_pass
 
-COMPARE_STAGES = ("compare_no_mw", "compare_with_mw")
+COMPARE_STAGES = ("compare",)
 STAGE_CHOICES = (*STAGES, *COMPARE_STAGES)
 MASS_AXIS_LABELS = {
     "log10_mej_dyn": r"$M_{\mathrm{ej}}^{\mathrm{dyn}}\ [M_\odot]$",
@@ -370,7 +356,7 @@ def default_configuration() -> argparse.Namespace:
     """Return documented defaults before the terminal questions."""
     return argparse.Namespace(
         run_dir=None, color_pair="g-r", photometric_system="lsst",
-        stage="compare_no_mw", t_min=0.4, t_max=7.2, bin_width=0.4,
+        stage="compare", t_min=0.4, t_max=7.2, bin_width=0.4,
         time_frame="observer",
         parameter_pairs="log10_mej_dyn:log10_mej_wind",
         contour_mode="fixed", contour_levels="-3:3:1", contour_step=1.0,
@@ -379,7 +365,7 @@ def default_configuration() -> argparse.Namespace:
         m5_percentile=75.0, m5_scenario=None,
         threshold_scope="common_global", m5_quantile_table=None,
         ztf_m5_g=None, ztf_m5_r=None, ztf_m5_i=None, max_events=0,
-        grid_size=20, minimum_cell_events=20, smooth_sigma=1.0,
+        grid_size=20, smooth_sigma=1.0,
         panels_per_page=4, seed=20261019, output_dir=None,
         overwrite=False,
     )
@@ -399,17 +385,11 @@ def interactive(args: argparse.Namespace) -> argparse.Namespace:
     args.stage = choose(
         "Sorties photométriques",
         [
-            (STAGES[0], "Sans m5, sans MW"),
-            (STAGES[1], "Sans m5, avec MW"),
-            (STAGES[2], "Avec m5, sans MW"),
-            (STAGES[3], "Avec m5, avec MW"),
+            ("no_m5", "Sans coupure m5"),
+            ("m5", "Avec coupure m5"),
             (
-                "compare_no_mw",
-                "Deux sorties comparables : sans m5 et avec m5, sans MW",
-            ),
-            (
-                "compare_with_mw",
-                "Deux sorties comparables : sans m5 et avec m5, avec MW",
+                "compare",
+                "Deux sorties comparables : sans m5 et avec m5",
             ),
         ],
         args.stage,
@@ -477,9 +457,6 @@ def interactive(args: argparse.Namespace) -> argparse.Namespace:
             args.m5_quantile_table = Path(explicit) if explicit else None
     args.max_events = int(ask("Événements analysés (0 = tous)", args.max_events))
     args.grid_size = int(ask("Cellules par axe", args.grid_size))
-    args.minimum_cell_events = int(
-        ask("Couleurs minimales par cellule", args.minimum_cell_events)
-    )
     args.smooth_sigma = float(
         ask("Lissage des contours [cellules]", args.smooth_sigma)
     )
@@ -497,34 +474,22 @@ def interactive(args: argparse.Namespace) -> argparse.Namespace:
 
 
 def stage_uses_m5(stage: str) -> bool:
-    return stage in {"m5_no_mw", "m5_with_mw", *COMPARE_STAGES}
+    return stage in {"m5", *COMPARE_STAGES}
 
 
 def stage_plan(stage: str):
     """Return the loading convention and output-stage availability masks."""
     plans = {
-        "intrinsic_no_m5_no_mw": (
-            "intrinsic_no_m5_no_mw",
-            (("intrinsic_no_m5_no_mw", "model"),),
+        "no_m5": (
+            "no_m5",
+            (("no_m5", "model"),),
         ),
-        "no_m5_with_mw": (
-            "no_m5_with_mw",
-            (("no_m5_with_mw", "model"),),
-        ),
-        "m5_no_mw": ("m5_no_mw", (("m5_no_mw", "depth"),)),
-        "m5_with_mw": ("m5_with_mw", (("m5_with_mw", "depth"),)),
-        "compare_no_mw": (
-            "m5_no_mw",
+        "m5": ("m5", (("m5", "depth"),)),
+        "compare": (
+            "m5",
             (
-                ("intrinsic_no_m5_no_mw", "model"),
-                ("m5_no_mw", "depth"),
-            ),
-        ),
-        "compare_with_mw": (
-            "m5_with_mw",
-            (
-                ("no_m5_with_mw", "model"),
-                ("m5_with_mw", "depth"),
+                ("no_m5", "model"),
+                ("m5", "depth"),
             ),
         ),
     }
@@ -633,7 +598,6 @@ def parameter_colour_grid(
     available: np.ndarray,
     x_edges: np.ndarray,
     y_edges: np.ndarray,
-    minimum_cell_events: int,
     smooth_sigma: float,
 ):
     mask = available & np.isfinite(x) & np.isfinite(y) & np.isfinite(colour)
@@ -657,7 +621,7 @@ def parameter_colour_grid(
     else:
         count = np.zeros(shape, dtype=float)
         p16 = p50 = p84 = np.full(shape, np.nan)
-    supported = (count >= minimum_cell_events) & np.isfinite(p50)
+    supported = (count > 0) & np.isfinite(p50)
     raw = np.where(supported, p50, np.nan)
     if smooth_sigma > 0 and supported.any():
         numerator = gaussian_filter(
@@ -685,7 +649,6 @@ def parameter_colour_grid(
         "supported": supported,
         "smoothed_p50": smoothed,
         "N_available": int(mask.sum()),
-        "minimum_cell_events": int(minimum_cell_events),
     }
 
 
@@ -845,7 +808,7 @@ def draw_panel(
     ax.set_title(
         f"{time_low:g}–{time_high:g} j  ·  "
         f"N={grid['N_available']:,}  ·  "
-        f"cellules N≥{grid.get('minimum_cell_events', '?')}={supported_cells:,}",
+        f"cellules non vides={supported_cells:,}",
         fontsize=9.5,
     )
     ax.set_facecolor("#e4e6e8")
@@ -1025,8 +988,6 @@ def run_analysis(args: argparse.Namespace) -> None:
         raise ValueError("Paire de couleurs invalide pour le système choisi")
     if args.max_events < 0 or args.grid_size < 5:
         raise ValueError("--max-events doit être >= 0 et --grid-size >= 5")
-    if args.minimum_cell_events < 1:
-        raise ValueError("--minimum-cell-events doit être >= 1")
     if not np.isfinite(args.smooth_sigma) or args.smooth_sigma < 0:
         raise ValueError("--smooth-sigma doit être fini et >= 0")
     if args.panels_per_page < 1:
@@ -1157,14 +1118,13 @@ def run_analysis(args: argparse.Namespace) -> None:
                     available[:, index],
                     x_edges,
                     y_edges,
-                    args.minimum_cell_events,
                     args.smooth_sigma,
                 )
                 grids.append(grid)
                 row = {
                     "stage": stage,
                     "m5_percentile": (
-                        args.m5_percentile if stage.startswith("m5_") else np.nan
+                        args.m5_percentile if stage == "m5" else np.nan
                     ),
                     "x_parameter": x_name,
                     "y_parameter": y_name,

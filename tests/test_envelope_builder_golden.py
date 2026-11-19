@@ -78,12 +78,7 @@ class EnvelopeBuilderGoldenTest(unittest.TestCase):
                 "t_min": 0.4,
                 "t_max": 1.6,
                 "bin_width": 0.4,
-                "n_boot": 30,
-                "bootstrap_threshold_mag": 10.0,
-                "minimum_events": 2,
-                "minimum_tail_events": 0.0,
-                "train_fraction": 0.7,
-                "validation_fraction": 0.15,
+                "envelope_lower_percentile": 1.0,
                 "seed": 12345,
                 "colored_plot_sizes": "2",
                 "outlier_table_plot_size": 2,
@@ -96,43 +91,35 @@ class EnvelopeBuilderGoldenTest(unittest.TestCase):
 
             summary = pd.read_csv(output / "stage_summary.csv")
             self.assertEqual(summary["stage"].tolist(), list(builder.STAGES))
-            self.assertEqual(summary["N_valid_bins_anywhere"].tolist(), [2] * 4)
+            self.assertEqual(summary["N_valid_bins_anywhere"].tolist(), [2] * 2)
             self.assertEqual(
-                summary["N_initial_consecutive_valid_bins"].tolist(), [2] * 4
+                summary["N_initial_consecutive_valid_bins"].tolist(), [2] * 2
             )
             np.testing.assert_allclose(
-                summary["last_initial_consecutive_time_days"], [1.2] * 4
+                summary["last_initial_consecutive_time_days"], [1.2] * 2
             )
-            self.assertEqual(summary["N_native_population_points"].tolist(), [36] * 4)
+            self.assertEqual(summary["N_native_population_points"].tolist(), [36] * 2)
 
-            stage_dir = output / "intrinsic_no_m5_no_mw"
+            stage_dir = output / "no_m5"
             rules = pd.read_csv(stage_dir / "dynamic_color_cut_rules.csv")
-            self.assertEqual(rules["N_train_events"].tolist(), [8, 8])
+            self.assertEqual(rules["N_population_events"].tolist(), [12, 12])
             np.testing.assert_allclose(
-                rules["color_median"], [0.0900011063, 0.1300010681], atol=2e-6
+                rules["color_median"], [0.03, 0.07], atol=2e-6
             )
             np.testing.assert_allclose(
-                rules["color_min"], [-0.2398317726, -0.1998313904], atol=2e-6
+                rules["color_min"], [-0.2934, -0.2534], atol=2e-6
             )
             np.testing.assert_allclose(
-                rules["color_max"], [0.3599147038, 0.3999150848], atol=2e-6
+                rules["color_max"], [0.3534, 0.3934], atol=2e-6
             )
 
             availability = pd.read_csv(
                 stage_dir / "envelope_availability_diagnostics.csv"
             )
-            self.assertEqual(availability["N_train_model_supported"].tolist(), [8, 8, 0])
+            self.assertEqual(availability["N_population_model_supported"].tolist(), [12, 12, 0])
             self.assertEqual(
                 availability["candidate_envelope_valid"].tolist(), [True, True, False]
             )
 
-            split = pd.read_csv(output / "event_split.csv")
-            self.assertEqual(
-                split["split"].tolist(),
-                ["validation", "train", "test", "train", "train", "test",
-                 "train", "train", "train", "test", "train", "train"],
-            )
-
-
-if __name__ == "__main__":
-    unittest.main()
+            ids = pd.read_csv(output / "event_population.csv")["event_id"]
+            self.assertEqual(set(ids), set(range(12)))
