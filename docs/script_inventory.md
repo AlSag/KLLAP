@@ -1,6 +1,6 @@
 # Script inventory
 
-The repository exposes exactly eight public workflows. Each creates a distinct
+The repository exposes exactly ten public workflows. Each creates a distinct
 scientific product, owns an interactive terminal interface, and can be imported
 without starting a calculation.
 
@@ -12,10 +12,12 @@ without starting a calculation.
 | `generate_kne_lightcurves.py` | KNe populations, synthetic or observed-like light curves and metadata |
 | `build_color_envelopes.py` | colour tracks, percentile envelopes and stage comparisons |
 | `analyze_envelope_population_convergence_fast.py` | nested-sample convergence tables and figures |
-| `plot_colour_envelope_realizations.py` | realization comparisons and bootstrap distributions |
+| `plot_colour_envelope_realizations.py` | realization comparisons and empirical percentile comparisons |
 | `plot_kne_colour_isocontours.py` | parameter-space KNe-count maps and median iso-colour contours |
 | `analyze_kne_latitude.py` | population, paired-bin and low/high-cut latitude products |
 | `run_latitude_experiment.py` | complete paired latitude-bin generation and comparison |
+| `snia_parquet_to_simu_input.py` | BOOM export using supplied SN Ia errors and m5 selection |
+| `compute_color_filter_efficiency.py` | exact-range BOOM efficiency audit |
 
 Every public workflow is launched as `python SCRIPT.py`. Scientific automation
 imports an explicit default-configuration function and a run function rather
@@ -29,7 +31,7 @@ Only definitions used by more than one public workflow remain separate:
 - `kne_population_io.py`: Parquet/CSV discovery and population metadata;
 - `kne_m5.py`: m5 scenarios and depth-table discovery;
 - `kne_envelope_core.py`: envelope stages and statistical-support rules;
-- `dynamic_color_cut_common.py`: colour matching and bootstrap helpers.
+- `dynamic_color_cut_common.py`: colour matching and rule evaluation.
 
 These files do not create standalone products and are not public commands.
 

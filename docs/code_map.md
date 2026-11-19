@@ -1,6 +1,6 @@
 # Code map
 
-This map identifies the eight product-producing scripts and the five genuinely
+This map identifies the ten product-producing scripts and the five genuinely
 shared implementation modules in the reviewable pipeline.
 
 ## Public product-producing scripts
@@ -8,13 +8,15 @@ shared implementation modules in the reviewable pipeline.
 | Script | Interface block | Scientific block | Figure/output block |
 |---|---|---|---|
 | `get_opsim_baseline.py` | survey and sampling questions | OpSim selection, coordinates, dust and depth statistics | visit, depth and sky diagnostics |
-| `generate_kne_lightcurves.py` | model, population, storage and seed questions | physical draws, model evaluation, interpolation, extinction and selection | tables, metadata and diagnostic light curves |
-| `build_color_envelopes.py` | population, colour, m5 and support questions | colour interpolation, stage masks, bootstrap and percentiles | envelopes and comparison products |
-| `analyze_envelope_population_convergence_fast.py` | nested sizes, tolerances and bootstrap questions | value and temporal-extent convergence | summary tables and convergence figures |
-| `plot_colour_envelope_realizations.py` | realization, time and validity questions | nested prefixes, percentiles, tails and bootstrap | realization and bootstrap-distribution figures |
+| `generate_kne_lightcurves.py` | model, population, storage and seed questions | physical draws, model evaluation, interpolation and depth selection | tables, metadata and diagnostic light curves |
+| `build_color_envelopes.py` | population, colour, m5 and percentile questions | colour interpolation, stage masks, empirical percentiles | envelopes and comparison products |
+| `analyze_envelope_population_convergence_fast.py` | nested sizes and tolerance questions | value and temporal-extent convergence | summary tables and convergence figures |
+| `plot_colour_envelope_realizations.py` | realization, time and validity questions | nested prefixes, empirical percentiles | realization and realization figures |
 | `plot_kne_colour_isocontours.py` | plane, time, m5, axis-domain and contour questions | population loading, cell counts, cell medians and supported-cell smoothing | KNe-count heatmaps with individual and overview median iso-colour maps |
-| `analyze_kne_latitude.py` | analysis-mode and method-specific questions | population losses, paired-bin bootstrap and moving-cut plateau | latitude tables and figures |
+| `analyze_kne_latitude.py` | analysis-mode and method-specific questions | population losses, paired-bin counts and moving-cut plateau | latitude tables and figures |
 | `run_latitude_experiment.py` | experiment and resume questions | paired generation/analysis configuration | complete latitude experiment outputs |
+| `snia_parquet_to_simu_input.py` | paths, shift and overwrite questions | supplied errors, m5 selection and timestamps | per-event BOOM CSVs and summary |
+| `compute_color_filter_efficiency.py` | paths and inclusive filename indices | photometry audit and ID matching | audit CSV and efficiency JSON |
 
 ## Shared modules
 
@@ -24,7 +26,7 @@ shared implementation modules in the reviewable pipeline.
 | `kne_population_io.py` | identical population discovery and metadata rules across analyses |
 | `kne_m5.py` | one canonical interpretation of named depth scenarios |
 | `kne_envelope_core.py` | one canonical set of stages and statistical-support definitions |
-| `dynamic_color_cut_common.py` | identical colour matching and bootstrap helpers across workflows |
+| `dynamic_color_cut_common.py` | identical colour matching and rule evaluation across workflows |
 
 A shared module is retained only when copying it would create competing
 scientific definitions. It has no terminal entry point and produces no output

@@ -136,9 +136,8 @@ This is a spot check, not validation of the whole prior range.
 
 Outputs remain `summary.csv`, optional `summary.parquet`, synthetic shards,
 optional diagnostic PNGs, `run_info.txt` and `runtime_performance.json`.
-Synthetic magnitudes contain foreground MW extinction, as in the existing
-generator. The existing envelope builder constructs the corrected and
-MW-present stages using the event extinction metadata.
+Synthetic magnitudes are saved without foreground MW extinction. The envelope
+builder uses them directly, with stages `no_m5` and `m5`.
 
 The summary records the four Metzger parameters, model name and configuration.
 `run_info.txt` also records the installed FIESTA version, implementation-file

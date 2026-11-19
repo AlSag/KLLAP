@@ -1,6 +1,6 @@
 # Reviewable pipeline architecture
 
-The refactoring deliberately favors eight understandable product-producing
+The refactoring deliberately favors ten understandable product-producing
 scripts over a large collection of thin wrappers. A reviewer can open the
 script named in a figure or table and find three labelled concerns in the same
 file:
@@ -44,10 +44,9 @@ constructing subprocess commands.
 Importing a public script must not prompt, load a FIESTA model, create a run,
 or write a figure. Tests enforce this boundary.
 
-For iso-colour products, population counts and colour contours have distinct
-support rules: every non-empty parameter cell may appear in the count heatmap,
-whereas a median-colour contour uses only cells meeting the requested minimum
-event count. Full surrogate bounds may be displayed without extending the
+For iso-colour products, population counts and colour contours use every
+nonempty parameter cell. No minimum event count is imposed. Empty cells remain
+masked after smoothing. Full surrogate bounds may be displayed without extending the
 scientific grid beyond the population actually sampled.
 
 ## Shared definitions
@@ -59,8 +58,8 @@ Five small modules prevent duplication of scientific conventions:
 | `kne_pipeline_common.py` | data formats, OpSim quantities and posterior loading |
 | `kne_population_io.py` | population storage discovery and metadata selection |
 | `kne_m5.py` | depth scenarios and m5 table lookup |
-| `kne_envelope_core.py` | envelope stages, tails and bootstrap-support rules |
-| `dynamic_color_cut_common.py` | colour matching and bootstrap utilities |
+| `kne_envelope_core.py` | envelope stages, empirical percentiles and nonempty-bin support |
+| `dynamic_color_cut_common.py` | colour matching and rule evaluation |
 
 They are libraries, not commands. Calculations used by only one workflow were
 moved back into that public script, including model backends, plots,
@@ -71,7 +70,7 @@ convergence variants, iso-colour population transforms, and latitude methods.
 `analyze_kne_latitude.py` contains three explicit scientific sections:
 
 - availability and losses inside one population;
-- paired bootstrap comparison of disjoint bins;
+- paired comparison of disjoint bins;
 - stability of a moving low/high cut.
 
 `run_latitude_experiment.py` is orchestration rather than a fourth latitude
@@ -87,7 +86,7 @@ The refactoring preserves these review-critical rules:
 - the largest convergence sample is the reference;
 - nested samples remain reproducible;
 - m5 cuts require both colour bands;
-- bootstrap uncertainty and tail support remain distinct criteria;
+- every nonempty bin or parameter cell is retained and its count is reported;
 - unsupported iso-colour cells remain masked after smoothing;
 - latitude-bin populations reuse one intrinsic catalogue and event identifiers.
 

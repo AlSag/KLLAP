@@ -12,9 +12,9 @@ documentation, tests, and metadata required to review the pipeline.
 
 ## Public workflows
 
-Exactly eight root-level scripts create scientific products. Every one is
+Ten root-level scripts create scientific products. Every one is
 started with a short command and then configured through terminal questions;
-there is no second command-line interface based on long option lists.
+no long option list is required. The BOOM utilities also retain optional arguments for automation.
 
 | Step | Script | Main products |
 |---:|---|---|
@@ -22,10 +22,12 @@ there is no second command-line interface based on long option lists.
 | 2 | `generate_kne_lightcurves.py` | physical KNe populations, synthetic or LSST-like light curves, run metadata |
 | 3 | `build_color_envelopes.py` | colour populations, percentile envelopes and stage comparisons |
 | 4 | `analyze_envelope_population_convergence_fast.py` | percentile-value and temporal-extent convergence tables and figures |
-| 5 | `plot_colour_envelope_realizations.py` | comparisons across independent realizations and bootstrap distributions |
+| 5 | `plot_colour_envelope_realizations.py` | empirical percentile comparisons across independent realizations |
 | 6 | `plot_kne_colour_isocontours.py` | population-count maps and median iso-colour contours in physical-parameter space |
 | 7 | `analyze_kne_latitude.py` | population losses, paired-bin comparisons, or low/high plateau diagnostics |
 | 8 | `run_latitude_experiment.py` | complete paired latitude-bin generation and analysis workflow |
+| 9 | `snia_parquet_to_simu_input.py` | SN Ia Parquet to BOOM CSVs, preserving supplied photometric errors |
+| 10 | `compute_color_filter_efficiency.py` | efficiency audit for the exact input-index range processed by BOOM |
 
 Run a workflow with, for example:
 
@@ -44,12 +46,33 @@ shared by several workflows:
 - `kne_pipeline_common.py`: stable run formats, OpSim quantities, and posterior loading;
 - `kne_population_io.py`: shared Parquet/CSV discovery and metadata loading;
 - `kne_m5.py`: canonical m5 scenarios and depth-table discovery;
-- `kne_envelope_core.py`: shared envelope stages and statistical support rules;
-- `dynamic_color_cut_common.py`: shared colour matching and bootstrap helpers.
+- `kne_envelope_core.py`: shared depth selections and empirical percentiles;
+- `dynamic_color_cut_common.py`: shared colour matching and rule evaluation.
 
 These modules do not create products when executed. The detailed ownership map
 is in [`docs/code_map.md`](docs/code_map.md), and the keep/remove decision is in
 [`docs/script_inventory.md`](docs/script_inventory.md).
+
+## BOOM exports
+
+Launch `python generate_kne_lightcurves.py`, select LSST and synthetic MJD
+products, then enable the additional BOOM export. Choose **complete** to retain
+all finite model magnitudes, including those fainter than m5. Choose
+**m5-detected** for a depth-limited benchmark. Both use Ivezić magnitude
+uncertainties, without added noise. The saved scientific population retains
+faint magnitudes for subsequent upper-limit envelope analysis.
+
+`python snia_parquet_to_simu_input.py` instead reads the SN Ia `mag` and
+`magerr` columns. It applies the band m5 cut and keeps fainter rows as encoded
+limits (`mag` empty, `mag_err=m5`), following the supplied converter's convention.
+It does not compute Ivezić errors. Check that the target VM accepts this limit
+encoding; the complete KNe export contains only finite magnitude/error pairs.
+
+`python compute_color_filter_efficiency.py` asks for the BOOM input folder,
+`stats.csv` (or its parent folder), and inclusive first/last filename indices.
+Use the exact same population and selected IDs as the VM run. It reports both
+passed/evaluable and passed/processed, with a per-event audit. Valid photometry
+is an input-availability criterion, not a claim that the colour is calculable.
 
 ## Installation
 
@@ -100,14 +123,28 @@ physical parameters event by event.
 python build_color_envelopes.py
 ```
 
-The four scientific stages are:
+The generator and envelope builder no longer add or undo Galactic extinction.
+Magnitudes are used as saved. New populations have `synthetic_schema=model`.
+An old `compact-extincted` population still contains its original attenuation;
+regenerate it to obtain a population without extinction.
 
-| Stage | m5 cut | MW extinction retained in magnitudes |
-|---|---:|---:|
-| `intrinsic_no_m5_no_mw` | no | no |
-| `no_m5_with_mw` | no | yes |
-| `m5_no_mw` | yes | no |
-| `m5_with_mw` | yes | yes |
+| Stage | Depth selection |
+|---|---|
+| `no_m5` | Every finite supported colour |
+| `m5` | Both bands meet the selected limiting depths |
+
+Every selected event participates in estimation: there is no training split.
+Choose the fixed interval in the terminal, for example p1–p99 or p16–p84.
+There is no resampling uncertainty calculation or minimum count of 20/30 events.
+A single finite value defines an empirical quantile; an empty bin stays undefined.
+Counts are exported beside the percentiles.
+
+For LSST or ZTF, the `m5` stage can additionally plot the contribution from
+upper limits in the first colour band: `g_lim-r`, `r_lim-i`, `i_lim-z`, etc.
+Hatching shows only the part extending beyond the detection-only interval;
+it has no median curve. These are percentiles of colour-limit values, with
+identification intervals saved separately. Two band limits do not identify a
+colour, and an unsupported model point is not a non-detection.
 
 The terminal interface can retain time since merger or align every KNe and
 SN Ia to a peak in either band of the requested colour. Peak-relative
@@ -118,8 +155,8 @@ is used as the temporal reference. SN Ia peaks remain strict interior peaks.
 Unresolved events and boundary fallbacks are identified in dedicated
 peak-diagnostic CSV files. Merger-relative interpolation retains the historical
 logarithmic-positive-time convention. The saved configuration records the
-temporal reference, peak rule, bootstrap, tail-support, depth, and
-population-split conventions.
+temporal reference, peak rule, selected percentiles, limiting depths, and
+population membership.
 
 ### 4. Measure convergence
 
@@ -133,22 +170,22 @@ repetitions test sensitivity to the sampled events. The analysis keeps two
 questions separate:
 
 1. Are percentile values stable within the selected magnitude tolerance?
-2. Does the statistically supported envelope reach the reference temporal
+2. Does the nonempty envelope reach the reference temporal
    extent within the selected time tolerance?
 
 The default families are p5–p95, p16–p84, and p25–p75. See
 [`MULTI_PERCENTILE_CONVERGENCE.md`](MULTI_PERCENTILE_CONVERGENCE.md).
 
-### 5. Compare independent realizations and bootstrap distributions
+### 5. Compare independent realizations
 
 ```bash
 python plot_colour_envelope_realizations.py
 ```
 
-Each realization is an independent physical draw. Nested prefixes inside a
-realization isolate the effect of population size. Optional event bootstraps
-measure uncertainty in p16, p50, and p84 and can produce the focused bootstrap-
-distribution figures.
+Each realization is an independent physical draw. Nested prefixes inside it
+isolate the effect of population size. The figure reports empirical p16, p50
+and p84 for every nonempty bin. Repeated draws and subsets are population
+experiments, without replacement within each subset.
 
 ### 6. Map iso-colours
 
@@ -159,9 +196,9 @@ python plot_kne_colour_isocontours.py
 The script reads saved populations, computes colours without temporal
 extrapolation, and bins physical-parameter planes. The heatmap reports the
 number of stage-available KNe in every non-empty cell; requested iso-colour
-contours are calculated from the median colour in statistically supported
-cells. Smoothing can be applied to supported cells for contour presentation
-but never fills a cell without statistical support. By default, axes show the
+contours are calculated from the median colour in every nonempty
+cell. Smoothing can be applied to supported cells for contour presentation
+but never fills an empty cell. By default, axes show the
 full validity domain of a recognized surrogate. Regions outside the sampled
 population are gray: displaying the model domain does not extrapolate colours
 or invent events there.
